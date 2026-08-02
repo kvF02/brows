@@ -1,5 +1,6 @@
+use brows_adapters_morelogin::MoreLoginProfileDataMigrator;
 use brows_adapters_runtime::ManagedChromiumRuntime;
-use brows_adapters_sqlite::SqliteProfileRepository;
+use brows_adapters_sqlite::{SqliteMigrationRecordRepository, SqliteProfileRepository};
 #[cfg(test)]
 use brows_application::memory::{
     InMemoryBrowserRuntime, InMemoryProfileRepository, ManualClock, SequentialIdGenerator,
@@ -9,8 +10,8 @@ use brows_application::{
         system_native_preset, InMemoryAuditSink, InMemoryPresetCatalog, InMemoryProxyRuntime,
         SystemNativeFingerprintRuntime,
     },
-    ApplicationResult, Clock, IdGenerator, LaunchPlanCompiler, PortError, PortErrorKind,
-    PortResult, ProfileApplicationService, SessionApplicationService,
+    ApplicationResult, Clock, IdGenerator, LaunchPlanCompiler, MigrationApplicationService,
+    PortError, PortErrorKind, PortResult, ProfileApplicationService, SessionApplicationService,
 };
 use brows_domain::{
     BrowserBuild, BrowserBuildId, BrowserCapabilities, BrowserChannel, ProfileId, RuntimeTrust,
@@ -28,6 +29,7 @@ use std::{
 pub(crate) struct AppState {
     pub(crate) profiles: Arc<ProfileApplicationService>,
     pub(crate) sessions: Arc<SessionApplicationService>,
+    pub(crate) migrations: Option<Arc<MigrationApplicationService>>,
 }
 
 impl AppState {
@@ -41,9 +43,9 @@ impl AppState {
         })?;
 
         let clock = Arc::new(SystemClock);
-        let profiles = Arc::new(SqliteProfileRepository::open(
-            data_root.join("profiles.sqlite3"),
-        )?);
+        let database_path = data_root.join("profiles.sqlite3");
+        let profiles = Arc::new(SqliteProfileRepository::open(&database_path)?);
+        let migration_records = Arc::new(SqliteMigrationRecordRepository::open(&database_path)?);
         let presets = Arc::new(InMemoryPresetCatalog::default());
         let proxies = Arc::new(InMemoryProxyRuntime::default());
         let fingerprints = Arc::new(SystemNativeFingerprintRuntime);
@@ -74,7 +76,7 @@ impl AppState {
             browsers.clone(),
             proxies.clone(),
             fingerprints,
-            profile_root,
+            profile_root.clone(),
         )?);
         let profile_service = Arc::new(ProfileApplicationService::new(
             profiles.clone(),
@@ -86,19 +88,30 @@ impl AppState {
             ids.clone(),
         ));
         let session_service = Arc::new(SessionApplicationService::new(
-            profiles,
+            profiles.clone(),
             compiler,
             browsers,
             proxies,
             audit,
-            clock,
+            clock.clone(),
             ids,
             DEFAULT_MAX_CONCURRENT_SESSIONS,
         )?);
+        let migration_service = Arc::new(MigrationApplicationService::new(
+            profiles.clone(),
+            session_service.clone(),
+            Arc::new(MoreLoginProfileDataMigrator::new(
+                default_morelogin_cache_root(),
+                profile_root,
+            )?),
+            migration_records,
+            clock,
+        ));
 
         Ok(Self {
             profiles: profile_service,
             sessions: session_service,
+            migrations: Some(migration_service),
         })
     }
 
@@ -154,8 +167,19 @@ impl AppState {
         Ok(Self {
             profiles: profile_service,
             sessions: session_service,
+            migrations: None,
         })
     }
+}
+
+fn default_morelogin_cache_root() -> PathBuf {
+    [
+        PathBuf::from(r"D:\.MoreLogin\cache"),
+        PathBuf::from(r"C:\.MoreLogin\cache"),
+    ]
+    .into_iter()
+    .find(|path| path.is_dir())
+    .unwrap_or_else(|| PathBuf::from(r"D:\.MoreLogin\cache"))
 }
 
 #[derive(Debug, Default)]

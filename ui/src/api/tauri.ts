@@ -6,6 +6,8 @@ import {
   type BackupJob,
   type BrowserRuntime,
   type DiagnosticReport,
+  type LegacyMigrationInspection,
+  type LegacyMigrationRecord,
   type MoreLoginImportResult,
   type MoreLoginPreview,
   type Profile,
@@ -82,6 +84,10 @@ const handlers = Object.freeze({
   sessionList: "session_list",
   moreLoginPreview: "morelogin_preview",
   moreLoginImport: "morelogin_import",
+  legacyMigrationInspect: "legacy_migration_inspect",
+  legacyMigrationExecute: "legacy_migration_execute",
+  legacyMigrationRollback: "legacy_migration_rollback",
+  legacyMigrationList: "legacy_migration_list",
 });
 
 const prototypeRuntime: BrowserRuntime = {
@@ -120,6 +126,30 @@ export class TauriApiClient implements ApiClient {
   async importMoreLogin(sourcePath: string, rowNumbers: number[] = []): Promise<MoreLoginImportResult> {
     return this.call<MoreLoginImportResult>(handlers.moreLoginImport, {
       request: { sourcePath, rowNumbers },
+    });
+  }
+
+  async inspectLegacyMigration(profileId: string, sourceProfileId: string): Promise<LegacyMigrationInspection> {
+    return this.call<LegacyMigrationInspection>(handlers.legacyMigrationInspect, {
+      request: { profileId, sourceProfileId },
+    });
+  }
+
+  async executeLegacyMigration(profileId: string, sourceProfileId: string): Promise<LegacyMigrationRecord> {
+    return this.call<LegacyMigrationRecord>(handlers.legacyMigrationExecute, {
+      request: { profileId, sourceProfileId },
+    });
+  }
+
+  async rollbackLegacyMigration(migrationId: number): Promise<LegacyMigrationRecord> {
+    return this.call<LegacyMigrationRecord>(handlers.legacyMigrationRollback, {
+      request: { migrationId },
+    });
+  }
+
+  async listLegacyMigrations(limit = 50): Promise<LegacyMigrationRecord[]> {
+    return this.call<LegacyMigrationRecord[]>(handlers.legacyMigrationList, {
+      request: { limit },
     });
   }
 

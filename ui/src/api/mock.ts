@@ -6,6 +6,8 @@ import {
   type BackupJob,
   type BrowserRuntime,
   type DiagnosticReport,
+  type LegacyMigrationInspection,
+  type LegacyMigrationRecord,
   type MoreLoginImportResult,
   type MoreLoginPreview,
   type Profile,
@@ -88,6 +90,22 @@ export class MockApiClient implements ApiClient {
 
   async importMoreLogin(_sourcePath: string, _rowNumbers: number[] = []): Promise<MoreLoginImportResult> {
     throw new ApiError("CAPABILITY_UNSUPPORTED", "MoreLogin 导入仅在桌面版中可用");
+  }
+
+  async inspectLegacyMigration(_profileId: string, _sourceProfileId: string): Promise<LegacyMigrationInspection> {
+    throw new ApiError("CAPABILITY_UNSUPPORTED", "完整环境迁移仅在桌面版中可用");
+  }
+
+  async executeLegacyMigration(_profileId: string, _sourceProfileId: string): Promise<LegacyMigrationRecord> {
+    throw new ApiError("CAPABILITY_UNSUPPORTED", "完整环境迁移仅在桌面版中可用");
+  }
+
+  async rollbackLegacyMigration(_migrationId: number): Promise<LegacyMigrationRecord> {
+    throw new ApiError("CAPABILITY_UNSUPPORTED", "完整环境迁移仅在桌面版中可用");
+  }
+
+  async listLegacyMigrations(_limit = 50): Promise<LegacyMigrationRecord[]> {
+    return [];
   }
 
   async listProfiles(includeArchived = false): Promise<Profile[]> {

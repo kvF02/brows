@@ -16,7 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 brows-adapters-runtime = { path = "../adapters-runtime" }
-calamine = "0.30"
+brows-adapters-morelogin = { path = "../adapters-morelogin" }
 brows-adapters-sqlite = { path = "../adapters-sqlite" }
 brows-application = { path = "../application" }
 brows-contracts = { path = "../contracts" }

@@ -194,6 +194,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "brows-adapters-morelogin"
+version = "0.1.0"
+dependencies = [
+ "brows-application",
+ "brows-domain",
+ "calamine",
+ "serde",
+ "sha2",
+]
+
+[[package]]
 name = "brows-adapters-runtime"
 version = "0.1.0"
 dependencies = [
@@ -241,12 +252,12 @@ dependencies = [
 name = "brows-desktop"
 version = "0.1.0"
 dependencies = [
+ "brows-adapters-morelogin",
  "brows-adapters-runtime",
  "brows-adapters-sqlite",
  "brows-application",
  "brows-contracts",
  "brows-domain",
- "calamine",
  "serde",
  "tauri",
  "tauri-build",

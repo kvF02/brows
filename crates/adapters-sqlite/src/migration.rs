@@ -1,7 +1,7 @@
 use brows_application::{PortError, PortErrorKind, PortResult};
 use rusqlite::{Connection, TransactionBehavior};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 const MIGRATION_1: &str = r#"
 CREATE TABLE profiles (
@@ -62,6 +62,29 @@ CREATE INDEX profile_tags_search_idx
     ON profile_tags (tag_normalized, profile_id);
 "#;
 
+const MIGRATION_2: &str = r#"
+CREATE TABLE migration_records (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    profile_id TEXT NOT NULL REFERENCES profiles(id) ON DELETE RESTRICT,
+    source_kind TEXT NOT NULL CHECK (source_kind IN ('morelogin')),
+    source_profile_id TEXT NOT NULL,
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'rolled_back')),
+    started_at_ms INTEGER NOT NULL CHECK (started_at_ms >= 0),
+    completed_at_ms INTEGER CHECK (completed_at_ms IS NULL OR completed_at_ms >= started_at_ms),
+    copied_files INTEGER CHECK (copied_files IS NULL OR copied_files >= 0),
+    copied_bytes INTEGER CHECK (copied_bytes IS NULL OR copied_bytes >= 0),
+    backup_key TEXT,
+    error_summary TEXT,
+    CHECK (
+        (status = 'running' AND completed_at_ms IS NULL)
+        OR (status != 'running' AND completed_at_ms IS NOT NULL)
+    )
+) STRICT;
+
+CREATE INDEX migration_records_profile_time_idx
+    ON migration_records (profile_id, started_at_ms DESC, id DESC);
+"#;
+
 pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
     let found: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -84,6 +107,9 @@ pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
             1 => transaction
                 .execute_batch(MIGRATION_1)
                 .map_err(|error| sqlite_error("apply schema migration 1", error))?,
+            2 => transaction
+                .execute_batch(MIGRATION_2)
+                .map_err(|error| sqlite_error("apply schema migration 2", error))?,
             target => {
                 return Err(PortError::new(
                     PortErrorKind::Incompatible,

@@ -1,0 +1,13 @@
+[package]
+name = "brows-adapters-morelogin"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Read-only MoreLogin export reader and confined profile migration adapter"
+
+[dependencies]
+brows-application = { path = "../application" }
+brows-domain = { path = "../domain" }
+calamine = "0.30"
+serde = { workspace = true }
+sha2 = "0.10"

@@ -9,6 +9,8 @@ import {
   type DiagnosticReport,
   type EnvironmentPreset,
   type FingerprintScope,
+  type LegacyMigrationInspection,
+  type LegacyMigrationRecord,
   type MoreLoginPreview,
   type MoreLoginImportResult,
   type Profile,
@@ -53,6 +55,19 @@ function formatDate(value?: string): string {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(value));
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let size = value / 1024;
+  let index = 0;
+  while (size >= 1024 && index < units.length - 1) { size /= 1024; index += 1; }
+  return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[index]}`;
+}
+
+function migrationStatusLabel(status: LegacyMigrationRecord["status"]): string {
+  return { running: "进行中", completed: "已完成", failed: "失败", rolled_back: "已回滚" }[status];
 }
 
 function getErrorMessage(error: unknown): string {
@@ -370,6 +385,7 @@ function App() {
       {showMoreLoginImport && (
         <MoreLoginImportModal
           api={apiRef.current}
+          profiles={profiles}
           onClose={() => setShowMoreLoginImport(false)}
           onImported={async (count) => {
             await refresh();
@@ -728,18 +744,30 @@ function ProfileModal({
 
 function MoreLoginImportModal({
   api,
+  profiles,
   onClose,
   onImported,
 }: {
   api: ApiClient;
+  profiles: Profile[];
   onClose(): void;
   onImported(count: number): Promise<void>;
 }) {
   const [sourcePath, setSourcePath] = useState("");
   const [preview, setPreview] = useState<MoreLoginPreview>();
   const [importResult, setImportResult] = useState<MoreLoginImportResult>();
+  const [targets, setTargets] = useState(profiles);
+  const [sourceProfileId, setSourceProfileId] = useState("");
+  const [targetProfileId, setTargetProfileId] = useState("");
+  const [inspection, setInspection] = useState<LegacyMigrationInspection>();
+  const [migration, setMigration] = useState<LegacyMigrationRecord>();
+  const [history, setHistory] = useState<LegacyMigrationRecord[]>([]);
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState("");
+
+  useEffect(() => {
+    void api.listLegacyMigrations().then(setHistory).catch(() => undefined);
+  }, [api]);
 
   const inspect = async () => {
     if (!sourcePath.trim()) {
@@ -749,8 +777,13 @@ function MoreLoginImportModal({
     setBusy(true);
     setFormError("");
     try {
-      setPreview(await api.previewMoreLogin(sourcePath.trim()));
+      const result = await api.previewMoreLogin(sourcePath.trim());
+      setPreview(result);
       setImportResult(undefined);
+      setSourceProfileId(result.candidates[0]?.sourceProfileId ?? "");
+      const matched = targets.find((profile) => profile.name === result.candidates[0]?.name);
+      setTargetProfileId(matched?.id ?? targets[0]?.id ?? "");
+      setInspection(undefined);
     } catch (cause) {
       setPreview(undefined);
       setFormError(getErrorMessage(cause));
@@ -767,6 +800,12 @@ function MoreLoginImportModal({
       const result = await api.importMoreLogin(sourcePath.trim());
       setImportResult(result);
       await onImported(result.importedCount);
+      const refreshed = await api.listProfiles();
+      setTargets(refreshed);
+      const candidate = preview.candidates.find((item) => item.sourceProfileId === sourceProfileId)
+        ?? preview.candidates[0];
+      const matched = refreshed.find((profile) => profile.name === candidate?.name);
+      setTargetProfileId(matched?.id ?? refreshed[0]?.id ?? "");
       if (result.failures.length > 0) {
         setFormError(`已导入 ${result.importedCount} 个，另有 ${result.failures.length} 个失败。首个失败位于第 ${result.failures[0].rowNumber} 行：${result.failures[0].reason}`);
         return;
@@ -778,6 +817,53 @@ function MoreLoginImportModal({
     }
   };
 
+  const selectSource = (value: string) => {
+    setSourceProfileId(value);
+    setInspection(undefined);
+    setMigration(undefined);
+    const candidate = preview?.candidates.find((item) => item.sourceProfileId === value);
+    const matched = targets.find((profile) => profile.name === candidate?.name);
+    if (matched) setTargetProfileId(matched.id);
+  };
+
+  const inspectProfileData = async () => {
+    if (!targetProfileId || !sourceProfileId) return;
+    setBusy(true);
+    setFormError("");
+    try {
+      setInspection(await api.inspectLegacyMigration(targetProfileId, sourceProfileId));
+      setMigration(undefined);
+    } catch (cause) {
+      setInspection(undefined);
+      setFormError(getErrorMessage(cause));
+    } finally { setBusy(false); }
+  };
+
+  const executeMigration = async () => {
+    if (!inspection || inspection.sourceMayBeRunning) return;
+    setBusy(true);
+    setFormError("");
+    try {
+      const result = await api.executeLegacyMigration(targetProfileId, sourceProfileId);
+      setMigration(result);
+      setHistory(await api.listLegacyMigrations());
+    } catch (cause) {
+      setFormError(getErrorMessage(cause));
+      setHistory(await api.listLegacyMigrations().catch(() => history));
+    } finally { setBusy(false); }
+  };
+
+  const rollback = async (id: number) => {
+    setBusy(true);
+    setFormError("");
+    try {
+      await api.rollbackLegacyMigration(id);
+      setHistory(await api.listLegacyMigrations());
+      if (migration?.id === id) setMigration(undefined);
+    } catch (cause) { setFormError(getErrorMessage(cause)); }
+    finally { setBusy(false); }
+  };
+
   return (
     <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}>
       <section className="modal import-modal" role="dialog" aria-modal="true" aria-labelledby="morelogin-import-title">
@@ -785,7 +871,7 @@ function MoreLoginImportModal({
           <div><div className="eyebrow">SAFE LEGACY IMPORT</div><h2 id="morelogin-import-title">从 MoreLogin 导入</h2></div>
           <button className="icon-button" type="button" aria-label="关闭" disabled={busy} onClick={onClose}>×</button>
         </div>
-        <p className="modal-intro">先做只读预览。本阶段只导入环境名称与分类标签，不导入密码、2FA、Cookie、代理凭据或自定义 UA。</p>
+        <p className="modal-intro">先导入环境清单，再选择单个环境执行完整迁移。完整迁移会复制 Cookie、登录状态、历史和站点存储，并保留可回滚备份。</p>
         <label className="field-label" htmlFor="morelogin-source">MoreLogin 导出文件</label>
         <div className="import-source-row">
           <input id="morelogin-source" className="text-input" value={sourcePath} onChange={(event) => { setSourcePath(event.target.value); setPreview(undefined); }} placeholder="例如：D:\\MoreLoginPlus\\export_profile.xlsx" />
@@ -798,7 +884,7 @@ function MoreLoginImportModal({
             <div className="import-candidate-list">
               {preview.candidates.slice(0, 8).map((candidate) => (
                 <div className="import-candidate" key={candidate.rowNumber}>
-                  <div><strong>{candidate.name}</strong><small>第 {candidate.rowNumber} 行 · {candidate.tags.join(" / ") || "无标签"}</small></div>
+                  <div><strong>{candidate.name}</strong><small>第 {candidate.rowNumber} 行 · ID {candidate.sourceProfileId} · {candidate.tags.join(" / ") || "无标签"}</small></div>
                   <span>{candidate.warnings.length > 0 ? `${candidate.warnings.length} 项已忽略` : "可直接导入"}</span>
                 </div>
               ))}
@@ -810,12 +896,26 @@ function MoreLoginImportModal({
           <div className={`import-result ${importResult.failures.length > 0 ? "warning" : "success"}`} role="status">
             <strong>{importResult.failures.length > 0 ? "导入部分完成" : "导入完成"}</strong>
             <span>成功 {importResult.importedCount} 个 · 跳过 {importResult.skippedCount} 个 · 失败 {importResult.failures.length} 个</span>
-            <small>本次只迁移环境元数据，不包含浏览历史、站点存储或原登录状态。</small>
+            <small>清单导入已完成。现在可以在下方选择一个环境进行完整数据迁移。</small>
           </div>
         )}
+        {preview && (
+          <div className="migration-panel">
+            <div className="migration-title"><div><strong>完整环境迁移</strong><small>一次只迁移一个已停止的环境</small></div><span>本机原子覆盖 · 可回滚</span></div>
+            <div className="form-grid">
+              <div><label className="field-label" htmlFor="migration-source">MoreLogin 源环境</label><select id="migration-source" className="text-input" value={sourceProfileId} disabled={busy} onChange={(event) => selectSource(event.target.value)}>{preview.candidates.map((candidate) => <option key={candidate.sourceProfileId} value={candidate.sourceProfileId}>{candidate.name} · {candidate.sourceProfileId}</option>)}</select></div>
+              <div><label className="field-label" htmlFor="migration-target">Brows 目标环境</label><select id="migration-target" className="text-input" value={targetProfileId} disabled={busy} onChange={(event) => { setTargetProfileId(event.target.value); setInspection(undefined); }}><option value="">请选择</option>{targets.filter((profile) => profile.status === "stopped").map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></div>
+            </div>
+            <button className="secondary-button" type="button" disabled={busy || !sourceProfileId || !targetProfileId} onClick={() => void inspectProfileData()}>{busy && !inspection ? "预检中…" : "完整迁移预检"}</button>
+            {inspection && <div className="migration-inspection"><div><strong>{inspection.fileCount.toLocaleString()}</strong><span>文件</span></div><div><strong>{formatBytes(inspection.totalBytes)}</strong><span>数据量</span></div><div className="migration-capabilities">{[["历史", inspection.hasHistory], ["Cookie", inspection.hasCookies], ["登录状态", inspection.hasLoginData], ["LocalStorage", inspection.hasLocalStorage], ["IndexedDB", inspection.hasIndexedDb]].map(([label, present]) => <span className={present ? "present" : "missing"} key={String(label)}>{present ? "✓" : "—"} {label}</span>)}</div>{inspection.sourceMayBeRunning && <div className="form-error">检测到 MoreLogin 可能仍在使用此环境，请完全关闭后重试。</div>}</div>}
+            {inspection && !migration && <button className="primary-button migration-execute" type="button" disabled={busy || inspection.sourceMayBeRunning} onClick={() => void executeMigration()}>{busy ? "正在复制并校验…" : "确认覆盖目标环境"}</button>}
+            {migration?.status === "completed" && <div className="import-result success"><strong>完整迁移完成</strong><span>{migration.copiedFiles?.toLocaleString()} 个文件 · {formatBytes(migration.copiedBytes ?? 0)}</span><small>原目标数据已保留为本机备份，可从迁移记录回滚。</small></div>}
+          </div>
+        )}
+        {history.length > 0 && <div className="migration-history"><strong>最近迁移记录</strong>{history.slice(0, 5).map((record) => <div className="migration-history-row" key={record.id}><span>#{record.id} · {record.sourceProfileId}</span><span>{migrationStatusLabel(record.status)}</span>{record.canRollback && <button className="table-button" type="button" disabled={busy} onClick={() => void rollback(record.id)}>回滚</button>}</div>)}</div>}
         {formError && <div className="form-error" role="alert">{formError}</div>}
         <div className="modal-actions">
-          <button className="secondary-button" type="button" disabled={busy} onClick={onClose}>{importResult ? "关闭" : "取消"}</button>
+          <button className="secondary-button" type="button" disabled={busy} onClick={onClose}>关闭</button>
           {!importResult && <button className="primary-button" type="button" disabled={!preview || busy} onClick={() => void importProfiles()}>{busy && preview ? "正在导入…" : `确认导入${preview ? ` ${preview.profileCount} 个` : ""}`}</button>}
         </div>
       </section>

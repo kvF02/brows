@@ -237,6 +237,17 @@ impl SessionApplicationService {
         Ok(registry.sessions.values().map(SessionDto::from).collect())
     }
 
+    pub fn has_active_profile(
+        &self,
+        profile_id: &brows_domain::ProfileId,
+    ) -> ApplicationResult<bool> {
+        let registry = self.lock_registry()?;
+        Ok(registry
+            .sessions
+            .values()
+            .any(|session| &session.profile_id == profile_id && session.state.is_active()))
+    }
+
     /// Called by a process supervisor when Chromium exits without an explicit
     /// successful stop operation.
     pub fn record_unexpected_exit(

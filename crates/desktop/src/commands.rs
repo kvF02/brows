@@ -1,12 +1,18 @@
-use crate::morelogin::{inspect as inspect_morelogin, MoreLoginPreview};
 use crate::state::AppState;
-use brows_application::{ApplicationResult, SessionLaunchOutcome};
-use brows_contracts::{
-    BrowserBuildIdDto, BrowserSelectorDto, ErrorCode, ErrorDto, LocaleDto, PersonaDto, PresetIdDto,
-    ProfileCreateRequest, ProfileDraftDto, ProfileDto, ProfileIdRequest, ProfileListRequest,
-    ProfileRevisionRequest, ProfileUpdateRequest, SessionCancelQueuedRequest, SessionDto,
-    SessionLaunchRequest, SessionStopRequest, WindowDto,
+use brows_adapters_morelogin::{inspect_export as inspect_morelogin, MoreLoginPreview};
+use brows_application::{
+    ApplicationResult, LegacyProfileDataSummary, MigrationRecord, MigrationRecordStatus,
+    SessionLaunchOutcome,
 };
+use brows_contracts::{
+    BrowserBuildIdDto, BrowserSelectorDto, ErrorCode, ErrorDto, LegacyMigrationExecuteRequest,
+    LegacyMigrationInspectRequest, LegacyMigrationInspectionDto, LegacyMigrationListRequest,
+    LegacyMigrationRecordDto, LegacyMigrationRollbackRequest, LegacyMigrationStatusDto, LocaleDto,
+    PersonaDto, PresetIdDto, ProfileCreateRequest, ProfileDraftDto, ProfileDto, ProfileIdRequest,
+    ProfileListRequest, ProfileRevisionRequest, ProfileUpdateRequest, SessionCancelQueuedRequest,
+    SessionDto, SessionLaunchRequest, SessionStopRequest, WindowDto,
+};
+use brows_domain::ProfileId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 use tauri::State;
@@ -110,6 +116,97 @@ fn import_error(message: String) -> ErrorDto {
         code: ErrorCode::ValidationFailed,
         message,
         violations: Vec::new(),
+    }
+}
+
+fn migrations(state: &AppState) -> IpcResult<&brows_application::MigrationApplicationService> {
+    state.migrations.as_deref().ok_or_else(|| ErrorDto {
+        code: ErrorCode::CapabilityUnsupported,
+        message: "完整环境迁移在当前运行模式下不可用".to_owned(),
+        violations: Vec::new(),
+    })
+}
+
+fn profile_id(value: &brows_contracts::ProfileIdDto) -> IpcResult<ProfileId> {
+    ProfileId::new(value.as_str().to_owned()).map_err(ErrorDto::from_domain)
+}
+
+#[tauri::command]
+pub(crate) fn legacy_migration_inspect(
+    state: State<'_, AppState>,
+    request: LegacyMigrationInspectRequest,
+) -> IpcResult<LegacyMigrationInspectionDto> {
+    let summary =
+        ipc(migrations(&state)?
+            .inspect(profile_id(&request.profile_id)?, request.source_profile_id))?;
+    Ok(migration_inspection_dto(summary))
+}
+
+#[tauri::command]
+pub(crate) fn legacy_migration_execute(
+    state: State<'_, AppState>,
+    request: LegacyMigrationExecuteRequest,
+) -> IpcResult<LegacyMigrationRecordDto> {
+    let record =
+        ipc(migrations(&state)?
+            .migrate(profile_id(&request.profile_id)?, request.source_profile_id))?;
+    Ok(migration_record_dto(record))
+}
+
+#[tauri::command]
+pub(crate) fn legacy_migration_rollback(
+    state: State<'_, AppState>,
+    request: LegacyMigrationRollbackRequest,
+) -> IpcResult<LegacyMigrationRecordDto> {
+    ipc(migrations(&state)?.rollback(request.migration_id)).map(migration_record_dto)
+}
+
+#[tauri::command]
+pub(crate) fn legacy_migration_list(
+    state: State<'_, AppState>,
+    request: LegacyMigrationListRequest,
+) -> IpcResult<Vec<LegacyMigrationRecordDto>> {
+    ipc(migrations(&state)?.list(request.limit))
+        .map(|records| records.into_iter().map(migration_record_dto).collect())
+}
+
+fn migration_inspection_dto(value: LegacyProfileDataSummary) -> LegacyMigrationInspectionDto {
+    LegacyMigrationInspectionDto {
+        source_profile_id: value.source_profile_id,
+        file_count: value.file_count,
+        total_bytes: value.total_bytes,
+        has_history: value.has_history,
+        has_cookies: value.has_cookies,
+        has_login_data: value.has_login_data,
+        has_local_storage: value.has_local_storage,
+        has_indexed_db: value.has_indexed_db,
+        source_may_be_running: value.source_may_be_running,
+    }
+}
+
+fn migration_record_dto(value: MigrationRecord) -> LegacyMigrationRecordDto {
+    let can_rollback = value.status == MigrationRecordStatus::Completed
+        && value
+            .backup_key
+            .as_deref()
+            .is_some_and(|key| !key.is_empty());
+    LegacyMigrationRecordDto {
+        id: value.id,
+        profile_id: (&value.profile_id).into(),
+        source_kind: value.source_kind,
+        source_profile_id: value.source_profile_id,
+        status: match value.status {
+            MigrationRecordStatus::Running => LegacyMigrationStatusDto::Running,
+            MigrationRecordStatus::Completed => LegacyMigrationStatusDto::Completed,
+            MigrationRecordStatus::Failed => LegacyMigrationStatusDto::Failed,
+            MigrationRecordStatus::RolledBack => LegacyMigrationStatusDto::RolledBack,
+        },
+        started_at_ms: value.started_at_ms,
+        completed_at_ms: value.completed_at_ms,
+        copied_files: value.copied_files,
+        copied_bytes: value.copied_bytes,
+        can_rollback,
+        error_summary: value.error_summary,
     }
 }
 

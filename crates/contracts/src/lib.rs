@@ -868,6 +868,73 @@ pub struct BackupImportRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct LegacyMigrationInspectRequest {
+    pub profile_id: ProfileIdDto,
+    pub source_profile_id: String,
+}
+
+pub type LegacyMigrationExecuteRequest = LegacyMigrationInspectRequest;
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyMigrationRollbackRequest {
+    pub migration_id: u64,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyMigrationListRequest {
+    #[serde(default = "default_migration_list_limit")]
+    pub limit: usize,
+}
+
+fn default_migration_list_limit() -> usize { 50 }
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyMigrationInspectionDto {
+    pub source_profile_id: String,
+    pub file_count: u64,
+    pub total_bytes: u64,
+    pub has_history: bool,
+    pub has_cookies: bool,
+    pub has_login_data: bool,
+    pub has_local_storage: bool,
+    pub has_indexed_db: bool,
+    pub source_may_be_running: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LegacyMigrationStatusDto {
+    Running,
+    Completed,
+    Failed,
+    RolledBack,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct LegacyMigrationRecordDto {
+    pub id: u64,
+    pub profile_id: ProfileIdDto,
+    pub source_kind: String,
+    pub source_profile_id: String,
+    pub status: LegacyMigrationStatusDto,
+    pub started_at_ms: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_at_ms: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copied_files: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub copied_bytes: Option<u64>,
+    pub can_rollback: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_summary: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SettingsDto {
     pub max_concurrent_sessions: u32,
     pub retain_archived_days: u32,

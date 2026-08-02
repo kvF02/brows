@@ -194,6 +194,96 @@ pub trait BackupService: fmt::Debug + Send + Sync {
     fn import(&self, spec: &BackupImportSpec) -> PortResult<BackupImportPayload>;
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct LegacyProfileDataSummary {
+    pub source_profile_id: String,
+    pub file_count: u64,
+    pub total_bytes: u64,
+    pub has_history: bool,
+    pub has_cookies: bool,
+    pub has_login_data: bool,
+    pub has_local_storage: bool,
+    pub has_indexed_db: bool,
+    pub source_may_be_running: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LegacyMigrationArtifact {
+    /// Adapter-issued relative backup key. It must never contain an absolute path.
+    pub backup_key: String,
+    pub copied_files: u64,
+    pub copied_bytes: u64,
+}
+
+pub trait LegacyProfileDataMigrator: fmt::Debug + Send + Sync {
+    fn inspect(
+        &self,
+        profile_id: &ProfileId,
+        source_profile_id: &str,
+    ) -> PortResult<LegacyProfileDataSummary>;
+    fn migrate(
+        &self,
+        profile_id: &ProfileId,
+        source_profile_id: &str,
+        operation_key: &str,
+    ) -> PortResult<LegacyMigrationArtifact>;
+    fn rollback(&self, profile_id: &ProfileId, backup_key: &str) -> PortResult<()>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MigrationRecordStatus {
+    Running,
+    Completed,
+    Failed,
+    RolledBack,
+}
+
+impl MigrationRecordStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::RolledBack => "rolled_back",
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MigrationRecord {
+    pub id: u64,
+    pub profile_id: ProfileId,
+    pub source_kind: String,
+    pub source_profile_id: String,
+    pub status: MigrationRecordStatus,
+    pub started_at_ms: u64,
+    pub completed_at_ms: Option<u64>,
+    pub copied_files: Option<u64>,
+    pub copied_bytes: Option<u64>,
+    pub backup_key: Option<String>,
+    pub error_summary: Option<String>,
+}
+
+pub trait MigrationRecordRepository: fmt::Debug + Send + Sync {
+    fn begin(
+        &self,
+        profile_id: &ProfileId,
+        source_kind: &str,
+        source_profile_id: &str,
+        started_at_ms: u64,
+    ) -> PortResult<MigrationRecord>;
+    fn complete(
+        &self,
+        id: u64,
+        completed_at_ms: u64,
+        artifact: &LegacyMigrationArtifact,
+    ) -> PortResult<MigrationRecord>;
+    fn fail(&self, id: u64, completed_at_ms: u64, summary: &str) -> PortResult<MigrationRecord>;
+    fn mark_rolled_back(&self, id: u64, completed_at_ms: u64) -> PortResult<MigrationRecord>;
+    fn get(&self, id: u64) -> PortResult<MigrationRecord>;
+    fn list(&self, limit: usize) -> PortResult<Vec<MigrationRecord>>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AuditEvent {
     pub at_ms: u64,

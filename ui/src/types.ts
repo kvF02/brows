@@ -91,6 +91,7 @@ export interface ProfileInput {
 
 export interface MoreLoginCandidate {
   rowNumber: number;
+  sourceProfileId: string;
   name: string;
   tags: string[];
   hasProxy: boolean;
@@ -112,6 +113,34 @@ export interface MoreLoginImportResult {
   importedCount: number;
   skippedCount: number;
   failures: Array<{ rowNumber: number; reason: string }>;
+}
+
+export interface LegacyMigrationInspection {
+  sourceProfileId: string;
+  fileCount: number;
+  totalBytes: number;
+  hasHistory: boolean;
+  hasCookies: boolean;
+  hasLoginData: boolean;
+  hasLocalStorage: boolean;
+  hasIndexedDb: boolean;
+  sourceMayBeRunning: boolean;
+}
+
+export type LegacyMigrationStatus = "running" | "completed" | "failed" | "rolled_back";
+
+export interface LegacyMigrationRecord {
+  id: number;
+  profileId: string;
+  sourceKind: string;
+  sourceProfileId: string;
+  status: LegacyMigrationStatus;
+  startedAtMs: number;
+  completedAtMs?: number;
+  copiedFiles?: number;
+  copiedBytes?: number;
+  canRollback: boolean;
+  errorSummary?: string;
 }
 
 export interface SessionSummary {
@@ -197,6 +226,10 @@ export type CommandResult<Name extends CommandName> = CommandMap[Name]["result"]
 export interface ApiClient {
   previewMoreLogin(sourcePath: string): Promise<MoreLoginPreview>;
   importMoreLogin(sourcePath: string, rowNumbers?: number[]): Promise<MoreLoginImportResult>;
+  inspectLegacyMigration(profileId: string, sourceProfileId: string): Promise<LegacyMigrationInspection>;
+  executeLegacyMigration(profileId: string, sourceProfileId: string): Promise<LegacyMigrationRecord>;
+  rollbackLegacyMigration(migrationId: number): Promise<LegacyMigrationRecord>;
+  listLegacyMigrations(limit?: number): Promise<LegacyMigrationRecord[]>;
   listProfiles(includeArchived?: boolean): Promise<Profile[]>;
   getProfile(id: string): Promise<Profile>;
   createProfile(input: ProfileInput): Promise<Profile>;

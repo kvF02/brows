@@ -104,7 +104,7 @@ fn migration_enables_wal_and_round_trips_every_profile_field() {
     drop(repository);
     let reopened = SqliteProfileRepository::open(database.path()).unwrap();
     assert_eq!(reopened.get(&expected.id).unwrap(), expected);
-    assert_eq!(reopened.schema_version().unwrap(), 1);
+    assert_eq!(reopened.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
 }
 
 #[test]

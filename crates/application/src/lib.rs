@@ -10,6 +10,7 @@
 
 mod compiler;
 mod error;
+mod migration_service;
 pub mod memory;
 mod ports;
 mod profile_service;
@@ -21,6 +22,7 @@ mod tests;
 
 pub use compiler::{LaunchPlanCompiler, PreparedLaunch};
 pub use error::{ApplicationError, ApplicationResult};
+pub use migration_service::MigrationApplicationService;
 pub use ports::*;
 pub use profile_service::ProfileApplicationService;
 pub use session_service::{SessionApplicationService, SessionLaunchOutcome};
