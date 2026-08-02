@@ -249,7 +249,7 @@ export interface ApiClient {
   testProxy(id: string): Promise<ProxySummary>;
   removeProxy(id: string): Promise<void>;
   listDiagnostics(profileId?: string): Promise<DiagnosticReport[]>;
-  runDiagnostic(profileId: string): Promise<DiagnosticReport>;
+  runDiagnostic(profileId: string, external?: boolean): Promise<DiagnosticReport>;
   listBackups(): Promise<BackupJob[]>;
   exportBackup(
     profileId: string,

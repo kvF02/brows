@@ -294,14 +294,14 @@ export class MockApiClient implements ApiClient {
       .map((report) => ({ ...report, items: [...report.items], externalEndpoints: [...report.externalEndpoints] }));
   }
 
-  async runDiagnostic(profileId: string): Promise<DiagnosticReport> {
+  async runDiagnostic(profileId: string, external = false): Promise<DiagnosticReport> {
     const profile = this.findProfile(profileId);
     const preset = DEFAULT_PRESETS.find((item) => item.id === profile.presetId) ?? DEFAULT_PRESETS[0];
     const report: DiagnosticReport = {
       profileId,
       checkedAt: now(),
       overall: "warning",
-      externalEndpoints: [],
+      externalEndpoints: external ? ["http://checkip.amazonaws.com/"] : [],
       items: [
         {
           key: "storage",
@@ -340,7 +340,7 @@ export class MockApiClient implements ApiClient {
       checkedAt: report.checkedAt,
       issueCount: report.items.filter((item) => item.status !== "pass").length,
     };
-    return { ...report, items: [...report.items], externalEndpoints: [] };
+    return { ...report, items: [...report.items], externalEndpoints: [...report.externalEndpoints] };
   }
 
   async listBackups(): Promise<BackupJob[]> {

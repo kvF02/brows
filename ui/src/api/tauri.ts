@@ -331,8 +331,8 @@ export class TauriApiClient implements ApiClient {
     const reports = await this.call<DiagnosticReportDto[]>(handlers.diagnosticList, { request: { profileId: profileId ?? null } });
     return reports.map((report) => this.toDiagnostic(report));
   }
-  async runDiagnostic(profileId: string): Promise<DiagnosticReport> {
-    const report = await this.call<DiagnosticReportDto>(handlers.diagnosticRun, { request: { profileId, external: false } });
+  async runDiagnostic(profileId: string, external = false): Promise<DiagnosticReport> {
+    const report = await this.call<DiagnosticReportDto>(handlers.diagnosticRun, { request: { profileId, external } });
     return this.toDiagnostic(report);
   }
   async listBackups(): Promise<BackupJob[]> {

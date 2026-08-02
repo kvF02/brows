@@ -1033,6 +1033,11 @@ select.text-input { cursor: pointer; }
 .table-button:hover { border-color: rgba(143, 110, 248, 0.35); background: rgba(143, 110, 248, 0.06); }
 
 .diagnostic-toolbar { display: grid; grid-template-columns: 90px 270px 1fr; align-items: center; gap: 12px; margin-bottom: 18px; padding: 11px 13px; border: 1px solid var(--line); border-radius: 10px; background: rgba(17, 24, 42, 0.5); }
+.diagnostic-confirm-modal { width: min(590px, 100%); }
+.diagnostic-consent { display: grid; gap: 10px; padding: 16px; border: 1px solid rgba(49, 183, 147, 0.24); border-radius: 10px; background: rgba(49, 183, 147, 0.06); }
+.diagnostic-consent strong { color: #bfeadd; font-size: 13px; }
+.diagnostic-consent code { overflow-wrap: anywhere; padding: 9px 11px; border-radius: 7px; color: #91dbc7; background: rgba(5, 12, 22, 0.65); font-size: 12px; }
+.diagnostic-consent ul { margin: 0; padding-left: 19px; color: #8b96aa; font-size: 12px; line-height: 1.8; }
 .diagnostic-toolbar .field-label { margin: 0; }
 .diagnostic-toolbar .text-input { min-height: 32px; }
 .diagnostic-scope-legend { display: flex; justify-content: flex-end; gap: 6px; }

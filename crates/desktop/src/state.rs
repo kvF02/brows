@@ -1,3 +1,4 @@
+use brows_adapters_diagnostic::LocalNetworkDiagnosticRunner;
 use brows_adapters_morelogin::MoreLoginProfileDataMigrator;
 use brows_adapters_proxy::{StoredProxyRuntime, TcpProxyConnectivityTester};
 use brows_adapters_runtime::ManagedChromiumRuntime;
@@ -13,7 +14,7 @@ use brows_application::memory::{
 };
 use brows_application::{
     memory::{
-        system_native_preset, InMemoryAuditSink, InMemoryDiagnosticRunner, InMemoryPresetCatalog,
+        system_native_preset, InMemoryAuditSink, InMemoryPresetCatalog,
         SystemNativeFingerprintRuntime,
     },
     ApplicationResult, Clock, IdGenerator, LaunchPlanCompiler, MigrationApplicationService,
@@ -38,7 +39,7 @@ pub(crate) struct AppState {
     pub(crate) sessions: Arc<SessionApplicationService>,
     pub(crate) migrations: Option<Arc<MigrationApplicationService>>,
     pub(crate) proxy_management: Option<Arc<ProxyApplicationService>>,
-    pub(crate) diagnostics: Option<Arc<InMemoryDiagnosticRunner>>,
+    pub(crate) diagnostics: Option<Arc<LocalNetworkDiagnosticRunner>>,
 }
 
 impl AppState {
@@ -64,7 +65,10 @@ impl AppState {
         ));
         let fingerprints = Arc::new(SystemNativeFingerprintRuntime);
         let audit = Arc::new(InMemoryAuditSink::default());
-        let diagnostics = Arc::new(InMemoryDiagnosticRunner::new(clock.clone()));
+        let diagnostics = Arc::new(LocalNetworkDiagnosticRunner::new(
+            proxies.clone(),
+            clock.clone(),
+        ));
         let ids = Arc::new(UuidIdGenerator);
 
         presets.insert(system_native_preset())?;

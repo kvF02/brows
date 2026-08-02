@@ -969,14 +969,7 @@ function ProxyView({
   );
 }
 
-function DiagnosticsView({
-  api,
-  profiles,
-  reports,
-  onRefresh,
-  onError,
-  onNotice,
-}: {
+function DiagnosticsView({ api, profiles, reports, onRefresh, onError, onNotice }: {
   api: ApiClient;
   profiles: Profile[];
   reports: DiagnosticReport[];
@@ -986,15 +979,38 @@ function DiagnosticsView({
 }) {
   const [selectedId, setSelectedId] = useState(profiles[0]?.id ?? "");
   const [running, setRunning] = useState(false);
-  useEffect(() => { if (!profiles.some((profile) => profile.id === selectedId)) setSelectedId(profiles[0]?.id ?? ""); }, [profiles, selectedId]);
+  const [confirmExternal, setConfirmExternal] = useState(false);
+  useEffect(() => {
+    if (!profiles.some((profile) => profile.id === selectedId)) setSelectedId(profiles[0]?.id ?? "");
+  }, [profiles, selectedId]);
   const report = reports.find((item) => item.profileId === selectedId);
-  const run = async () => {
+  const run = async (external = false) => {
     if (!selectedId) return;
     setRunning(true);
-    try { await api.runDiagnostic(selectedId); await onRefresh(); onNotice("诊断完成。结果只保存在本机。"); } catch (cause) { onError(getErrorMessage(cause)); } finally { setRunning(false); }
+    try {
+      await api.runDiagnostic(selectedId, external);
+      setConfirmExternal(false);
+      await onRefresh();
+      onNotice(external ? "主动网络检查完成。结果只保存在本机。" : "本地检查完成。结果只保存在本机。");
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setRunning(false);
+    }
   };
 
-  return <section className="view-section"><div className="page-heading"><div><div className="eyebrow">ENVIRONMENT DIAGNOSTICS</div><h1>指纹与泄漏诊断</h1><p>这里展示实际生效范围，不把代理 IP 或存储隔离夸大为完整设备指纹。</p></div><button className="primary-button" type="button" disabled={!selectedId || running} onClick={() => void run()}>{running ? "检查中…" : "运行诊断"}</button></div><div className="diagnostic-toolbar"><label className="field-label" htmlFor="diagnostic-profile">选择环境</label><select id="diagnostic-profile" className="text-input" value={selectedId} onChange={(e) => setSelectedId(e.target.value)}><option value="">请选择</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select><span className="diagnostic-scope-legend"><span className="scope-badge scope-isolated">独立隔离</span><span className="scope-badge scope-configurable">可配置</span><span className="scope-badge scope-shared">主机共享</span></span></div>{!report ? <div className="empty-state compact"><div className="empty-icon">⌁</div><strong>尚未运行诊断</strong><span>选择一个环境后开始检查。主动网络检查会在执行前显示端点。</span></div> : <div className="diagnostic-report"><div className={`report-banner ${report.overall}`}><span className="report-score">{report.overall === "pass" ? "✓" : "!"}</span><div><strong>{report.overall === "pass" ? "检查通过" : "存在需要关注的项目"}</strong><p>检查时间 {formatDate(report.checkedAt)} · 本次未访问外部检测端点</p></div></div><div className="diagnostic-grid">{report.items.map((item) => <article className="diagnostic-item" key={item.key}><div className="diagnostic-item-head"><span className={`scope-badge ${scopeMeta[item.scope].className}`}>{scopeMeta[item.scope].label}</span><span className={`result-mark ${item.status}`}>{item.status === "pass" ? "✓" : item.status === "warning" ? "!" : "×"}</span></div><h3>{item.label}</h3><div className="diagnostic-values"><span>实际</span><strong>{item.actual}</strong>{item.expected && <><span>预期</span><strong>{item.expected}</strong></>}</div><p>{item.explanation}</p></article>)}</div></div>}</section>;
+  return <section className="view-section">
+    <div className="page-heading">
+      <div><div className="eyebrow">ENVIRONMENT DIAGNOSTICS</div><h1>指纹与泄漏诊断</h1><p>这里展示实际生效范围，不把代理 IP 或存储隔离夸大为完整设备指纹。</p></div>
+      <div className="page-actions"><button className="secondary-button" type="button" disabled={!selectedId || running} onClick={() => void run(false)}>{running ? "检查中…" : "本地检查"}</button><button className="primary-button" type="button" disabled={!selectedId || running} onClick={() => setConfirmExternal(true)}>主动网络检查</button></div>
+    </div>
+    <div className="diagnostic-toolbar"><label className="field-label" htmlFor="diagnostic-profile">选择环境</label><select id="diagnostic-profile" className="text-input" value={selectedId} onChange={(event) => setSelectedId(event.target.value)}><option value="">请选择</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select><span className="diagnostic-scope-legend"><span className="scope-badge scope-isolated">独立隔离</span><span className="scope-badge scope-configurable">可配置</span><span className="scope-badge scope-shared">主机共享</span></span></div>
+    {!report ? <div className="empty-state compact"><div className="empty-icon">⌁</div><strong>尚未运行诊断</strong><span>选择一个环境后开始检查。主动网络检查会在执行前显示端点。</span></div> : <div className="diagnostic-report">
+      <div className={`report-banner ${report.overall}`}><span className="report-score">{report.overall === "pass" ? "✓" : "!"}</span><div><strong>{report.overall === "pass" ? "检查通过" : "存在需要关注的项目"}</strong><p>检查时间 {formatDate(report.checkedAt)} · {report.externalEndpoints.length === 0 ? "本次未访问外部检测端点" : `已访问 ${report.externalEndpoints.join("、")}`}</p></div></div>
+      <div className="diagnostic-grid">{report.items.map((item) => <article className="diagnostic-item" key={item.key}><div className="diagnostic-item-head"><span className={`scope-badge ${scopeMeta[item.scope].className}`}>{scopeMeta[item.scope].label}</span><span className={`result-mark ${item.status}`}>{item.status === "pass" ? "✓" : item.status === "warning" ? "!" : "×"}</span></div><h3>{item.label}</h3><div className="diagnostic-values"><span>实际</span><strong>{item.actual}</strong>{item.expected && <><span>预期</span><strong>{item.expected}</strong></>}</div><p>{item.explanation}</p></article>)}</div>
+    </div>}
+    {confirmExternal && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !running && setConfirmExternal(false)}><section className="modal diagnostic-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="diagnostic-confirm-title"><div className="modal-head"><div><div className="eyebrow">EXTERNAL NETWORK CHECK</div><h2 id="diagnostic-confirm-title">确认主动网络检查</h2></div><button className="icon-button" type="button" disabled={running} onClick={() => setConfirmExternal(false)}>×</button></div><p className="modal-intro">本次只检查出口 IP。执行前向你披露固定检测端点，DNS 与 WebRTC 本轮保持“未检查”。</p><div className="diagnostic-consent"><strong>将访问的唯一端点</strong><code>http://checkip.amazonaws.com/</code><ul><li>发送一次不含 Cookie 的 HTTP 请求</li><li>绑定代理时走该环境的临时 Broker；未绑定时使用本机直连</li><li>不启动环境，不读取登录状态、Cookie 或浏览历史</li></ul></div><div className="modal-actions"><button className="secondary-button" type="button" disabled={running} onClick={() => setConfirmExternal(false)}>取消</button><button className="primary-button" type="button" disabled={running} onClick={() => void run(true)}>{running ? "检查中…" : "确认并检查"}</button></div></section></div>}
+  </section>;
 }
 
 function BackupsView({

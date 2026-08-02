@@ -139,7 +139,7 @@ fn proxy_management(state: &AppState) -> IpcResult<&brows_application::ProxyAppl
 
 fn diagnostics(
     state: &AppState,
-) -> IpcResult<&brows_application::memory::InMemoryDiagnosticRunner> {
+) -> IpcResult<&brows_adapters_diagnostic::LocalNetworkDiagnosticRunner> {
     state.diagnostics.as_deref().ok_or_else(|| ErrorDto {
         code: ErrorCode::CapabilityUnsupported,
         message: "诊断在当前运行模式下不可用".to_owned(),
@@ -152,13 +152,6 @@ pub(crate) fn diagnostic_run(
     state: State<'_, AppState>,
     request: DiagnosticRunRequest,
 ) -> IpcResult<DiagnosticReportDto> {
-    if request.external {
-        return Err(ErrorDto {
-            code: ErrorCode::CapabilityUnsupported,
-            message: "主动外部诊断尚未启用".to_owned(),
-            violations: Vec::new(),
-        });
-    }
     let profile = ipc(state.profiles.get(ProfileIdRequest {
         profile_id: request.profile_id,
     }))?;
@@ -177,7 +170,7 @@ pub(crate) fn diagnostic_run(
         .run(&DiagnosticRequest {
             profile,
             session_id: None,
-            include_external_checks: false,
+            include_external_checks: request.external,
         })
         .map_err(|error| ErrorDto {
             code: ErrorCode::Internal,

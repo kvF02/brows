@@ -1,0 +1,10 @@
+[package]
+name = "brows-adapters-diagnostic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Explicit local and network diagnostic adapter for Brows"
+
+[dependencies]
+brows-application = { path = "../application" }
+brows-domain = { path = "../domain" }
