@@ -1,11 +1,12 @@
 use crate::state::AppState;
 use brows_adapters_morelogin::{inspect_export as inspect_morelogin, MoreLoginPreview};
 use brows_application::{
-    ApplicationResult, LegacyProfileDataSummary, MigrationRecord, MigrationRecordStatus,
-    SessionLaunchOutcome,
+    ApplicationResult, DiagnosticRequest, DiagnosticRunner, LegacyProfileDataSummary,
+    MigrationRecord, MigrationRecordStatus, SessionLaunchOutcome,
 };
 use brows_contracts::{
-    BrowserBuildIdDto, BrowserSelectorDto, ErrorCode, ErrorDto, LegacyMigrationExecuteRequest,
+    BrowserBuildIdDto, BrowserSelectorDto, DiagnosticListRequest, DiagnosticReportDto,
+    DiagnosticRunRequest, ErrorCode, ErrorDto, LegacyMigrationExecuteRequest,
     LegacyMigrationInspectRequest, LegacyMigrationInspectionDto, LegacyMigrationListRequest,
     LegacyMigrationRecordDto, LegacyMigrationRollbackRequest, LegacyMigrationStatusDto, LocaleDto,
     PersonaDto, PresetIdDto, ProfileCreateRequest, ProfileDraftDto, ProfileDto, ProfileIdRequest,
@@ -134,6 +135,78 @@ fn proxy_management(state: &AppState) -> IpcResult<&brows_application::ProxyAppl
         message: "代理管理在当前运行模式下不可用".to_owned(),
         violations: Vec::new(),
     })
+}
+
+fn diagnostics(
+    state: &AppState,
+) -> IpcResult<&brows_application::memory::InMemoryDiagnosticRunner> {
+    state.diagnostics.as_deref().ok_or_else(|| ErrorDto {
+        code: ErrorCode::CapabilityUnsupported,
+        message: "诊断在当前运行模式下不可用".to_owned(),
+        violations: Vec::new(),
+    })
+}
+
+#[tauri::command]
+pub(crate) fn diagnostic_run(
+    state: State<'_, AppState>,
+    request: DiagnosticRunRequest,
+) -> IpcResult<DiagnosticReportDto> {
+    if request.external {
+        return Err(ErrorDto {
+            code: ErrorCode::CapabilityUnsupported,
+            message: "主动外部诊断尚未启用".to_owned(),
+            violations: Vec::new(),
+        });
+    }
+    let profile = ipc(state.profiles.get(ProfileIdRequest {
+        profile_id: request.profile_id,
+    }))?;
+    let profile: brows_domain::ProfileSpec =
+        profile
+            .try_into()
+            .map_err(|error: brows_contracts::ContractError| match error.field {
+                Some(field) => ErrorDto::invalid_field(field, error.reason),
+                None => ErrorDto {
+                    code: ErrorCode::ValidationFailed,
+                    message: error.reason,
+                    violations: Vec::new(),
+                },
+            })?;
+    let report = diagnostics(&state)?
+        .run(&DiagnosticRequest {
+            profile,
+            session_id: None,
+            include_external_checks: false,
+        })
+        .map_err(|error| ErrorDto {
+            code: ErrorCode::Internal,
+            message: error.to_string(),
+            violations: Vec::new(),
+        })?;
+    Ok(DiagnosticReportDto::from(&report))
+}
+
+#[tauri::command]
+pub(crate) fn diagnostic_list(
+    state: State<'_, AppState>,
+    request: DiagnosticListRequest,
+) -> IpcResult<Vec<DiagnosticReportDto>> {
+    let reports = diagnostics(&state)?.reports().map_err(|error| ErrorDto {
+        code: ErrorCode::Internal,
+        message: error.to_string(),
+        violations: Vec::new(),
+    })?;
+    Ok(reports
+        .into_iter()
+        .filter(|report| {
+            request
+                .profile_id
+                .as_ref()
+                .is_none_or(|id| id.as_str() == report.profile_id.as_str())
+        })
+        .map(|report| DiagnosticReportDto::from(&report))
+        .collect())
 }
 
 #[tauri::command]

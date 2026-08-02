@@ -13,7 +13,7 @@ use brows_application::memory::{
 };
 use brows_application::{
     memory::{
-        system_native_preset, InMemoryAuditSink, InMemoryPresetCatalog,
+        system_native_preset, InMemoryAuditSink, InMemoryDiagnosticRunner, InMemoryPresetCatalog,
         SystemNativeFingerprintRuntime,
     },
     ApplicationResult, Clock, IdGenerator, LaunchPlanCompiler, MigrationApplicationService,
@@ -38,6 +38,7 @@ pub(crate) struct AppState {
     pub(crate) sessions: Arc<SessionApplicationService>,
     pub(crate) migrations: Option<Arc<MigrationApplicationService>>,
     pub(crate) proxy_management: Option<Arc<ProxyApplicationService>>,
+    pub(crate) diagnostics: Option<Arc<InMemoryDiagnosticRunner>>,
 }
 
 impl AppState {
@@ -63,6 +64,7 @@ impl AppState {
         ));
         let fingerprints = Arc::new(SystemNativeFingerprintRuntime);
         let audit = Arc::new(InMemoryAuditSink::default());
+        let diagnostics = Arc::new(InMemoryDiagnosticRunner::new(clock.clone()));
         let ids = Arc::new(UuidIdGenerator);
 
         presets.insert(system_native_preset())?;
@@ -132,6 +134,7 @@ impl AppState {
             sessions: session_service,
             migrations: Some(migration_service),
             proxy_management: Some(proxy_management),
+            diagnostics: Some(diagnostics),
         })
     }
 
@@ -189,6 +192,7 @@ impl AppState {
             sessions: session_service,
             migrations: None,
             proxy_management: None,
+            diagnostics: None,
         })
     }
 }

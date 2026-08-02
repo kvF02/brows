@@ -87,6 +87,15 @@ interface ProxyConnectivityCheckDto {
   detail: string;
 }
 
+interface DiagnosticReportDto {
+  profileId: string;
+  sessionId?: string;
+  generatedAtMs: number;
+  checks: Array<{ key: string; scope: "isolated" | "configurable" | "host_shared"; status: "pass" | "warn" | "fail" | "not_checked"; observed?: string; expected?: string; explanation: string }>;
+  overall: "healthy" | "attention" | "failed";
+  externalEndpoints: string[];
+}
+
 const handlers = Object.freeze({
   profileList: "profile_list",
   profileGet: "profile_get",
@@ -105,6 +114,8 @@ const handlers = Object.freeze({
   proxySave: "proxy_save",
   proxyTest: "proxy_test",
   proxyRemove: "proxy_remove",
+  diagnosticRun: "diagnostic_run",
+  diagnosticList: "diagnostic_list",
   legacyMigrationInspect: "legacy_migration_inspect",
   legacyMigrationExecute: "legacy_migration_execute",
   legacyMigrationRollback: "legacy_migration_rollback",
@@ -316,11 +327,13 @@ export class TauriApiClient implements ApiClient {
     await this.call<void>(handlers.proxyRemove, { request: { proxyId: id } });
     this.proxyHealth.delete(id);
   }
-  async listDiagnostics(_profileId?: string): Promise<DiagnosticReport[]> {
-    return [];
+  async listDiagnostics(profileId?: string): Promise<DiagnosticReport[]> {
+    const reports = await this.call<DiagnosticReportDto[]>(handlers.diagnosticList, { request: { profileId: profileId ?? null } });
+    return reports.map((report) => this.toDiagnostic(report));
   }
-  async runDiagnostic(_profileId: string): Promise<DiagnosticReport> {
-    return unsupported("环境诊断");
+  async runDiagnostic(profileId: string): Promise<DiagnosticReport> {
+    const report = await this.call<DiagnosticReportDto>(handlers.diagnosticRun, { request: { profileId, external: false } });
+    return this.toDiagnostic(report);
   }
   async listBackups(): Promise<BackupJob[]> {
     return [];
@@ -395,6 +408,24 @@ export class TauriApiClient implements ApiClient {
       authenticated: dto.hasSecret,
       health: check?.health ?? "unknown",
       lastCheckedAt: check?.lastCheckedAt,
+    };
+  }
+
+  private toDiagnostic(dto: DiagnosticReportDto): DiagnosticReport {
+    return {
+      profileId: dto.profileId,
+      checkedAt: new Date(dto.generatedAtMs).toISOString(),
+      overall: dto.overall === "healthy" ? "pass" : dto.overall === "failed" ? "fail" : "warning",
+      items: dto.checks.map((check) => ({
+        key: check.key,
+        label: check.key,
+        actual: check.observed ?? "未检查",
+        expected: check.expected,
+        scope: check.scope === "host_shared" ? "host-shared" : check.scope,
+        status: check.status === "warn" ? "warning" : check.status === "not_checked" ? "not-checked" : check.status,
+        explanation: check.explanation,
+      })),
+      externalEndpoints: dto.externalEndpoints,
     };
   }
 

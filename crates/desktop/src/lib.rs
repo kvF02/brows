@@ -8,8 +8,8 @@ use commands::{
     legacy_migration_execute, legacy_migration_inspect, legacy_migration_list,
     legacy_migration_rollback, morelogin_import, morelogin_preview, profile_archive, profile_clone,
     profile_create, profile_get, profile_list, profile_restore, profile_update, proxy_list,
-    proxy_remove, proxy_save, proxy_test, session_cancel_queued, session_launch, session_list,
-    session_stop,
+    proxy_remove, proxy_save, proxy_test, diagnostic_run, diagnostic_list, session_cancel_queued,
+    session_launch, session_list, session_stop,
 };
 use state::AppState;
 use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
@@ -51,6 +51,8 @@ pub fn run() {
             proxy_save,
             proxy_test,
             proxy_remove,
+            diagnostic_run,
+            diagnostic_list,
             session_launch,
             session_stop,
             session_cancel_queued,
