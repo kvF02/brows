@@ -4,6 +4,7 @@
 mod commands;
 mod state;
 
+use brows_contracts::SessionStateDto;
 use commands::{
     diagnostic_list, diagnostic_run, legacy_migration_execute, legacy_migration_inspect,
     legacy_migration_list, legacy_migration_rollback, morelogin_import, morelogin_preview,
@@ -12,7 +13,7 @@ use commands::{
     session_launch, session_list, session_stop,
 };
 use state::AppState;
-use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
+use tauri::{Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder};
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -58,8 +59,30 @@ pub fn run() {
             session_cancel_queued,
             session_list,
         ])
-        .run(tauri::generate_context!())
-        .expect("Brows desktop runtime failed");
+        .build(tauri::generate_context!())
+        .expect("Brows desktop runtime failed to build")
+        .run(|app, event| {
+            if let RunEvent::ExitRequested { .. } = event {
+                cleanup_sessions(app.state::<AppState>().inner());
+            }
+        })
+}
+
+fn cleanup_sessions(state: &AppState) {
+    let sessions = match state.sessions.list() {
+        Ok(sessions) => sessions,
+        Err(_) => return,
+    };
+    for session in sessions {
+        if matches!(
+            session.state,
+            SessionStateDto::Starting | SessionStateDto::Running | SessionStateDto::Stopping
+        ) {
+            let _ = state.sessions.stop(brows_contracts::SessionStopRequest {
+                session_id: session.id,
+            });
+        }
+    }
 }
 
 fn main_window_url() -> WebviewUrl {
