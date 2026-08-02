@@ -817,6 +817,21 @@ pub struct ProxyTestRequest {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct ProxyRemoveRequest {
+    pub proxy_id: ProxyIdDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProxyConnectivityCheckDto {
+    pub proxy_id: ProxyIdDto,
+    pub reachable: bool,
+    pub latency_ms: u64,
+    pub detail: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct DiagnosticRunRequest {
     pub profile_id: ProfileIdDto,
     #[serde(default)]
@@ -888,7 +903,9 @@ pub struct LegacyMigrationListRequest {
     pub limit: usize,
 }
 
-fn default_migration_list_limit() -> usize { 50 }
+fn default_migration_list_limit() -> usize {
+    50
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

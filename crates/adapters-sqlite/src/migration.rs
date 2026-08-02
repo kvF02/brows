@@ -1,7 +1,7 @@
 use brows_application::{PortError, PortErrorKind, PortResult};
 use rusqlite::{Connection, TransactionBehavior};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SCHEMA_VERSION: u32 = 3;
 
 const MIGRATION_1: &str = r#"
 CREATE TABLE profiles (
@@ -85,6 +85,30 @@ CREATE INDEX migration_records_profile_time_idx
     ON migration_records (profile_id, started_at_ms DESC, id DESC);
 "#;
 
+const MIGRATION_3: &str = r#"
+CREATE TABLE proxies (
+    id TEXT PRIMARY KEY NOT NULL,
+    name TEXT NOT NULL,
+    scheme TEXT NOT NULL CHECK (scheme IN ('http', 'https', 'socks5')),
+    host TEXT NOT NULL,
+    port INTEGER NOT NULL CHECK (port BETWEEN 1 AND 65535),
+    username TEXT,
+    secret_ref TEXT,
+    dns_mode TEXT NOT NULL CHECK (dns_mode IN ('proxy', 'local')),
+    connect_timeout_ms INTEGER NOT NULL CHECK (connect_timeout_ms > 0),
+    CHECK ((username IS NULL AND secret_ref IS NULL) OR (username IS NOT NULL AND secret_ref IS NOT NULL))
+) STRICT;
+
+CREATE TABLE proxy_bypass_hosts (
+    proxy_id TEXT NOT NULL REFERENCES proxies(id) ON DELETE CASCADE,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    host TEXT NOT NULL,
+    PRIMARY KEY (proxy_id, position)
+) STRICT;
+
+CREATE INDEX proxies_name_idx ON proxies (name COLLATE NOCASE, id);
+"#;
+
 pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
     let found: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -110,6 +134,9 @@ pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
             2 => transaction
                 .execute_batch(MIGRATION_2)
                 .map_err(|error| sqlite_error("apply schema migration 2", error))?,
+            3 => transaction
+                .execute_batch(MIGRATION_3)
+                .map_err(|error| sqlite_error("apply schema migration 3", error))?,
             target => {
                 return Err(PortError::new(
                     PortErrorKind::Incompatible,

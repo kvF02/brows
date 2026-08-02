@@ -247,6 +247,7 @@ export interface ApiClient {
   listProxies(): Promise<ProxySummary[]>;
   saveProxy(input: ProxyInput): Promise<ProxySummary>;
   testProxy(id: string): Promise<ProxySummary>;
+  removeProxy(id: string): Promise<void>;
   listDiagnostics(profileId?: string): Promise<DiagnosticReport[]>;
   runDiagnostic(profileId: string): Promise<DiagnosticReport>;
   listBackups(): Promise<BackupJob[]>;

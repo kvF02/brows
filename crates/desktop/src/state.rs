@@ -1,17 +1,24 @@
 use brows_adapters_morelogin::MoreLoginProfileDataMigrator;
+use brows_adapters_proxy::{StoredProxyRuntime, TcpProxyConnectivityTester};
 use brows_adapters_runtime::ManagedChromiumRuntime;
-use brows_adapters_sqlite::{SqliteMigrationRecordRepository, SqliteProfileRepository};
+use brows_adapters_secret_windows::WindowsCredentialStore;
+use brows_adapters_sqlite::{
+    SqliteMigrationRecordRepository, SqliteProfileRepository, SqliteProxyRepository,
+};
+#[cfg(test)]
+use brows_application::memory::InMemoryProxyRuntime;
 #[cfg(test)]
 use brows_application::memory::{
     InMemoryBrowserRuntime, InMemoryProfileRepository, ManualClock, SequentialIdGenerator,
 };
 use brows_application::{
     memory::{
-        system_native_preset, InMemoryAuditSink, InMemoryPresetCatalog, InMemoryProxyRuntime,
+        system_native_preset, InMemoryAuditSink, InMemoryPresetCatalog,
         SystemNativeFingerprintRuntime,
     },
     ApplicationResult, Clock, IdGenerator, LaunchPlanCompiler, MigrationApplicationService,
-    PortError, PortErrorKind, PortResult, ProfileApplicationService, SessionApplicationService,
+    PortError, PortErrorKind, PortResult, ProfileApplicationService, ProxyApplicationService,
+    SessionApplicationService,
 };
 use brows_domain::{
     BrowserBuild, BrowserBuildId, BrowserCapabilities, BrowserChannel, ProfileId, RuntimeTrust,
@@ -30,6 +37,7 @@ pub(crate) struct AppState {
     pub(crate) profiles: Arc<ProfileApplicationService>,
     pub(crate) sessions: Arc<SessionApplicationService>,
     pub(crate) migrations: Option<Arc<MigrationApplicationService>>,
+    pub(crate) proxy_management: Option<Arc<ProxyApplicationService>>,
 }
 
 impl AppState {
@@ -46,8 +54,9 @@ impl AppState {
         let database_path = data_root.join("profiles.sqlite3");
         let profiles = Arc::new(SqliteProfileRepository::open(&database_path)?);
         let migration_records = Arc::new(SqliteMigrationRecordRepository::open(&database_path)?);
+        let proxy_records = Arc::new(SqliteProxyRepository::open(&database_path)?);
         let presets = Arc::new(InMemoryPresetCatalog::default());
-        let proxies = Arc::new(InMemoryProxyRuntime::default());
+        let proxies = Arc::new(StoredProxyRuntime::new(proxy_records.clone()));
         let fingerprints = Arc::new(SystemNativeFingerprintRuntime);
         let audit = Arc::new(InMemoryAuditSink::default());
         let ids = Arc::new(UuidIdGenerator);
@@ -94,7 +103,7 @@ impl AppState {
             proxies,
             audit,
             clock.clone(),
-            ids,
+            ids.clone(),
             DEFAULT_MAX_CONCURRENT_SESSIONS,
         )?);
         let migration_service = Arc::new(MigrationApplicationService::new(
@@ -107,11 +116,18 @@ impl AppState {
             migration_records,
             clock,
         ));
+        let proxy_management = Arc::new(ProxyApplicationService::new(
+            proxy_records,
+            Arc::new(WindowsCredentialStore::new()),
+            Arc::new(TcpProxyConnectivityTester),
+            ids,
+        ));
 
         Ok(Self {
             profiles: profile_service,
             sessions: session_service,
             migrations: Some(migration_service),
+            proxy_management: Some(proxy_management),
         })
     }
 
@@ -168,6 +184,7 @@ impl AppState {
             profiles: profile_service,
             sessions: session_service,
             migrations: None,
+            proxy_management: None,
         })
     }
 }
@@ -197,6 +214,10 @@ struct UuidIdGenerator;
 impl IdGenerator for UuidIdGenerator {
     fn next_profile_id(&self) -> PortResult<ProfileId> {
         new_id("profile", ProfileId::new)
+    }
+
+    fn next_proxy_id(&self) -> PortResult<brows_domain::ProxyId> {
+        new_id("proxy", brows_domain::ProxyId::new)
     }
 
     fn next_session_id(&self) -> PortResult<SessionId> {

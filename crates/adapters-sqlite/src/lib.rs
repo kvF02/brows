@@ -8,10 +8,12 @@
 
 mod migration;
 mod migration_records;
+mod proxies;
 mod repository;
 
 pub use migration::CURRENT_SCHEMA_VERSION;
 pub use migration_records::SqliteMigrationRecordRepository;
+pub use proxies::SqliteProxyRepository;
 pub use repository::SqliteProfileRepository;
 
 #[cfg(test)]

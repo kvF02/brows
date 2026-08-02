@@ -1,9 +1,9 @@
 use super::*;
-use brows_application::{PortErrorKind, ProfileQuery, ProfileRepository};
+use brows_application::{PortErrorKind, ProfileQuery, ProfileRepository, ProxyRepository};
 use brows_domain::{
-    BrowserBuildId, BrowserBuildSelector, BrowserChannel, EnvironmentPresetRef, FingerprintPersona,
-    LocaleConfig, PresetId, ProfileId, ProfileSpec, ProxyId, Revision, SystemNativePersona,
-    WindowConfig,
+    BrowserBuildId, BrowserBuildSelector, BrowserChannel, DnsMode, EnvironmentPresetRef,
+    FingerprintPersona, LocaleConfig, PresetId, ProfileId, ProfileSpec, ProxyId, ProxyScheme,
+    ProxySpec, Revision, SecretRef, SystemNativePersona, WindowConfig, DEFAULT_PROXY_TIMEOUT_MS,
 };
 use rusqlite::Connection;
 use std::{
@@ -252,4 +252,32 @@ fn repository_satisfies_send_sync_object_safe_port() {
     let database = TemporaryDatabase::new("object-safe");
     let repository = SqliteProfileRepository::open(database.path()).unwrap();
     assert_repository(&repository);
+}
+
+#[test]
+fn proxy_repository_round_trips_metadata_and_refuses_in_use_delete() {
+    let database = TemporaryDatabase::new("proxy-metadata");
+    let profiles = SqliteProfileRepository::open(database.path()).unwrap();
+    let proxies = SqliteProxyRepository::open(database.path()).unwrap();
+    let proxy = ProxySpec {
+        id: ProxyId::new("proxy-one").unwrap(),
+        name: "Tokyo gateway".to_owned(),
+        scheme: ProxyScheme::Socks5,
+        host: "proxy.example.test".to_owned(),
+        port: 1080,
+        username: Some("tester".to_owned()),
+        secret_ref: Some(SecretRef::new("secret-one").unwrap()),
+        dns_mode: DnsMode::Proxy,
+        bypass_hosts: vec!["localhost".to_owned()],
+        connect_timeout_ms: DEFAULT_PROXY_TIMEOUT_MS,
+    };
+    proxies.save(&proxy).unwrap();
+    assert_eq!(proxies.get(&proxy.id).unwrap(), proxy);
+    assert_eq!(proxies.list().unwrap(), vec![proxy.clone()]);
+
+    let mut assigned = profile("profile-with-proxy", "Assigned");
+    assigned.proxy_id = Some(proxy.id.clone());
+    profiles.create(assigned).unwrap();
+    let error = proxies.delete(&proxy.id).unwrap_err();
+    assert_eq!(error.kind, PortErrorKind::Locked);
 }

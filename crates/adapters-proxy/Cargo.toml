@@ -1,0 +1,10 @@
+[package]
+name = "brows-adapters-proxy"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Fail-closed proxy control adapters for Brows"
+
+[dependencies]
+brows-application = { path = "../application" }
+brows-domain = { path = "../domain" }

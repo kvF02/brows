@@ -391,6 +391,48 @@ impl ProxyRuntime for InMemoryProxyRuntime {
     }
 }
 
+impl ProxyRepository for InMemoryProxyRuntime {
+    fn list(&self) -> PortResult<Vec<ProxySpec>> {
+        Ok(self
+            .proxies
+            .read()
+            .map_err(|_| unavailable("proxy repository"))?
+            .values()
+            .cloned()
+            .collect())
+    }
+
+    fn get(&self, id: &ProxyId) -> PortResult<ProxySpec> {
+        self.resolve_proxy(id)
+    }
+
+    fn save(&self, proxy: &ProxySpec) -> PortResult<()> {
+        self.insert_proxy(proxy.clone())
+    }
+
+    fn delete(&self, id: &ProxyId) -> PortResult<()> {
+        self.proxies
+            .write()
+            .map_err(|_| unavailable("proxy repository"))?
+            .remove(id)
+            .map(|_| ())
+            .ok_or_else(|| PortError::not_found("proxy"))
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct InMemoryProxyConnectivityTester;
+
+impl ProxyConnectivityTester for InMemoryProxyConnectivityTester {
+    fn test(&self, _proxy: &ProxySpec) -> PortResult<ProxyConnectivityCheck> {
+        Ok(ProxyConnectivityCheck {
+            reachable: true,
+            latency_ms: 1,
+            detail: "in-memory endpoint reachable".to_owned(),
+        })
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct SystemNativeFingerprintRuntime;
 
@@ -613,6 +655,7 @@ impl Clock for ManualClock {
 #[derive(Debug, Default)]
 pub struct SequentialIdGenerator {
     profile: AtomicU64,
+    proxy: AtomicU64,
     session: AtomicU64,
     secret: AtomicU64,
 }
@@ -624,6 +667,12 @@ impl IdGenerator for SequentialIdGenerator {
             self.profile.fetch_add(1, Ordering::SeqCst) + 1
         ))
         .map_err(|error| PortError::new(PortErrorKind::Internal, error.to_string()))
+    }
+
+    fn next_proxy_id(&self) -> PortResult<ProxyId> {
+        let value = self.proxy.fetch_add(1, Ordering::SeqCst) + 1;
+        ProxyId::new(format!("proxy-{value}"))
+            .map_err(|error| PortError::new(PortErrorKind::Internal, error.to_string()))
     }
 
     fn next_session_id(&self) -> PortResult<SessionId> {

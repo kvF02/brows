@@ -205,6 +205,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "brows-adapters-proxy"
+version = "0.1.0"
+dependencies = [
+ "brows-application",
+ "brows-domain",
+]
+
+[[package]]
 name = "brows-adapters-runtime"
 version = "0.1.0"
 dependencies = [
@@ -253,7 +261,9 @@ name = "brows-desktop"
 version = "0.1.0"
 dependencies = [
  "brows-adapters-morelogin",
+ "brows-adapters-proxy",
  "brows-adapters-runtime",
+ "brows-adapters-secret-windows",
  "brows-adapters-sqlite",
  "brows-application",
  "brows-contracts",

@@ -281,6 +281,13 @@ export class MockApiClient implements ApiClient {
     return { ...proxy };
   }
 
+  async removeProxy(id: string): Promise<void> {
+    if (this.profiles.some((profile) => profile.proxyId === id)) {
+      throw new ApiError("PROFILE_LOCKED", "代理仍被环境使用");
+    }
+    this.proxies = this.proxies.filter((proxy) => proxy.id !== id);
+  }
+
   async listDiagnostics(profileId?: string): Promise<DiagnosticReport[]> {
     return this.diagnostics
       .filter((report) => !profileId || report.profileId === profileId)

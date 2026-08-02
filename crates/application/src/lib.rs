@@ -10,10 +10,11 @@
 
 mod compiler;
 mod error;
-mod migration_service;
 pub mod memory;
+mod migration_service;
 mod ports;
 mod profile_service;
+mod proxy_service;
 mod session_service;
 mod sha256;
 
@@ -25,4 +26,5 @@ pub use error::{ApplicationError, ApplicationResult};
 pub use migration_service::MigrationApplicationService;
 pub use ports::*;
 pub use profile_service::ProfileApplicationService;
+pub use proxy_service::ProxyApplicationService;
 pub use session_service::{SessionApplicationService, SessionLaunchOutcome};

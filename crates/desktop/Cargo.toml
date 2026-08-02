@@ -17,6 +17,8 @@ path = "src/main.rs"
 [dependencies]
 brows-adapters-runtime = { path = "../adapters-runtime" }
 brows-adapters-morelogin = { path = "../adapters-morelogin" }
+brows-adapters-proxy = { path = "../adapters-proxy" }
+brows-adapters-secret-windows = { path = "../adapters-secret-windows" }
 brows-adapters-sqlite = { path = "../adapters-sqlite" }
 brows-application = { path = "../application" }
 brows-contracts = { path = "../contracts" }

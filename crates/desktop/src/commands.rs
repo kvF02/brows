@@ -9,7 +9,8 @@ use brows_contracts::{
     LegacyMigrationInspectRequest, LegacyMigrationInspectionDto, LegacyMigrationListRequest,
     LegacyMigrationRecordDto, LegacyMigrationRollbackRequest, LegacyMigrationStatusDto, LocaleDto,
     PersonaDto, PresetIdDto, ProfileCreateRequest, ProfileDraftDto, ProfileDto, ProfileIdRequest,
-    ProfileListRequest, ProfileRevisionRequest, ProfileUpdateRequest, SessionCancelQueuedRequest,
+    ProfileListRequest, ProfileRevisionRequest, ProfileUpdateRequest, ProxyConnectivityCheckDto,
+    ProxyDto, ProxyRemoveRequest, ProxySaveRequest, ProxyTestRequest, SessionCancelQueuedRequest,
     SessionDto, SessionLaunchRequest, SessionStopRequest, WindowDto,
 };
 use brows_domain::ProfileId;
@@ -125,6 +126,53 @@ fn migrations(state: &AppState) -> IpcResult<&brows_application::MigrationApplic
         message: "完整环境迁移在当前运行模式下不可用".to_owned(),
         violations: Vec::new(),
     })
+}
+
+fn proxy_management(state: &AppState) -> IpcResult<&brows_application::ProxyApplicationService> {
+    state.proxy_management.as_deref().ok_or_else(|| ErrorDto {
+        code: ErrorCode::CapabilityUnsupported,
+        message: "代理管理在当前运行模式下不可用".to_owned(),
+        violations: Vec::new(),
+    })
+}
+
+#[tauri::command]
+pub(crate) fn proxy_list(state: State<'_, AppState>) -> IpcResult<Vec<ProxyDto>> {
+    ipc(proxy_management(&state)?.list())
+}
+
+#[tauri::command]
+pub(crate) fn proxy_save(
+    state: State<'_, AppState>,
+    request: ProxySaveRequest,
+) -> IpcResult<ProxyDto> {
+    ipc(proxy_management(&state)?.save(request))
+}
+
+#[tauri::command]
+pub(crate) fn proxy_test(
+    state: State<'_, AppState>,
+    request: ProxyTestRequest,
+) -> IpcResult<ProxyConnectivityCheckDto> {
+    let proxy_id = brows_domain::ProxyId::new(request.proxy_id.as_str().to_owned())
+        .map_err(ErrorDto::from_domain)?;
+    let result = ipc(proxy_management(&state)?.test(proxy_id.clone()))?;
+    Ok(ProxyConnectivityCheckDto {
+        proxy_id: proxy_id.into(),
+        reachable: result.reachable,
+        latency_ms: result.latency_ms,
+        detail: result.detail,
+    })
+}
+
+#[tauri::command]
+pub(crate) fn proxy_remove(
+    state: State<'_, AppState>,
+    request: ProxyRemoveRequest,
+) -> IpcResult<()> {
+    let proxy_id = brows_domain::ProxyId::new(request.proxy_id.as_str().to_owned())
+        .map_err(ErrorDto::from_domain)?;
+    ipc(proxy_management(&state)?.remove(proxy_id))
 }
 
 fn profile_id(value: &brows_contracts::ProfileIdDto) -> IpcResult<ProfileId> {

@@ -70,6 +70,23 @@ interface ErrorDto {
   violations?: unknown[];
 }
 
+interface ProxyDto {
+  id: string;
+  name: string;
+  scheme: "http" | "https" | "socks5";
+  host: string;
+  port: number;
+  username?: string;
+  hasSecret: boolean;
+}
+
+interface ProxyConnectivityCheckDto {
+  proxyId: string;
+  reachable: boolean;
+  latencyMs: number;
+  detail: string;
+}
+
 const handlers = Object.freeze({
   profileList: "profile_list",
   profileGet: "profile_get",
@@ -84,6 +101,10 @@ const handlers = Object.freeze({
   sessionList: "session_list",
   moreLoginPreview: "morelogin_preview",
   moreLoginImport: "morelogin_import",
+  proxyList: "proxy_list",
+  proxySave: "proxy_save",
+  proxyTest: "proxy_test",
+  proxyRemove: "proxy_remove",
   legacyMigrationInspect: "legacy_migration_inspect",
   legacyMigrationExecute: "legacy_migration_execute",
   legacyMigrationRollback: "legacy_migration_rollback",
@@ -116,6 +137,7 @@ export class TauriApiClient implements ApiClient {
   private readonly dtoCache = new Map<string, ProfileDto>();
   private readonly firstSeen = new Map<string, string>();
   private sessions: SessionDto[] = [];
+  private readonly proxyHealth = new Map<string, Pick<ProxySummary, "health" | "lastCheckedAt">>();
 
   constructor(private readonly bridge: TypedCommandBridge) {}
 
@@ -257,13 +279,42 @@ export class TauriApiClient implements ApiClient {
   }
 
   async listProxies(): Promise<ProxySummary[]> {
-    return [];
+    const proxies = await this.call<ProxyDto[]>(handlers.proxyList);
+    return proxies.map((proxy) => this.toProxy(proxy));
   }
-  async saveProxy(_input: ProxyInput): Promise<ProxySummary> {
-    return unsupported("代理保存");
+  async saveProxy(input: ProxyInput): Promise<ProxySummary> {
+    const proxy = await this.call<ProxyDto>(handlers.proxySave, {
+      request: {
+        proxy: {
+          name: input.name,
+          scheme: input.kind,
+          host: input.host,
+          port: input.port,
+          username: input.username,
+          dnsMode: "proxy",
+          bypassHosts: [],
+          connectTimeoutMs: 10_000,
+        },
+        credential: input.credential,
+      },
+    });
+    return this.toProxy(proxy);
   }
-  async testProxy(_id: string): Promise<ProxySummary> {
-    return unsupported("代理检测");
+  async testProxy(id: string): Promise<ProxySummary> {
+    const result = await this.call<ProxyConnectivityCheckDto>(handlers.proxyTest, {
+      request: { proxyId: id, external: false },
+    });
+    this.proxyHealth.set(id, {
+      health: result.reachable ? "healthy" : "unhealthy",
+      lastCheckedAt: new Date().toISOString(),
+    });
+    const proxy = (await this.call<ProxyDto[]>(handlers.proxyList)).find((item) => item.id === id);
+    if (!proxy) throw new ApiError("NOT_FOUND", "代理不存在");
+    return this.toProxy(proxy);
+  }
+  async removeProxy(id: string): Promise<void> {
+    await this.call<void>(handlers.proxyRemove, { request: { proxyId: id } });
+    this.proxyHealth.delete(id);
   }
   async listDiagnostics(_profileId?: string): Promise<DiagnosticReport[]> {
     return [];
@@ -330,6 +381,20 @@ export class TauriApiClient implements ApiClient {
       createdAt,
       lastUsedAt: session ? new Date(session.updatedAtMs).toISOString() : undefined,
       diagnostic: { overall: "not-run", issueCount: 0 },
+    };
+  }
+
+  private toProxy(dto: ProxyDto): ProxySummary {
+    const check = this.proxyHealth.get(dto.id);
+    return {
+      id: dto.id,
+      name: dto.name,
+      kind: dto.scheme,
+      host: dto.host,
+      port: dto.port,
+      authenticated: dto.hasSecret,
+      health: check?.health ?? "unknown",
+      lastCheckedAt: check?.lastCheckedAt,
     };
   }
 

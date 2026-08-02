@@ -107,6 +107,24 @@ pub trait SecretStore: fmt::Debug + Send + Sync {
     fn delete(&self, reference: &SecretRef) -> PortResult<()>;
 }
 
+pub trait ProxyRepository: fmt::Debug + Send + Sync {
+    fn list(&self) -> PortResult<Vec<ProxySpec>>;
+    fn get(&self, id: &ProxyId) -> PortResult<ProxySpec>;
+    fn save(&self, proxy: &ProxySpec) -> PortResult<()>;
+    fn delete(&self, id: &ProxyId) -> PortResult<()>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ProxyConnectivityCheck {
+    pub reachable: bool,
+    pub latency_ms: u64,
+    pub detail: String,
+}
+
+pub trait ProxyConnectivityTester: fmt::Debug + Send + Sync {
+    fn test(&self, proxy: &ProxySpec) -> PortResult<ProxyConnectivityCheck>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BrowserProcess {
     pub session_id: SessionId,
@@ -308,6 +326,7 @@ pub trait Clock: fmt::Debug + Send + Sync {
 
 pub trait IdGenerator: fmt::Debug + Send + Sync {
     fn next_profile_id(&self) -> PortResult<ProfileId>;
+    fn next_proxy_id(&self) -> PortResult<ProxyId>;
     fn next_session_id(&self) -> PortResult<SessionId>;
     fn next_secret_ref(&self) -> PortResult<SecretRef>;
 }
