@@ -56,7 +56,11 @@ impl AppState {
         let migration_records = Arc::new(SqliteMigrationRecordRepository::open(&database_path)?);
         let proxy_records = Arc::new(SqliteProxyRepository::open(&database_path)?);
         let presets = Arc::new(InMemoryPresetCatalog::default());
-        let proxies = Arc::new(StoredProxyRuntime::new(proxy_records.clone()));
+        let credential_store = Arc::new(WindowsCredentialStore::new());
+        let proxies = Arc::new(StoredProxyRuntime::new(
+            proxy_records.clone(),
+            credential_store.clone(),
+        ));
         let fingerprints = Arc::new(SystemNativeFingerprintRuntime);
         let audit = Arc::new(InMemoryAuditSink::default());
         let ids = Arc::new(UuidIdGenerator);
@@ -118,7 +122,7 @@ impl AppState {
         ));
         let proxy_management = Arc::new(ProxyApplicationService::new(
             proxy_records,
-            Arc::new(WindowsCredentialStore::new()),
+            credential_store,
             Arc::new(TcpProxyConnectivityTester),
             ids,
         ));

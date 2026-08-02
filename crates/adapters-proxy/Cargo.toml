@@ -8,3 +8,4 @@ description = "Fail-closed proxy control adapters for Brows"
 [dependencies]
 brows-application = { path = "../application" }
 brows-domain = { path = "../domain" }
+base64 = "0.22.1"

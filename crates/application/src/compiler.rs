@@ -152,6 +152,12 @@ impl LaunchPlanCompiler {
                 host,
                 port,
             });
+            arguments.push(LaunchArgument::ProxyBypassList(vec![
+                "<-loopback>".to_owned()
+            ]));
+            if build.capabilities.supports_webrtc_policy {
+                arguments.push(LaunchArgument::DisableNonProxiedWebRtc);
+            }
             proxy_lease = Some(lease);
             binding
         } else {

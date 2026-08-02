@@ -179,6 +179,17 @@ impl ManagedChromiumRuntime {
                         port
                     )));
                 }
+                LaunchArgument::ProxyBypassList(values) => {
+                    rendered.push(OsString::from(format!(
+                        "--proxy-bypass-list={}",
+                        values.join(";")
+                    )));
+                }
+                LaunchArgument::DisableNonProxiedWebRtc => {
+                    rendered.push(OsString::from(
+                        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                    ));
+                }
                 LaunchArgument::AcceptLanguages(languages) => {
                     let primary = languages
                         .first()

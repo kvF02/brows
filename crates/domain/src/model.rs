@@ -403,6 +403,8 @@ pub enum LaunchArgument {
         host: String,
         port: u16,
     },
+    ProxyBypassList(Vec<String>),
+    DisableNonProxiedWebRtc,
     AcceptLanguages(Vec<String>),
     WindowSize {
         width: u32,
@@ -443,6 +445,19 @@ impl LaunchArgument {
                     Ok(())
                 }
             }
+            Self::ProxyBypassList(values) => {
+                if values
+                    .iter()
+                    .any(|value| value.trim().is_empty() || value.contains('\n'))
+                {
+                    Err(DomainError::InvalidLaunchArgument(
+                        "proxy bypass list".to_owned(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
+            Self::DisableNonProxiedWebRtc => Ok(()),
             Self::WindowSize { width, height } if *width < 320 || *height < 240 => {
                 Err(DomainError::InvalidLaunchArgument("window size".to_owned()))
             }
