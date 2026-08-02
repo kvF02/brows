@@ -59,7 +59,7 @@ pub struct MoreLoginPreview {
 }
 
 pub fn inspect_export(path: &str) -> Result<MoreLoginPreview, String> {
-    let source = Path::new(path);
+    let source = resolve_export_path(path);
     if source
         .extension()
         .and_then(|value| value.to_str())
@@ -68,11 +68,11 @@ pub fn inspect_export(path: &str) -> Result<MoreLoginPreview, String> {
     {
         return Err("仅支持 MoreLogin 导出的 .xlsx 文件".to_owned());
     }
-    let metadata = fs::metadata(source).map_err(|_| "无法读取指定的导出文件".to_owned())?;
+    let metadata = fs::metadata(&source).map_err(|_| "无法读取指定的导出文件".to_owned())?;
     if !metadata.is_file() || metadata.len() == 0 || metadata.len() > MAX_EXPORT_BYTES {
         return Err("导出文件为空、不是普通文件或超过 32 MB 限制".to_owned());
     }
-    let mut workbook = open_workbook_auto(source).map_err(|_| "无法解析 XLSX 文件".to_owned())?;
+    let mut workbook = open_workbook_auto(&source).map_err(|_| "无法解析 XLSX 文件".to_owned())?;
     let range = workbook
         .worksheet_range_at(0)
         .ok_or_else(|| "XLSX 中没有环境工作表".to_owned())?
@@ -175,6 +175,15 @@ pub fn inspect_export(path: &str) -> Result<MoreLoginPreview, String> {
             "只统计包含实际单元格内容的记录；预格式化空白行不会导入".to_owned(),
         ],
     })
+}
+
+fn resolve_export_path(path: &str) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.extension().is_none() {
+        path.with_extension("xlsx")
+    } else {
+        path
+    }
 }
 
 #[derive(Debug)]
@@ -558,5 +567,17 @@ mod tests {
         assert!(validate_numeric_id("../../evil").is_err());
         assert!(validate_operation_key("../evil").is_err());
         assert!(validate_backup_key("C:\\userdata").is_err());
+    }
+
+    #[test]
+    fn omitted_xlsx_extension_is_resolved_without_changing_directories() {
+        assert_eq!(
+            resolve_export_path(r"D:\export_profile"),
+            PathBuf::from(r"D:\export_profile.xlsx")
+        );
+        assert_eq!(
+            resolve_export_path(r"D:\exports\profile.xlsx"),
+            PathBuf::from(r"D:\exports\profile.xlsx")
+        );
     }
 }

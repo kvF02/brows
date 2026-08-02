@@ -874,7 +874,7 @@ function MoreLoginImportModal({
         <p className="modal-intro">先导入环境清单，再选择单个环境执行完整迁移。完整迁移会复制 Cookie、登录状态、历史和站点存储，并保留可回滚备份。</p>
         <label className="field-label" htmlFor="morelogin-source">MoreLogin 导出文件</label>
         <div className="import-source-row">
-          <input id="morelogin-source" className="text-input" value={sourcePath} onChange={(event) => { setSourcePath(event.target.value); setPreview(undefined); }} placeholder="例如：D:\\MoreLoginPlus\\export_profile.xlsx" />
+          <input id="morelogin-source" className="text-input" value={sourcePath} onChange={(event) => { setSourcePath(event.target.value); setPreview(undefined); }} placeholder="例如：D:\\export_profile（可省略 .xlsx）" />
           <button className="secondary-button" type="button" disabled={busy} onClick={() => void inspect()}>{busy && !preview ? "读取中…" : "安全预览"}</button>
         </div>
         {preview && (
