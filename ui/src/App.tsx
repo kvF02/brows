@@ -962,7 +962,10 @@ function ProxyView({
       await onRefresh();
       onNotice(`“${proxy.name}”认证和出口请求成功${checked.lastExitIp ? `，出口 IP：${checked.lastExitIp}` : ""}。`);
     } catch (cause) {
-      onError(getErrorMessage(cause));
+      const message = getErrorMessage(cause);
+      setTestingProxy(undefined);
+      await onRefresh();
+      onError(message);
     } finally {
       setTesting(false);
     }

@@ -170,6 +170,12 @@ fn test_through_broker(port: u16, timeout: Duration) -> PortResult<String> {
             "proxy test response was invalid",
         )
     })?;
+    if head.starts_with("HTTP/1.1 407") || head.starts_with("HTTP/1.0 407") {
+        return Err(PortError::new(
+            PortErrorKind::ProxyAuth,
+            "proxy authentication failed",
+        ));
+    }
     if !head.starts_with("HTTP/1.1 200") && !head.starts_with("HTTP/1.0 200") {
         return Err(PortError::new(
             PortErrorKind::ProxyConnect,

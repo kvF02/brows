@@ -3,7 +3,7 @@ use brows_application::{PortError, PortErrorKind, PortResult, SecretValue};
 use brows_domain::{ProxyScheme, ProxySpec};
 use std::{
     io::{Read, Write},
-    net::{Shutdown, TcpListener, TcpStream},
+    net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
@@ -50,7 +50,7 @@ impl BrokerHandle {
                             let _ = thread::Builder::new()
                                 .name("brows-proxy-connection".into())
                                 .spawn(move || {
-                                    let _ = handle(client, &p, s.as_deref());
+                                    handle_with_failure_response(client, &p, s.as_deref());
                                 });
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -75,6 +75,33 @@ impl BrokerHandle {
         let _ = TcpStream::connect(("127.0.0.1", self.port));
         if let Some(t) = self.thread.take() {
             let _ = t.join();
+        }
+    }
+}
+
+fn handle_with_failure_response(
+    client: TcpStream,
+    proxy: &ProxySpec,
+    secret: Option<&SecretValue>,
+) {
+    let fallback = client.try_clone().ok();
+    if let Err(error) = handle(client, proxy, secret) {
+        if let Some(mut client) = fallback {
+            let (status, reason) = if error.kind == PortErrorKind::ProxyAuth {
+                (
+                    "407 Proxy Authentication Required",
+                    "proxy authentication failed",
+                )
+            } else {
+                ("502 Bad Gateway", "proxy route failed")
+            };
+            let body = reason.as_bytes();
+            let _ = write!(
+                client,
+                "HTTP/1.1 {status}\r\nContent-Type: text/plain\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{reason}",
+                body.len()
+            );
+            let _ = client.shutdown(Shutdown::Both);
         }
     }
 }
@@ -241,8 +268,7 @@ fn http_connect(
     secret: Option<&SecretValue>,
     target: &str,
 ) -> PortResult<TcpStream> {
-    let mut s = TcpStream::connect((proxy.host.as_str(), proxy.port))
-        .map_err(|e| ioerr("connect upstream proxy", e))?;
+    let mut s = connect_upstream(proxy, "connect upstream proxy")?;
     let auth = auth_header(proxy, secret)?;
     write!(
         s,
@@ -263,8 +289,7 @@ fn socks_connect(
     secret: Option<&SecretValue>,
     target: &str,
 ) -> PortResult<TcpStream> {
-    let mut s = TcpStream::connect((proxy.host.as_str(), proxy.port))
-        .map_err(|e| ioerr("connect SOCKS5 proxy", e))?;
+    let mut s = connect_upstream(proxy, "connect SOCKS5 proxy")?;
     let auth = proxy.username.is_some();
     s.write_all(if auth { &[5, 1, 2] } else { &[5, 1, 0] })
         .map_err(|e| ioerr("send SOCKS greeting", e))?;
@@ -348,6 +373,24 @@ fn socks_connect(
     s.read_exact(&mut tail)
         .map_err(|e| ioerr("read SOCKS address", e))?;
     Ok(s)
+}
+
+fn connect_upstream(proxy: &ProxySpec, context: &'static str) -> PortResult<TcpStream> {
+    let timeout = Duration::from_millis(proxy.connect_timeout_ms.into());
+    let addresses = (proxy.host.as_str(), proxy.port)
+        .to_socket_addrs()
+        .map_err(|_| PortError::new(PortErrorKind::ProxyConnect, "proxy host resolution failed"))?;
+    for address in addresses {
+        if let Ok(stream) = TcpStream::connect_timeout(&address, timeout) {
+            stream.set_read_timeout(Some(timeout)).ok();
+            stream.set_write_timeout(Some(timeout)).ok();
+            return Ok(stream);
+        }
+    }
+    Err(PortError::new(
+        PortErrorKind::ProxyConnect,
+        format!("{context}: connection timed out or failed"),
+    ))
 }
 fn split_target(v: &str) -> PortResult<(&str, u16)> {
     let (h, p) = v
