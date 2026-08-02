@@ -65,7 +65,8 @@ Brows v0.1 已经完成了“本地可信 Chrome + 独立 User Data Dir + 多开
 
 ### 2.6 数据与迁移
 
-- XLSX 导出包含约 500 个环境，含名称、平台、账号、密码、2FA、Cookie、代理、分组、标签、备注、UA 等字段。
+- 当前检查的 XLSX 工作表范围为 `A1:Q501`，但其中 499 行是预格式化空白行，实际只有 `P-21` 一条有效环境记录；
+  不能用工作表范围推断导出数量。文件字段包含名称、平台、账号、密码、2FA、Cookie、代理、分组、标签、备注、UA 等。
 - XLSX 不包含完整 Chromium User Data、LocalStorage、IndexedDB、Service Worker、扩展数据和部分加密登录材料。
 - 因此仅靠 XLSX 不可能“完全无缝”恢复原登录环境；最多做到元数据、代理和部分 Cookie 的分阶段迁移。
 

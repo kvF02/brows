@@ -10,6 +10,7 @@ import {
   type EnvironmentPreset,
   type FingerprintScope,
   type MoreLoginPreview,
+  type MoreLoginImportResult,
   type Profile,
   type ProfileInput,
   type ProfileStatus,
@@ -371,7 +372,6 @@ function App() {
           api={apiRef.current}
           onClose={() => setShowMoreLoginImport(false)}
           onImported={async (count) => {
-            setShowMoreLoginImport(false);
             await refresh();
             notify(`已安全导入 ${count} 个环境；敏感字段没有迁移。`);
           }}
@@ -737,6 +737,7 @@ function MoreLoginImportModal({
 }) {
   const [sourcePath, setSourcePath] = useState("");
   const [preview, setPreview] = useState<MoreLoginPreview>();
+  const [importResult, setImportResult] = useState<MoreLoginImportResult>();
   const [busy, setBusy] = useState(false);
   const [formError, setFormError] = useState("");
 
@@ -749,6 +750,7 @@ function MoreLoginImportModal({
     setFormError("");
     try {
       setPreview(await api.previewMoreLogin(sourcePath.trim()));
+      setImportResult(undefined);
     } catch (cause) {
       setPreview(undefined);
       setFormError(getErrorMessage(cause));
@@ -763,11 +765,12 @@ function MoreLoginImportModal({
     setFormError("");
     try {
       const result = await api.importMoreLogin(sourcePath.trim());
+      setImportResult(result);
+      await onImported(result.importedCount);
       if (result.failures.length > 0) {
         setFormError(`已导入 ${result.importedCount} 个，另有 ${result.failures.length} 个失败。首个失败位于第 ${result.failures[0].rowNumber} 行：${result.failures[0].reason}`);
         return;
       }
-      await onImported(result.importedCount);
     } catch (cause) {
       setFormError(getErrorMessage(cause));
     } finally {
@@ -803,10 +806,17 @@ function MoreLoginImportModal({
             </div>
           </div>
         )}
+        {importResult && (
+          <div className={`import-result ${importResult.failures.length > 0 ? "warning" : "success"}`} role="status">
+            <strong>{importResult.failures.length > 0 ? "导入部分完成" : "导入完成"}</strong>
+            <span>成功 {importResult.importedCount} 个 · 跳过 {importResult.skippedCount} 个 · 失败 {importResult.failures.length} 个</span>
+            <small>本次只迁移环境元数据，不包含浏览历史、站点存储或原登录状态。</small>
+          </div>
+        )}
         {formError && <div className="form-error" role="alert">{formError}</div>}
         <div className="modal-actions">
-          <button className="secondary-button" type="button" disabled={busy} onClick={onClose}>取消</button>
-          <button className="primary-button" type="button" disabled={!preview || busy} onClick={() => void importProfiles()}>{busy && preview ? "正在导入…" : `确认导入${preview ? ` ${preview.profileCount} 个` : ""}`}</button>
+          <button className="secondary-button" type="button" disabled={busy} onClick={onClose}>{importResult ? "关闭" : "取消"}</button>
+          {!importResult && <button className="primary-button" type="button" disabled={!preview || busy} onClick={() => void importProfiles()}>{busy && preview ? "正在导入…" : `确认导入${preview ? ` ${preview.profileCount} 个` : ""}`}</button>}
         </div>
       </section>
     </div>

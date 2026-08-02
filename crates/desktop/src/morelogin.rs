@@ -97,7 +97,7 @@ pub(crate) fn inspect(path: &str) -> Result<MoreLoginPreview, String> {
             128,
         );
         let mut unique_tags = BTreeSet::new();
-        let tags = [value(11), value(12), value(1)]
+        let tags = [value(11), value(12), value(1), "MoreLogin 导入".to_owned()]
             .into_iter()
             .map(|tag| truncate(tag.trim().to_owned(), 64))
             .filter(|tag| !tag.is_empty() && unique_tags.insert(tag.to_ascii_lowercase()))
@@ -149,6 +149,7 @@ pub(crate) fn inspect(path: &str) -> Result<MoreLoginPreview, String> {
         candidates,
         notices: vec![
             "本阶段仅导入环境名称、分组、标签和平台分类".to_owned(),
+            "只统计包含实际单元格内容的记录；Excel 中预格式化的空白行不会导入".to_owned(),
             "不会导入或记录密码、2FA、Cookie、代理凭据和自定义 UA".to_owned(),
             "XLSX 不包含 LocalStorage、IndexedDB 和扩展数据，因此无法完全复原原登录环境".to_owned(),
         ],

@@ -984,6 +984,12 @@ select.text-input { cursor: pointer; }
 .import-candidate small { margin-top: 3px; color: #667188; font-size: 11px; }
 .import-candidate > span { flex: none; color: var(--amber); font-size: 11px; }
 .import-more { padding: 10px 12px; color: var(--muted); font-size: 11px; text-align: center; }
+.import-result { display: flex; flex-direction: column; gap: 4px; margin-top: 14px; padding: 13px 14px; border: 1px solid rgba(69, 213, 164, 0.2); border-radius: 10px; background: rgba(69, 213, 164, 0.06); }
+.import-result.warning { border-color: rgba(242, 184, 93, 0.22); background: rgba(242, 184, 93, 0.06); }
+.import-result strong { color: #bfeadd; font-size: 14px; }
+.import-result.warning strong { color: #e9c98d; }
+.import-result span { color: var(--text-soft); font-size: 12px; }
+.import-result small { color: var(--muted); font-size: 11px; }
 
 .security-callout {
   display: flex;
