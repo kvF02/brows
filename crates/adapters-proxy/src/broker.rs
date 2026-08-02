@@ -6,11 +6,13 @@ use std::{
     net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs},
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc,
+        Arc, Condvar, Mutex,
     },
     thread::{self, JoinHandle},
     time::Duration,
 };
+
+const MAX_UPSTREAM_CONNECTIONS: usize = 6;
 
 pub(crate) struct BrokerHandle {
     port: u16,
@@ -39,6 +41,7 @@ impl BrokerHandle {
         let stop = Arc::new(AtomicBool::new(false));
         let flag = stop.clone();
         let secret = secret.map(Arc::new);
+        let gate = Arc::new(ConnectionGate::new(MAX_UPSTREAM_CONNECTIONS));
         let thread = thread::Builder::new()
             .name(format!("brows-proxy-{port}"))
             .spawn(move || {
@@ -47,10 +50,11 @@ impl BrokerHandle {
                         Ok((client, _)) => {
                             let p = proxy.clone();
                             let s = secret.clone();
+                            let g = gate.clone();
                             let _ = thread::Builder::new()
                                 .name("brows-proxy-connection".into())
                                 .spawn(move || {
-                                    handle_with_failure_response(client, &p, s.as_deref());
+                                    handle_with_failure_response(client, &p, s.as_deref(), &g);
                                 });
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
@@ -83,9 +87,14 @@ fn handle_with_failure_response(
     client: TcpStream,
     proxy: &ProxySpec,
     secret: Option<&SecretValue>,
+    gate: &ConnectionGate,
 ) {
     let fallback = client.try_clone().ok();
-    if let Err(error) = handle(client, proxy, secret) {
+    let timeout = Duration::from_millis(proxy.connect_timeout_ms.into());
+    let result = gate
+        .acquire(timeout)
+        .and_then(|_permit| handle(client, proxy, secret));
+    if let Err(error) = result {
         if let Some(mut client) = fallback {
             let (status, reason) = if error.kind == PortErrorKind::ProxyAuth {
                 (
@@ -103,6 +112,67 @@ fn handle_with_failure_response(
             );
             let _ = client.shutdown(Shutdown::Both);
         }
+    }
+}
+
+#[derive(Debug)]
+struct ConnectionGate {
+    available: Mutex<usize>,
+    changed: Condvar,
+    capacity: usize,
+}
+
+impl ConnectionGate {
+    fn new(capacity: usize) -> Self {
+        Self {
+            available: Mutex::new(capacity),
+            changed: Condvar::new(),
+            capacity,
+        }
+    }
+
+    fn acquire(&self, timeout: Duration) -> PortResult<ConnectionPermit<'_>> {
+        let available = self.available.lock().map_err(|_| {
+            PortError::new(
+                PortErrorKind::Unavailable,
+                "proxy connection gate unavailable",
+            )
+        })?;
+        let (mut available, wait) = self
+            .changed
+            .wait_timeout_while(available, timeout, |count| *count == 0)
+            .map_err(|_| {
+                PortError::new(
+                    PortErrorKind::Unavailable,
+                    "proxy connection gate unavailable",
+                )
+            })?;
+        if wait.timed_out() && *available == 0 {
+            return Err(PortError::new(
+                PortErrorKind::ProxyConnect,
+                "upstream proxy connection limit remained busy",
+            ));
+        }
+        *available -= 1;
+        Ok(ConnectionPermit { gate: self })
+    }
+
+    fn release(&self) {
+        if let Ok(mut available) = self.available.lock() {
+            *available = (*available + 1).min(self.capacity);
+            self.changed.notify_one();
+        }
+    }
+}
+
+#[derive(Debug)]
+struct ConnectionPermit<'a> {
+    gate: &'a ConnectionGate,
+}
+
+impl Drop for ConnectionPermit<'_> {
+    fn drop(&mut self) {
+        self.gate.release();
     }
 }
 impl Drop for BrokerHandle {
