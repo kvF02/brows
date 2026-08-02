@@ -829,6 +829,7 @@ pub struct ProxyConnectivityCheckDto {
     pub latency_ms: u64,
     pub detail: String,
     pub exit_ip: Option<String>,
+    pub exit_ip_checked: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

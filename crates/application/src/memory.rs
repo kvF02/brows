@@ -434,6 +434,7 @@ impl ProxyConnectivityTester for InMemoryProxyConnectivityTester {
             latency_ms: 1,
             detail: "in-memory endpoint reachable".to_owned(),
             exit_ip: Some("203.0.113.1".to_owned()),
+            exit_ip_checked: true,
         })
     }
 }

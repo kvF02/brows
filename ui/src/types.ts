@@ -30,6 +30,7 @@ export interface ProxySummary {
   health: ProxyHealth;
   lastCheckedAt?: string;
   lastExitIp?: string;
+  exitIpChecked?: boolean;
 }
 
 export interface ProxyInput {

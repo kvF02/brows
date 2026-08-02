@@ -120,6 +120,7 @@ pub struct ProxyConnectivityCheck {
     pub latency_ms: u64,
     pub detail: String,
     pub exit_ip: Option<String>,
+    pub exit_ip_checked: bool,
 }
 
 pub trait ProxyConnectivityTester: fmt::Debug + Send + Sync {

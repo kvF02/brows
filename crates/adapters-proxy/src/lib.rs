@@ -129,25 +129,37 @@ impl ProxyConnectivityTester for TcpProxyConnectivityTester {
         let timeout = Duration::from_millis(proxy.connect_timeout_ms.into());
         let start = Instant::now();
         let mut broker = BrokerHandle::start(proxy.clone(), credential.cloned())?;
-        let result =
-            test_through_broker(broker.port(), timeout).map(|exit_ip| ProxyConnectivityCheck {
-                reachable: true,
-                latency_ms: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-                detail: "Proxy authentication and exit request succeeded".to_owned(),
-                exit_ip: Some(exit_ip),
-            });
+        let result = test_https_tunnel(broker.port(), timeout).map(|()| {
+            match test_exit_ip_through_broker(broker.port(), timeout) {
+                Ok(exit_ip) => ProxyConnectivityCheck {
+                    reachable: true,
+                    latency_ms: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                    detail: "Proxy authentication, HTTPS tunnel and exit IP request succeeded"
+                        .to_owned(),
+                    exit_ip: Some(exit_ip),
+                    exit_ip_checked: true,
+                },
+                Err(_) => ProxyConnectivityCheck {
+                    reachable: true,
+                    latency_ms: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+                    detail: "Proxy authentication and HTTPS tunnel succeeded; the optional HTTP exit IP endpoint was unavailable".to_owned(),
+                    exit_ip: None,
+                    exit_ip_checked: false,
+                },
+            }
+        });
         broker.stop();
         result
     }
 }
 
-fn test_through_broker(port: u16, timeout: Duration) -> PortResult<String> {
+fn connect_to_broker(port: u16, timeout: Duration) -> PortResult<TcpStream> {
     let address = ("127.0.0.1", port)
         .to_socket_addrs()
         .map_err(|_| PortError::new(PortErrorKind::ProxyConnect, "broker address failed"))?
         .next()
         .ok_or_else(|| PortError::new(PortErrorKind::ProxyConnect, "broker address missing"))?;
-    let mut stream = TcpStream::connect_timeout(&address, timeout).map_err(|_| {
+    let stream = TcpStream::connect_timeout(&address, timeout).map_err(|_| {
         PortError::new(
             PortErrorKind::ProxyConnect,
             "proxy broker connection failed",
@@ -155,6 +167,55 @@ fn test_through_broker(port: u16, timeout: Duration) -> PortResult<String> {
     })?;
     stream.set_read_timeout(Some(timeout)).ok();
     stream.set_write_timeout(Some(timeout)).ok();
+    Ok(stream)
+}
+
+fn test_https_tunnel(port: u16, timeout: Duration) -> PortResult<()> {
+    let mut stream = connect_to_broker(port, timeout)?;
+    stream
+        .write_all(b"CONNECT www.google.com:443 HTTP/1.1\r\nHost: www.google.com:443\r\nConnection: close\r\n\r\n")
+        .map_err(|_| PortError::new(PortErrorKind::ProxyConnect, "HTTPS tunnel test request failed"))?;
+    let response = read_response_head(&mut stream)?;
+    if response.starts_with("HTTP/1.1 407") || response.starts_with("HTTP/1.0 407") {
+        return Err(PortError::new(
+            PortErrorKind::ProxyAuth,
+            "proxy authentication failed",
+        ));
+    }
+    if !response.starts_with("HTTP/1.1 200") && !response.starts_with("HTTP/1.0 200") {
+        return Err(PortError::new(
+            PortErrorKind::ProxyConnect,
+            "proxy HTTPS tunnel failed",
+        ));
+    }
+    Ok(())
+}
+
+fn read_response_head(stream: &mut TcpStream) -> PortResult<String> {
+    let mut bytes = Vec::new();
+    let mut byte = [0_u8; 1];
+    while bytes.len() < 16 * 1024 {
+        stream.read_exact(&mut byte).map_err(|_| {
+            PortError::new(PortErrorKind::ProxyConnect, "proxy response header failed")
+        })?;
+        bytes.push(byte[0]);
+        if bytes.ends_with(b"\r\n\r\n") {
+            return String::from_utf8(bytes).map_err(|_| {
+                PortError::new(
+                    PortErrorKind::InvalidData,
+                    "proxy response header was invalid",
+                )
+            });
+        }
+    }
+    Err(PortError::new(
+        PortErrorKind::InvalidData,
+        "proxy response header was too large",
+    ))
+}
+
+fn test_exit_ip_through_broker(port: u16, timeout: Duration) -> PortResult<String> {
+    let mut stream = connect_to_broker(port, timeout)?;
     write!(
         stream,
         "GET {PROXY_TEST_ENDPOINT} HTTP/1.1\r\nHost: {PROXY_TEST_HOST}\r\nConnection: close\r\nUser-Agent: Brows-Proxy-Test/1\r\n\r\n"

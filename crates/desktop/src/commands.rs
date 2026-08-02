@@ -229,6 +229,7 @@ pub(crate) fn proxy_test(
         latency_ms: result.latency_ms,
         detail: result.detail,
         exit_ip: result.exit_ip,
+        exit_ip_checked: result.exit_ip_checked,
     })
 }
 

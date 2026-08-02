@@ -960,7 +960,7 @@ function ProxyView({
       const checked = await api.testProxy(proxy.id);
       setTestingProxy(undefined);
       await onRefresh();
-      onNotice(`“${proxy.name}”认证和出口请求成功${checked.lastExitIp ? `，出口 IP：${checked.lastExitIp}` : ""}。`);
+      onNotice(checked.lastExitIp ? `“${proxy.name}”认证和出口请求成功，出口 IP：${checked.lastExitIp}。` : `“${proxy.name}”认证及 HTTPS 隧道可用；明文 HTTP 出口 IP 端点不可用。`);
     } catch (cause) {
       const message = getErrorMessage(cause);
       setTestingProxy(undefined);

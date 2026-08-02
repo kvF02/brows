@@ -86,6 +86,7 @@ interface ProxyConnectivityCheckDto {
   latencyMs: number;
   detail: string;
   exitIp?: string;
+  exitIpChecked: boolean;
 }
 
 interface DiagnosticReportDto {
@@ -149,7 +150,7 @@ export class TauriApiClient implements ApiClient {
   private readonly dtoCache = new Map<string, ProfileDto>();
   private readonly firstSeen = new Map<string, string>();
   private sessions: SessionDto[] = [];
-  private readonly proxyHealth = new Map<string, Pick<ProxySummary, "health" | "lastCheckedAt" | "lastExitIp">>();
+  private readonly proxyHealth = new Map<string, Pick<ProxySummary, "health" | "lastCheckedAt" | "lastExitIp" | "exitIpChecked">>();
 
   constructor(private readonly bridge: TypedCommandBridge) {}
 
@@ -329,6 +330,7 @@ export class TauriApiClient implements ApiClient {
       health: result.reachable ? "healthy" : "unhealthy",
       lastCheckedAt: new Date().toISOString(),
       lastExitIp: result.exitIp,
+      exitIpChecked: result.exitIpChecked,
     });
     const proxy = (await this.call<ProxyDto[]>(handlers.proxyList)).find((item) => item.id === id);
     if (!proxy) throw new ApiError("NOT_FOUND", "代理不存在");
@@ -420,6 +422,7 @@ export class TauriApiClient implements ApiClient {
       health: check?.health ?? "unknown",
       lastCheckedAt: check?.lastCheckedAt,
       lastExitIp: check?.lastExitIp,
+      exitIpChecked: check?.exitIpChecked,
     };
   }
 
