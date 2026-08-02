@@ -187,6 +187,9 @@ fn handle(
     secret: Option<&SecretValue>,
 ) -> PortResult<()> {
     client
+        .set_nonblocking(false)
+        .map_err(|e| ioerr("configure proxy client socket", e))?;
+    client
         .set_read_timeout(Some(Duration::from_millis(proxy.connect_timeout_ms.into())))
         .ok();
     let head = read_head(&mut client)?;
@@ -352,6 +355,7 @@ fn http_connect(
             "upstream proxy rejected CONNECT",
         ));
     }
+    clear_transport_timeouts(&s);
     Ok(s)
 }
 fn socks_connect(
@@ -442,7 +446,13 @@ fn socks_connect(
     let mut tail = vec![0; n + 2];
     s.read_exact(&mut tail)
         .map_err(|e| ioerr("read SOCKS address", e))?;
+    clear_transport_timeouts(&s);
     Ok(s)
+}
+
+fn clear_transport_timeouts(stream: &TcpStream) {
+    stream.set_read_timeout(None).ok();
+    stream.set_write_timeout(None).ok();
 }
 
 fn connect_upstream(proxy: &ProxySpec, context: &'static str) -> PortResult<TcpStream> {
@@ -669,5 +679,47 @@ mod tests {
         )
         .unwrap();
         assert!(rewritten.starts_with(b"GET /a HTTP/1.1\r\n"));
+    }
+
+    #[test]
+    fn established_tunnel_does_not_inherit_handshake_timeouts() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let accept = std::thread::spawn(move || listener.accept().unwrap().0);
+        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let peer = accept.join().unwrap();
+        stream
+            .set_read_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        stream
+            .set_write_timeout(Some(Duration::from_millis(20)))
+            .unwrap();
+        clear_transport_timeouts(&stream);
+        assert_eq!(stream.read_timeout().unwrap(), None);
+        assert_eq!(stream.write_timeout().unwrap(), None);
+        drop(peer);
+    }
+
+    #[test]
+    fn accepted_client_socket_is_restored_to_blocking_mode() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let client = TcpStream::connect(("127.0.0.1", port)).unwrap();
+        let accepted = loop {
+            match listener.accept() {
+                Ok((stream, _)) => break stream,
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::yield_now()
+                }
+                Err(error) => panic!("accept failed: {error}"),
+            }
+        };
+        accepted.set_nonblocking(false).unwrap();
+        accepted
+            .set_read_timeout(Some(Duration::from_millis(100)))
+            .unwrap();
+        assert!(accepted.read_timeout().unwrap().is_some());
+        drop((client, accepted));
     }
 }
