@@ -32,5 +32,9 @@ serde = { workspace = true }
 tauri-build = { version = "2", features = [] }
 
 [features]
+# Direct `cargo build --release` must embed and serve the packaged UI through
+# Tauri's production asset protocol. The Tauri CLI enables this feature for
+# builds, but developers also launch this binary directly during local QA.
+default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
 webview-diagnostics = []
