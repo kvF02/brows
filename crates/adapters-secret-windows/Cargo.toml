@@ -1,0 +1,10 @@
+[package]
+name = "brows-adapters-secret-windows"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Windows Credential Manager SecretStore adapter for Brows"
+
+[dependencies]
+brows-application = { path = "../application" }
+brows-domain = { path = "../domain" }

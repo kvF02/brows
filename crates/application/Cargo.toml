@@ -1,0 +1,10 @@
+[package]
+name = "brows-application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Application use cases and ports for Brows"
+
+[dependencies]
+brows-domain = { path = "../domain" }
+brows-contracts = { path = "../contracts" }

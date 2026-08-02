@@ -1,0 +1,689 @@
+#![forbid(unsafe_code)]
+#![deny(missing_debug_implementations)]
+
+//! Managed Chromium runtime adapter.
+//!
+//! The adapter accepts only a validated [`ResolvedLaunchPlan`]. It never
+//! invokes a shell, never accepts arbitrary flags, and verifies the selected
+//! executable against the registered SHA-256 digest before every launch.
+
+use brows_application::{BrowserProcess, BrowserRuntime, PortError, PortErrorKind, PortResult};
+use brows_domain::{
+    BrowserBuild, BrowserBuildId, BrowserBuildSelector, BrowserChannel, LaunchArgument,
+    ResolvedLaunchPlan, RuntimeTrust, SessionId,
+};
+use serde_json::{Map, Value};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, HashMap},
+    ffi::OsString,
+    fs::{self, File},
+    io::{BufReader, Read},
+    path::{Component, Path, PathBuf},
+    process::{Child, Command, Stdio},
+    sync::{Mutex, RwLock},
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+const MAX_PREFERENCES_BYTES: u64 = 16 * 1024 * 1024;
+
+#[derive(Debug, Default)]
+struct BuildRegistry {
+    by_id: BTreeMap<BrowserBuildId, BrowserBuild>,
+    active_channels: BTreeMap<&'static str, BrowserBuildId>,
+}
+
+/// Owns verified browser builds and all child processes launched from them.
+#[derive(Debug)]
+pub struct ManagedChromiumRuntime {
+    runtime_root: PathBuf,
+    profile_root: PathBuf,
+    builds: RwLock<BuildRegistry>,
+    processes: Mutex<HashMap<SessionId, Child>>,
+}
+
+impl ManagedChromiumRuntime {
+    pub fn new(
+        runtime_root: impl Into<PathBuf>,
+        profile_root: impl Into<PathBuf>,
+    ) -> PortResult<Self> {
+        let runtime_root = create_and_canonicalize(runtime_root.into(), "runtime root")?;
+        let profile_root = create_and_canonicalize(profile_root.into(), "profile root")?;
+        Ok(Self {
+            runtime_root,
+            profile_root,
+            builds: RwLock::new(BuildRegistry::default()),
+            processes: Mutex::new(HashMap::new()),
+        })
+    }
+
+    /// Registers a build only after checking its trust, location and digest.
+    pub fn register_build(&self, mut build: BrowserBuild, activate: bool) -> PortResult<()> {
+        build
+            .validate()
+            .map_err(|error| invalid_data(error.to_string()))?;
+        if build.trust != RuntimeTrust::Verified {
+            return Err(PortError::new(
+                PortErrorKind::RuntimeUntrusted,
+                "only verified browser builds can be registered",
+            ));
+        }
+
+        let executable = canonical_regular_file(&build.executable_path, "browser executable")?;
+        ensure_within(&executable, &self.runtime_root, "browser executable")?;
+        verify_digest(&executable, &build.sha256)?;
+        build.executable_path = executable;
+
+        let mut registry = self
+            .builds
+            .write()
+            .map_err(|_| internal("browser build registry lock is poisoned"))?;
+        if registry.by_id.contains_key(&build.id) {
+            return Err(PortError::new(
+                PortErrorKind::AlreadyExists,
+                "browser build is already registered",
+            ));
+        }
+        if activate {
+            registry
+                .active_channels
+                .insert(channel_key(build.channel), build.id.clone());
+        }
+        registry.by_id.insert(build.id.clone(), build);
+        Ok(())
+    }
+
+    pub fn activate(&self, build_id: &BrowserBuildId) -> PortResult<()> {
+        let mut registry = self
+            .builds
+            .write()
+            .map_err(|_| internal("browser build registry lock is poisoned"))?;
+        let channel = registry
+            .by_id
+            .get(build_id)
+            .map(|build| build.channel)
+            .ok_or_else(|| PortError::not_found("browser build"))?;
+        registry
+            .active_channels
+            .insert(channel_key(channel), build_id.clone());
+        Ok(())
+    }
+
+    pub fn installed_builds(&self) -> PortResult<Vec<BrowserBuild>> {
+        let registry = self
+            .builds
+            .read()
+            .map_err(|_| internal("browser build registry lock is poisoned"))?;
+        Ok(registry.by_id.values().cloned().collect())
+    }
+
+    fn verified_build_for_plan(&self, plan: &ResolvedLaunchPlan) -> PortResult<BrowserBuild> {
+        let executable = canonical_regular_file(&plan.executable_path, "browser executable")?;
+        ensure_within(&executable, &self.runtime_root, "browser executable")?;
+
+        let registry = self
+            .builds
+            .read()
+            .map_err(|_| internal("browser build registry lock is poisoned"))?;
+        let build = registry
+            .by_id
+            .values()
+            .find(|build| build.executable_path == executable)
+            .cloned()
+            .ok_or_else(|| {
+                PortError::new(
+                    PortErrorKind::RuntimeUntrusted,
+                    "launch plan references an unregistered browser executable",
+                )
+            })?;
+        if build.trust != RuntimeTrust::Verified {
+            return Err(PortError::new(
+                PortErrorKind::RuntimeUntrusted,
+                "browser runtime trust was revoked",
+            ));
+        }
+        verify_digest(&executable, &build.sha256)?;
+        Ok(build)
+    }
+
+    fn prepare_profile(&self, plan: &ResolvedLaunchPlan) -> PortResult<PathBuf> {
+        let user_data_dir = create_confined_directory(&self.profile_root, &plan.user_data_dir)?;
+        write_preferences(&user_data_dir, plan)?;
+        Ok(user_data_dir)
+    }
+
+    fn render_arguments(
+        plan: &ResolvedLaunchPlan,
+        user_data_dir: &Path,
+    ) -> PortResult<Vec<OsString>> {
+        let mut rendered = vec![
+            OsString::from(format!("--user-data-dir={}", user_data_dir.display())),
+            OsString::from("--no-first-run"),
+            OsString::from("--no-default-browser-check"),
+        ];
+        let mut saw_user_data_dir = false;
+
+        for argument in &plan.arguments {
+            match argument {
+                LaunchArgument::UserDataDirectory(path) => {
+                    if path != &plan.user_data_dir || saw_user_data_dir {
+                        return Err(invalid_data("invalid user data directory argument"));
+                    }
+                    saw_user_data_dir = true;
+                }
+                LaunchArgument::ProxyServer { scheme, host, port } => {
+                    rendered.push(OsString::from(format!(
+                        "--proxy-server={}://{}:{}",
+                        proxy_scheme(*scheme),
+                        host,
+                        port
+                    )));
+                }
+                LaunchArgument::AcceptLanguages(languages) => {
+                    let primary = languages
+                        .first()
+                        .ok_or_else(|| invalid_data("accept language list is empty"))?;
+                    rendered.push(OsString::from(format!("--lang={primary}")));
+                }
+                LaunchArgument::WindowSize { width, height } => {
+                    rendered.push(OsString::from(format!("--window-size={width},{height}")));
+                }
+            }
+        }
+        if !saw_user_data_dir {
+            return Err(invalid_data("launch plan has no user data directory"));
+        }
+        rendered.extend(plan.preferences.startup_urls.iter().map(OsString::from));
+
+        if rendered.iter().any(|value| {
+            let value = value.to_string_lossy().to_ascii_lowercase();
+            value == "--no-sandbox" || value.starts_with("--remote-debugging-")
+        }) {
+            return Err(invalid_data("unsafe Chromium flag was generated"));
+        }
+        Ok(rendered)
+    }
+}
+
+impl BrowserRuntime for ManagedChromiumRuntime {
+    fn resolve_build(&self, selector: &BrowserBuildSelector) -> PortResult<BrowserBuild> {
+        let registry = self
+            .builds
+            .read()
+            .map_err(|_| internal("browser build registry lock is poisoned"))?;
+        let id = match selector {
+            BrowserBuildSelector::Pinned(id) => id,
+            BrowserBuildSelector::Channel(channel) => registry
+                .active_channels
+                .get(channel_key(*channel))
+                .ok_or_else(|| PortError::not_found("active browser channel"))?,
+        };
+        registry
+            .by_id
+            .get(id)
+            .cloned()
+            .ok_or_else(|| PortError::not_found("browser build"))
+    }
+
+    fn launch(&self, plan: &ResolvedLaunchPlan) -> PortResult<BrowserProcess> {
+        plan.validate()
+            .map_err(|error| invalid_data(error.to_string()))?;
+        let build = self.verified_build_for_plan(plan)?;
+        let user_data_dir = self.prepare_profile(plan)?;
+        let arguments = Self::render_arguments(plan, &user_data_dir)?;
+
+        let mut processes = self
+            .processes
+            .lock()
+            .map_err(|_| internal("browser process registry lock is poisoned"))?;
+        if processes.contains_key(&plan.session_id) {
+            return Err(PortError::new(
+                PortErrorKind::AlreadyExists,
+                "session already owns a browser process",
+            ));
+        }
+
+        let child = Command::new(&build.executable_path)
+            .args(arguments)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|error| {
+                PortError::new(
+                    PortErrorKind::Unavailable,
+                    format!("failed to launch browser process: {error}"),
+                )
+            })?;
+        let process_id = child.id();
+        processes.insert(plan.session_id.clone(), child);
+        Ok(BrowserProcess {
+            session_id: plan.session_id.clone(),
+            process_id,
+            started_at_ms: now_ms(),
+        })
+    }
+
+    fn stop(&self, session_id: &SessionId) -> PortResult<()> {
+        let mut child = self
+            .processes
+            .lock()
+            .map_err(|_| internal("browser process registry lock is poisoned"))?
+            .remove(session_id)
+            .ok_or_else(|| PortError::not_found("browser process"))?;
+        if child
+            .try_wait()
+            .map_err(|error| internal(format!("failed to query browser process: {error}")))?
+            .is_none()
+        {
+            child.kill().map_err(|error| {
+                PortError::new(
+                    PortErrorKind::Unavailable,
+                    format!("failed to stop browser process: {error}"),
+                )
+            })?;
+        }
+        child
+            .wait()
+            .map_err(|error| internal(format!("failed to reap browser process: {error}")))?;
+        Ok(())
+    }
+
+    fn is_running(&self, session_id: &SessionId) -> PortResult<bool> {
+        let mut processes = self
+            .processes
+            .lock()
+            .map_err(|_| internal("browser process registry lock is poisoned"))?;
+        let Some(child) = processes.get_mut(session_id) else {
+            return Ok(false);
+        };
+        match child
+            .try_wait()
+            .map_err(|error| internal(format!("failed to query browser process: {error}")))?
+        {
+            None => Ok(true),
+            Some(_) => {
+                processes.remove(session_id);
+                Ok(false)
+            }
+        }
+    }
+}
+
+impl Drop for ManagedChromiumRuntime {
+    fn drop(&mut self) {
+        if let Ok(processes) = self.processes.get_mut() {
+            for child in processes.values_mut() {
+                let _ = child.kill();
+                let _ = child.wait();
+            }
+            processes.clear();
+        }
+    }
+}
+
+fn write_preferences(user_data_dir: &Path, plan: &ResolvedLaunchPlan) -> PortResult<()> {
+    let default_dir = user_data_dir.join("Default");
+    fs::create_dir_all(&default_dir).map_err(|error| {
+        internal(format!(
+            "failed to create profile preferences directory: {error}"
+        ))
+    })?;
+    let path = default_dir.join("Preferences");
+    let mut root = if path.exists() {
+        let metadata = fs::metadata(&path)
+            .map_err(|error| invalid_data(format!("cannot inspect Preferences: {error}")))?;
+        if !metadata.is_file() || metadata.len() > MAX_PREFERENCES_BYTES {
+            return Err(invalid_data("Preferences is not a bounded regular file"));
+        }
+        let bytes = fs::read(&path)
+            .map_err(|error| invalid_data(format!("cannot read Preferences: {error}")))?;
+        serde_json::from_slice::<Value>(&bytes)
+            .map_err(|error| invalid_data(format!("Preferences is invalid JSON: {error}")))?
+    } else {
+        Value::Object(Map::new())
+    };
+    let object = root
+        .as_object_mut()
+        .ok_or_else(|| invalid_data("Preferences root must be a JSON object"))?;
+    let intl = object
+        .entry("intl")
+        .or_insert_with(|| Value::Object(Map::new()))
+        .as_object_mut()
+        .ok_or_else(|| invalid_data("Preferences intl field must be an object"))?;
+    intl.insert(
+        "accept_languages".to_owned(),
+        Value::String(plan.preferences.accept_languages.join(",")),
+    );
+    let serialized = serde_json::to_vec(&root)
+        .map_err(|error| internal(format!("failed to serialize Preferences: {error}")))?;
+    let temporary = default_dir.join("Preferences.brows.tmp");
+    fs::write(&temporary, serialized)
+        .map_err(|error| internal(format!("failed to stage Preferences: {error}")))?;
+    fs::rename(&temporary, &path)
+        .map_err(|error| internal(format!("failed to activate Preferences: {error}")))?;
+    Ok(())
+}
+
+fn create_and_canonicalize(path: PathBuf, label: &str) -> PortResult<PathBuf> {
+    if path.as_os_str().is_empty() {
+        return Err(invalid_data(format!("{label} cannot be empty")));
+    }
+    fs::create_dir_all(&path)
+        .map_err(|error| internal(format!("failed to create {label}: {error}")))?;
+    path.canonicalize()
+        .map_err(|error| internal(format!("failed to canonicalize {label}: {error}")))
+}
+
+fn create_confined_directory(root: &Path, requested: &Path) -> PortResult<PathBuf> {
+    let relative = requested
+        .strip_prefix(root)
+        .map_err(|_| invalid_data("profile directory is outside the managed root"))?;
+    if relative.as_os_str().is_empty()
+        || relative
+            .components()
+            .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(invalid_data("profile directory contains unsafe components"));
+    }
+
+    let mut current = root.to_path_buf();
+    for component in relative.components() {
+        current.push(component.as_os_str());
+        if current.exists() {
+            let metadata = fs::symlink_metadata(&current).map_err(|error| {
+                invalid_data(format!("cannot inspect profile directory: {error}"))
+            })?;
+            if metadata.file_type().is_symlink()
+                || is_reparse_point(&metadata)
+                || !metadata.is_dir()
+            {
+                return Err(invalid_data(
+                    "profile path contains a link or non-directory component",
+                ));
+            }
+        } else {
+            fs::create_dir(&current).map_err(|error| {
+                internal(format!("failed to create profile directory: {error}"))
+            })?;
+        }
+    }
+    let canonical = current
+        .canonicalize()
+        .map_err(|error| internal(format!("failed to canonicalize profile directory: {error}")))?;
+    ensure_within(&canonical, root, "profile directory")?;
+    Ok(canonical)
+}
+
+#[cfg(windows)]
+fn is_reparse_point(metadata: &fs::Metadata) -> bool {
+    use std::os::windows::fs::MetadataExt;
+    metadata.file_attributes() & 0x400 != 0
+}
+
+#[cfg(not(windows))]
+fn is_reparse_point(_metadata: &fs::Metadata) -> bool {
+    false
+}
+
+fn canonical_regular_file(path: &Path, label: &str) -> PortResult<PathBuf> {
+    let canonical = path
+        .canonicalize()
+        .map_err(|error| invalid_data(format!("cannot canonicalize {label}: {error}")))?;
+    let metadata = fs::symlink_metadata(&canonical)
+        .map_err(|error| invalid_data(format!("cannot inspect {label}: {error}")))?;
+    if !metadata.is_file() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
+        return Err(invalid_data(format!("{label} must be a regular file")));
+    }
+    Ok(canonical)
+}
+
+fn ensure_within(path: &Path, root: &Path, label: &str) -> PortResult<()> {
+    if !path.starts_with(root) {
+        return Err(invalid_data(format!("{label} is outside its managed root")));
+    }
+    Ok(())
+}
+
+fn verify_digest(path: &Path, expected: &str) -> PortResult<()> {
+    let file = File::open(path)
+        .map_err(|error| invalid_data(format!("cannot open browser executable: {error}")))?;
+    let mut reader = BufReader::new(file);
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| invalid_data(format!("cannot hash browser executable: {error}")))?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    let actual = digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(PortError::new(
+            PortErrorKind::RuntimeUntrusted,
+            "browser executable digest does not match the signed catalog",
+        ));
+    }
+    Ok(())
+}
+
+fn channel_key(channel: BrowserChannel) -> &'static str {
+    match channel {
+        BrowserChannel::Stable => "stable",
+        BrowserChannel::Beta => "beta",
+        BrowserChannel::Dev => "dev",
+        BrowserChannel::Canary => "canary",
+    }
+}
+
+fn proxy_scheme(scheme: brows_domain::ProxyScheme) -> &'static str {
+    match scheme {
+        brows_domain::ProxyScheme::Http => "http",
+        brows_domain::ProxyScheme::Https => "https",
+        brows_domain::ProxyScheme::Socks5 => "socks5",
+    }
+}
+
+fn now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
+}
+
+fn invalid_data(message: impl Into<String>) -> PortError {
+    PortError::new(PortErrorKind::InvalidData, message)
+}
+
+fn internal(message: impl Into<String>) -> PortError {
+    PortError::new(PortErrorKind::Internal, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use brows_domain::{
+        BrowserCapabilities, BrowserPreferences, ProfileId, ProxyLaunchBinding, Revision,
+        RuntimeTrust,
+    };
+
+    fn temp_root(name: &str) -> PathBuf {
+        let path = std::env::temp_dir().join(format!(
+            "brows-runtime-{name}-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        fs::create_dir_all(&path).unwrap();
+        path
+    }
+
+    fn sample_plan(executable: PathBuf, profile_root: &Path) -> ResolvedLaunchPlan {
+        let user_data_dir = profile_root.join("profile-key").join("userdata");
+        ResolvedLaunchPlan {
+            session_id: SessionId::new("session-1").unwrap(),
+            profile_id: ProfileId::new("profile-1").unwrap(),
+            profile_revision: Revision::FIRST,
+            executable_path: executable,
+            user_data_dir: user_data_dir.clone(),
+            arguments: vec![
+                LaunchArgument::UserDataDirectory(user_data_dir),
+                LaunchArgument::AcceptLanguages(vec!["zh-CN".to_owned(), "en-US".to_owned()]),
+                LaunchArgument::WindowSize {
+                    width: 1280,
+                    height: 800,
+                },
+            ],
+            preferences: BrowserPreferences {
+                accept_languages: vec!["zh-CN".to_owned(), "en-US".to_owned()],
+                startup_urls: vec!["https://example.com".to_owned()],
+                permissions_prompt: true,
+            },
+            proxy: ProxyLaunchBinding::Direct,
+            capabilities: BrowserCapabilities {
+                supports_language: true,
+                supports_proxy: true,
+                supports_webrtc_policy: false,
+                supports_devtools_pipe: false,
+            },
+            warnings: Vec::new(),
+            plan_hash: "a".repeat(64),
+        }
+    }
+
+    fn sample_build(
+        id: &str,
+        executable_path: PathBuf,
+        contents: &[u8],
+        channel: BrowserChannel,
+    ) -> BrowserBuild {
+        let sha256 = Sha256::digest(contents)
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        BrowserBuild {
+            id: BrowserBuildId::new(id).unwrap(),
+            provider: "test".to_owned(),
+            version: id.to_owned(),
+            channel,
+            executable_path,
+            sha256,
+            publisher: "Test Publisher".to_owned(),
+            trust: RuntimeTrust::Verified,
+            capabilities: BrowserCapabilities::default(),
+            installed_at_ms: 1,
+        }
+    }
+
+    #[test]
+    fn rendered_arguments_are_typed_and_never_disable_security() {
+        let profile_root = temp_root("arguments");
+        let plan = sample_plan(PathBuf::from("chrome.exe"), &profile_root);
+        let rendered =
+            ManagedChromiumRuntime::render_arguments(&plan, &plan.user_data_dir).unwrap();
+        let rendered = rendered
+            .iter()
+            .map(|value| value.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert!(rendered.iter().any(|value| value == "--lang=zh-CN"));
+        assert!(rendered
+            .iter()
+            .any(|value| value == "--window-size=1280,800"));
+        assert!(rendered.iter().all(|value| value != "--no-sandbox"));
+        assert!(rendered
+            .iter()
+            .all(|value| !value.starts_with("--remote-debugging-")));
+    }
+
+    #[test]
+    fn profile_directory_must_stay_under_managed_root() {
+        let root = temp_root("confinement").canonicalize().unwrap();
+        let outside = root.parent().unwrap().join("outside-userdata");
+        let error = create_confined_directory(&root, &outside).unwrap_err();
+        assert_eq!(error.kind, PortErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn build_registration_rejects_digest_mismatch() {
+        let root = temp_root("digest");
+        let runtime_dir = root.join("runtime");
+        let profile_dir = root.join("profiles");
+        fs::create_dir_all(&runtime_dir).unwrap();
+        let executable = runtime_dir.join("chrome.exe");
+        fs::write(&executable, b"not really chromium").unwrap();
+        let runtime = ManagedChromiumRuntime::new(&runtime_dir, &profile_dir).unwrap();
+        let build = BrowserBuild {
+            id: BrowserBuildId::new("stable-1").unwrap(),
+            provider: "test".to_owned(),
+            version: "1".to_owned(),
+            channel: BrowserChannel::Stable,
+            executable_path: executable,
+            sha256: "0".repeat(64),
+            publisher: "Test Publisher".to_owned(),
+            trust: RuntimeTrust::Verified,
+            capabilities: BrowserCapabilities::default(),
+            installed_at_ms: 1,
+        };
+        let error = runtime.register_build(build, true).unwrap_err();
+        assert_eq!(error.kind, PortErrorKind::RuntimeUntrusted);
+    }
+
+    #[test]
+    fn activation_replaces_the_active_build_for_a_channel() {
+        let root = temp_root("activation");
+        let runtime_dir = root.join("runtime");
+        let profile_dir = root.join("profiles");
+        fs::create_dir_all(&runtime_dir).unwrap();
+
+        let first_path = runtime_dir.join("chrome-1.exe");
+        let second_path = runtime_dir.join("chrome-2.exe");
+        let first_contents = b"first test runtime";
+        let second_contents = b"second test runtime";
+        fs::write(&first_path, first_contents).unwrap();
+        fs::write(&second_path, second_contents).unwrap();
+
+        let runtime = ManagedChromiumRuntime::new(&runtime_dir, &profile_dir).unwrap();
+        let first = sample_build(
+            "stable-1",
+            first_path,
+            first_contents,
+            BrowserChannel::Stable,
+        );
+        let second = sample_build(
+            "stable-2",
+            second_path,
+            second_contents,
+            BrowserChannel::Stable,
+        );
+        let first_id = first.id.clone();
+        let second_id = second.id.clone();
+
+        runtime.register_build(first, false).unwrap();
+        runtime.register_build(second, false).unwrap();
+        runtime.activate(&first_id).unwrap();
+        assert_eq!(
+            runtime
+                .resolve_build(&BrowserBuildSelector::Channel(BrowserChannel::Stable))
+                .unwrap()
+                .id,
+            first_id
+        );
+
+        runtime.activate(&second_id).unwrap();
+        assert_eq!(
+            runtime
+                .resolve_build(&BrowserBuildSelector::Channel(BrowserChannel::Stable))
+                .unwrap()
+                .id,
+            second_id
+        );
+    }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "brows-workspace",
+  "private": true,
+  "version": "0.1.0",
+  "scripts": {
+    "ui:dev": "npm --prefix ui run dev",
+    "ui:typecheck": "npm --prefix ui run typecheck",
+    "ui:build": "npm --prefix ui run build",
+    "ui:audit": "npm --prefix ui audit",
+    "desktop:dev": "cargo run -p brows-desktop",
+    "desktop:build": "cargo build -p brows-desktop --release --features custom-protocol",
+    "desktop:check": "cargo check -p brows-desktop --tests",
+    "check:ui": "npm run ui:typecheck && npm run ui:build && npm run ui:audit"
+  }
+}

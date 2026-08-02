@@ -1,0 +1,6 @@
+[package]
+name = "brows-domain"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Framework-independent domain model for Brows profiles and sessions"

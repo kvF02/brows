@@ -1,0 +1,13 @@
+[package]
+name = "brows-contracts"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Versioned transport contracts for the Brows desktop application"
+
+[dependencies]
+serde.workspace = true
+brows-domain = { path = "../domain" }
+
+[dev-dependencies]
+serde_json.workspace = true

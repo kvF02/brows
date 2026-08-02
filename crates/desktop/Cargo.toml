@@ -1,0 +1,31 @@
+[package]
+name = "brows-desktop"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Tauri composition root and narrow IPC boundary for Brows"
+build = "build.rs"
+
+[lib]
+name = "brows_desktop"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "brows-desktop"
+path = "src/main.rs"
+
+[dependencies]
+brows-adapters-runtime = { path = "../adapters-runtime" }
+brows-adapters-sqlite = { path = "../adapters-sqlite" }
+brows-application = { path = "../application" }
+brows-contracts = { path = "../contracts" }
+brows-domain = { path = "../domain" }
+tauri = { version = "2", features = [] }
+uuid = { version = "1", features = ["v4"] }
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[features]
+custom-protocol = ["tauri/custom-protocol"]
+webview-diagnostics = []
