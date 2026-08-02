@@ -938,6 +938,8 @@ function ProxyView({
 }) {
   const [showForm, setShowForm] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [testingProxy, setTestingProxy] = useState<ProxySummary>();
+  const [testing, setTesting] = useState(false);
   const [form, setForm] = useState({ name: "", kind: "http" as ProxyKind, host: "", port: "", username: "", password: "" });
 
   const save = async (event: FormEvent<HTMLFormElement>) => {
@@ -953,7 +955,17 @@ function ProxyView({
   };
 
   const test = async (proxy: ProxySummary) => {
-    try { await api.testProxy(proxy.id); await onRefresh(); onNotice(`“${proxy.name}”的 TCP 端点可达；协议认证将在代理 Broker 阶段验证。`); } catch (cause) { onError(getErrorMessage(cause)); }
+    setTesting(true);
+    try {
+      const checked = await api.testProxy(proxy.id);
+      setTestingProxy(undefined);
+      await onRefresh();
+      onNotice(`“${proxy.name}”认证和出口请求成功${checked.lastExitIp ? `，出口 IP：${checked.lastExitIp}` : ""}。`);
+    } catch (cause) {
+      onError(getErrorMessage(cause));
+    } finally {
+      setTesting(false);
+    }
   };
   const remove = async (proxy: ProxySummary) => {
     try { await api.removeProxy(proxy.id); await onRefresh(); onNotice(`已删除代理“${proxy.name}”。`); } catch (cause) { onError(getErrorMessage(cause)); }
@@ -964,7 +976,8 @@ function ProxyView({
       <div className="page-heading"><div><div className="eyebrow">NETWORK ROUTES</div><h1>代理库</h1><p>为每个环境绑定独立的 HTTP、HTTPS 或 SOCKS5 出口。代理凭据不会写入 SQLite。</p></div><button className="primary-button" type="button" onClick={() => setShowForm(true)}>＋ 添加代理</button></div>
       <div className="security-callout"><span aria-hidden="true">▣</span><span><strong>每个环境使用独立 loopback Broker</strong><small>HTTP CONNECT 和 SOCKS5 支持认证且失败不回退直连；TLS 加密的 HTTPS 上游代理暂未启用。</small></span></div>
       {showForm && <form className="inline-form" onSubmit={save}><div className="form-grid four"><div><label className="field-label" htmlFor="proxy-name">名称</label><input id="proxy-name" className="text-input" required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="东京住宅代理" /></div><div><label className="field-label" htmlFor="proxy-kind">类型</label><select id="proxy-kind" className="text-input" value={form.kind} onChange={(e) => setForm({ ...form, kind: e.target.value as ProxyKind })}><option value="http">HTTP</option><option value="https">HTTPS</option><option value="socks5">SOCKS5</option></select></div><div><label className="field-label" htmlFor="proxy-host">主机</label><input id="proxy-host" className="text-input" required value={form.host} onChange={(e) => setForm({ ...form, host: e.target.value })} placeholder="proxy.example" /></div><div><label className="field-label" htmlFor="proxy-port">端口</label><input id="proxy-port" className="text-input" required type="number" min="1" max="65535" value={form.port} onChange={(e) => setForm({ ...form, port: e.target.value })} placeholder="8080" /></div></div><div className="form-grid"><div><label className="field-label" htmlFor="proxy-user">用户名（可选）</label><input id="proxy-user" className="text-input" value={form.username} onChange={(e) => setForm({ ...form, username: e.target.value })} /></div><div><label className="field-label" htmlFor="proxy-password">密码（可选）</label><input id="proxy-password" className="text-input" type="password" autoComplete="new-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} /></div></div><div className="inline-form-actions"><button className="secondary-button" type="button" onClick={() => setShowForm(false)}>取消</button><button className="primary-button" disabled={saving} type="submit">{saving ? "保存中…" : "保存代理"}</button></div></form>}
-      {proxies.length === 0 ? <div className="empty-state"><div className="empty-icon">⌁</div><strong>还没有代理</strong><span>添加代理后，可在创建环境时绑定。</span></div> : <div className="data-table-wrap"><table className="data-table"><thead><tr><th>名称</th><th>地址</th><th>类型</th><th>认证</th><th>状态</th><th aria-label="操作" /></tr></thead><tbody>{proxies.map((proxy) => <tr key={proxy.id}><td><strong>{proxy.name}</strong><small className="table-sub">{proxy.id.slice(0, 16)}</small></td><td className="mono">{proxy.host}{proxy.port ? `:${proxy.port}` : ""}</td><td><span className="type-badge">{proxy.kind.toUpperCase()}</span></td><td>{proxy.authenticated ? <span className="soft-success">已保护</span> : <span className="soft-muted">无认证</span>}</td><td><span className={`health-dot ${proxy.health}`} />{proxy.health === "healthy" ? "TCP 可达" : proxy.health === "checking" ? "检查中" : proxy.health === "unhealthy" ? "不可达" : "未检查"}</td><td className="table-actions"><button className="table-button" type="button" onClick={() => void test(proxy)}>测试</button><button className="table-button danger" type="button" onClick={() => void remove(proxy)}>删除</button></td></tr>)}</tbody></table></div>}
+      {proxies.length === 0 ? <div className="empty-state"><div className="empty-icon">⌁</div><strong>还没有代理</strong><span>添加代理后，可在创建环境时绑定。</span></div> : <div className="data-table-wrap"><table className="data-table"><thead><tr><th>名称</th><th>地址</th><th>类型</th><th>认证</th><th>状态</th><th aria-label="操作" /></tr></thead><tbody>{proxies.map((proxy) => <tr key={proxy.id}><td><strong>{proxy.name}</strong><small className="table-sub">{proxy.id.slice(0, 16)}</small></td><td className="mono">{proxy.host}{proxy.port ? `:${proxy.port}` : ""}</td><td><span className="type-badge">{proxy.kind.toUpperCase()}</span></td><td>{proxy.authenticated ? <span className="soft-success">已保护</span> : <span className="soft-muted">无认证</span>}</td><td><span className={`health-dot ${proxy.health}`} />{proxy.health === "healthy" ? `认证及出口可用${proxy.lastExitIp ? ` · ${proxy.lastExitIp}` : ""}` : proxy.health === "checking" ? "检查中" : proxy.health === "unhealthy" ? "认证或出口失败" : "未检查"}</td><td className="table-actions"><button className="table-button" type="button" onClick={() => setTestingProxy(proxy)}>测试</button><button className="table-button danger" type="button" onClick={() => void remove(proxy)}>删除</button></td></tr>)}</tbody></table></div>}
+      {testingProxy && <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !testing && setTestingProxy(undefined)}><section className="modal diagnostic-confirm-modal" role="dialog" aria-modal="true" aria-labelledby="proxy-test-title"><div className="modal-head"><div><div className="eyebrow">PROXY EXIT CHECK</div><h2 id="proxy-test-title">确认测试代理“{testingProxy.name}”</h2></div><button className="icon-button" type="button" disabled={testing} onClick={() => setTestingProxy(undefined)}>×</button></div><p className="modal-intro">将验证代理协议、用户名密码认证和真实出口，不再只检查 TCP 端口。</p><div className="diagnostic-consent"><strong>将通过该代理访问的唯一端点</strong><code>http://checkip.amazonaws.com/</code><ul><li>请求不包含 Cookie 或浏览器登录状态</li><li>凭据只从系统保险库进入临时 Broker，不写入日志或报告</li><li>认证或出口失败时不会回退本机直连</li></ul></div><div className="modal-actions"><button className="secondary-button" type="button" disabled={testing} onClick={() => setTestingProxy(undefined)}>取消</button><button className="primary-button" type="button" disabled={testing} onClick={() => void test(testingProxy)}>{testing ? "测试中…" : "确认并测试"}</button></div></section></div>}
     </section>
   );
 }

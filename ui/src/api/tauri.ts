@@ -85,6 +85,7 @@ interface ProxyConnectivityCheckDto {
   reachable: boolean;
   latencyMs: number;
   detail: string;
+  exitIp?: string;
 }
 
 interface DiagnosticReportDto {
@@ -148,7 +149,7 @@ export class TauriApiClient implements ApiClient {
   private readonly dtoCache = new Map<string, ProfileDto>();
   private readonly firstSeen = new Map<string, string>();
   private sessions: SessionDto[] = [];
-  private readonly proxyHealth = new Map<string, Pick<ProxySummary, "health" | "lastCheckedAt">>();
+  private readonly proxyHealth = new Map<string, Pick<ProxySummary, "health" | "lastCheckedAt" | "lastExitIp">>();
 
   constructor(private readonly bridge: TypedCommandBridge) {}
 
@@ -312,12 +313,22 @@ export class TauriApiClient implements ApiClient {
     return this.toProxy(proxy);
   }
   async testProxy(id: string): Promise<ProxySummary> {
-    const result = await this.call<ProxyConnectivityCheckDto>(handlers.proxyTest, {
-      request: { proxyId: id, external: false },
-    });
+    let result: ProxyConnectivityCheckDto;
+    try {
+      result = await this.call<ProxyConnectivityCheckDto>(handlers.proxyTest, {
+        request: { proxyId: id },
+      });
+    } catch (error) {
+      this.proxyHealth.set(id, {
+        health: "unhealthy",
+        lastCheckedAt: new Date().toISOString(),
+      });
+      throw error;
+    }
     this.proxyHealth.set(id, {
       health: result.reachable ? "healthy" : "unhealthy",
       lastCheckedAt: new Date().toISOString(),
+      lastExitIp: result.exitIp,
     });
     const proxy = (await this.call<ProxyDto[]>(handlers.proxyList)).find((item) => item.id === id);
     if (!proxy) throw new ApiError("NOT_FOUND", "代理不存在");
@@ -408,6 +419,7 @@ export class TauriApiClient implements ApiClient {
       authenticated: dto.hasSecret,
       health: check?.health ?? "unknown",
       lastCheckedAt: check?.lastCheckedAt,
+      lastExitIp: check?.lastExitIp,
     };
   }
 

@@ -119,10 +119,15 @@ pub struct ProxyConnectivityCheck {
     pub reachable: bool,
     pub latency_ms: u64,
     pub detail: String,
+    pub exit_ip: Option<String>,
 }
 
 pub trait ProxyConnectivityTester: fmt::Debug + Send + Sync {
-    fn test(&self, proxy: &ProxySpec) -> PortResult<ProxyConnectivityCheck>;
+    fn test(
+        &self,
+        proxy: &ProxySpec,
+        credential: Option<&SecretValue>,
+    ) -> PortResult<ProxyConnectivityCheck>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

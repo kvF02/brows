@@ -121,10 +121,12 @@ impl ProxyApplicationService {
 
     pub fn test(&self, id: ProxyId) -> ApplicationResult<ProxyConnectivityCheck> {
         let proxy = self.proxies.get(&id)?;
-        if let Some(reference) = &proxy.secret_ref {
-            self.secrets.get(reference)?;
-        }
-        Ok(self.connectivity.test(&proxy)?)
+        let credential = proxy
+            .secret_ref
+            .as_ref()
+            .map(|reference| self.secrets.get(reference))
+            .transpose()?;
+        Ok(self.connectivity.test(&proxy, credential.as_ref())?)
     }
 }
 

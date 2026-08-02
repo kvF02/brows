@@ -107,13 +107,14 @@ fn handle(
         return Ok(());
     }
     if matches!(proxy.scheme, ProxyScheme::Socks5) {
-        client
-            .write_all(b"HTTP/1.1 501 Not Implemented\r\nConnection: close\r\n\r\n")
-            .ok();
-        return Err(PortError::new(
-            PortErrorKind::CapabilityUnsupported,
-            "SOCKS5 plain HTTP forwarding is not enabled",
-        ));
+        let destination = parse_absolute_http_target(target)?;
+        let mut upstream = socks_connect(proxy, secret, &destination.authority)?;
+        let forwarded = rewrite_request_target(&head, &destination.path_and_query)?;
+        upstream
+            .write_all(&forwarded)
+            .map_err(|e| ioerr("forward HTTP request through SOCKS5", e))?;
+        tunnel(client, upstream);
+        return Ok(());
     }
     let mut upstream = TcpStream::connect((proxy.host.as_str(), proxy.port))
         .map_err(|e| ioerr("connect upstream proxy", e))?;
@@ -123,6 +124,106 @@ fn handle(
         .map_err(|e| ioerr("forward HTTP request", e))?;
     tunnel(client, upstream);
     Ok(())
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct HttpDestination {
+    authority: String,
+    path_and_query: String,
+}
+
+fn parse_absolute_http_target(target: &str) -> PortResult<HttpDestination> {
+    let remainder = target.strip_prefix("http://").ok_or_else(|| {
+        PortError::new(
+            PortErrorKind::InvalidData,
+            "plain proxy request must use an absolute HTTP target",
+        )
+    })?;
+    let boundary = remainder.find(['/', '?', '#']).unwrap_or(remainder.len());
+    let authority = &remainder[..boundary];
+    if authority.is_empty() || authority.contains('@') || authority.contains('#') {
+        return Err(PortError::new(
+            PortErrorKind::InvalidData,
+            "plain proxy request has an invalid authority",
+        ));
+    }
+    let authority = normalize_http_authority(authority)?;
+    let suffix = &remainder[boundary..];
+    if suffix.starts_with('#') || suffix.contains('#') {
+        return Err(PortError::new(
+            PortErrorKind::InvalidData,
+            "plain proxy request must not contain a fragment",
+        ));
+    }
+    let path_and_query = if suffix.is_empty() {
+        "/".to_owned()
+    } else if suffix.starts_with('?') {
+        format!("/{suffix}")
+    } else {
+        suffix.to_owned()
+    };
+    Ok(HttpDestination {
+        authority,
+        path_and_query,
+    })
+}
+
+fn normalize_http_authority(authority: &str) -> PortResult<String> {
+    if authority.starts_with('[') {
+        let close = authority.find(']').ok_or_else(|| {
+            PortError::new(PortErrorKind::InvalidData, "invalid IPv6 HTTP authority")
+        })?;
+        let tail = &authority[close + 1..];
+        return match tail {
+            "" => Ok(format!("{authority}:80")),
+            value if value.starts_with(':') && value[1..].parse::<u16>().is_ok() => {
+                Ok(authority.to_owned())
+            }
+            _ => Err(PortError::new(
+                PortErrorKind::InvalidData,
+                "invalid IPv6 HTTP port",
+            )),
+        };
+    }
+    match authority.rsplit_once(':') {
+        Some((host, port)) if !host.is_empty() && port.parse::<u16>().is_ok() => {
+            Ok(authority.to_owned())
+        }
+        Some(_) => Err(PortError::new(
+            PortErrorKind::InvalidData,
+            "invalid HTTP authority port",
+        )),
+        None => Ok(format!("{authority}:80")),
+    }
+}
+
+fn rewrite_request_target(head: &[u8], target: &str) -> PortResult<Vec<u8>> {
+    let line_end = head
+        .windows(2)
+        .position(|window| window == b"\r\n")
+        .ok_or_else(|| {
+            PortError::new(
+                PortErrorKind::InvalidData,
+                "HTTP request line is incomplete",
+            )
+        })?;
+    let line = std::str::from_utf8(&head[..line_end]).map_err(|_| {
+        PortError::new(PortErrorKind::InvalidData, "HTTP request line is not UTF-8")
+    })?;
+    let mut parts = line.split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let _old_target = parts.next().unwrap_or_default();
+    let version = parts.next().unwrap_or_default();
+    if method.is_empty() || version != "HTTP/1.1" && version != "HTTP/1.0" || parts.next().is_some()
+    {
+        return Err(PortError::new(
+            PortErrorKind::InvalidData,
+            "HTTP request line is invalid",
+        ));
+    }
+    let mut rewritten = format!("{method} {target} {version}\r\n").into_bytes();
+    rewritten.extend_from_slice(&head[line_end + 2..]);
+    Ok(rewritten)
 }
 
 fn connect_target(
@@ -325,8 +426,23 @@ fn ioerr(context: &'static str, e: std::io::Error) -> PortError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use brows_domain::{DnsMode, ProxyId};
+    use brows_domain::{DnsMode, ProxyId, SecretRef};
     use std::sync::mpsc;
+
+    fn proxy(scheme: ProxyScheme, port: u16, authenticated: bool) -> ProxySpec {
+        ProxySpec {
+            id: ProxyId::new("proxy-test").unwrap(),
+            name: "test".to_owned(),
+            scheme,
+            host: "127.0.0.1".to_owned(),
+            port,
+            username: authenticated.then(|| "alice".to_owned()),
+            secret_ref: authenticated.then(|| SecretRef::new("secret-test").unwrap()),
+            dns_mode: DnsMode::Proxy,
+            bypass_hosts: vec![],
+            connect_timeout_ms: 2_000,
+        }
+    }
 
     #[test]
     fn http_connect_broker_requires_upstream_success() {
@@ -344,19 +460,7 @@ mod tests {
             let mut byte = [0; 1];
             let _ = stream.read(&mut byte);
         });
-        let proxy = ProxySpec {
-            id: ProxyId::new("proxy-test").unwrap(),
-            name: "test".to_owned(),
-            scheme: ProxyScheme::Http,
-            host: "127.0.0.1".to_owned(),
-            port,
-            username: None,
-            secret_ref: None,
-            dns_mode: DnsMode::Proxy,
-            bypass_hosts: vec![],
-            connect_timeout_ms: 2_000,
-        };
-        let mut broker = BrokerHandle::start(proxy, None).unwrap();
+        let mut broker = BrokerHandle::start(proxy(ProxyScheme::Http, port, false), None).unwrap();
         let mut client = TcpStream::connect(("127.0.0.1", broker.port())).unwrap();
         client
             .write_all(b"CONNECT example.test:443 HTTP/1.1\r\nHost: example.test\r\n\r\n")
@@ -365,5 +469,92 @@ mod tests {
         assert!(String::from_utf8_lossy(&response).starts_with("HTTP/1.1 200"));
         rx.recv().unwrap();
         broker.stop();
+    }
+
+    #[test]
+    fn authenticated_socks5_forwards_plain_http_with_remote_dns() {
+        let upstream = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = upstream.local_addr().unwrap().port();
+        let (tx, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let (mut stream, _) = upstream.accept().unwrap();
+            let mut greeting = [0_u8; 3];
+            stream.read_exact(&mut greeting).unwrap();
+            assert_eq!(greeting, [5, 1, 2]);
+            stream.write_all(&[5, 2]).unwrap();
+
+            let mut auth_head = [0_u8; 2];
+            stream.read_exact(&mut auth_head).unwrap();
+            assert_eq!(auth_head, [1, 5]);
+            let mut username = vec![0_u8; auth_head[1] as usize];
+            stream.read_exact(&mut username).unwrap();
+            let mut password_length = [0_u8; 1];
+            stream.read_exact(&mut password_length).unwrap();
+            let mut password = vec![0_u8; password_length[0] as usize];
+            stream.read_exact(&mut password).unwrap();
+            assert_eq!(username, b"alice");
+            assert_eq!(password, b"correct horse");
+            stream.write_all(&[1, 0]).unwrap();
+
+            let mut connect_head = [0_u8; 5];
+            stream.read_exact(&mut connect_head).unwrap();
+            assert_eq!(&connect_head[..4], &[5, 1, 0, 3]);
+            let mut host = vec![0_u8; connect_head[4] as usize];
+            stream.read_exact(&mut host).unwrap();
+            let mut target_port = [0_u8; 2];
+            stream.read_exact(&mut target_port).unwrap();
+            assert_eq!(host, b"example.test");
+            assert_eq!(u16::from_be_bytes(target_port), 80);
+            stream
+                .write_all(&[5, 0, 0, 1, 127, 0, 0, 1, 0, 80])
+                .unwrap();
+
+            let request = read_head(&mut stream).unwrap();
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /path?q=1 HTTP/1.1\r\n"));
+            assert!(request.contains("Host: example.test\r\n"));
+            assert!(!request.contains("http://example.test"));
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nOK")
+                .unwrap();
+            tx.send(()).unwrap();
+        });
+
+        let secret = SecretValue::new(b"correct horse".to_vec()).unwrap();
+        let mut broker =
+            BrokerHandle::start(proxy(ProxyScheme::Socks5, port, true), Some(secret)).unwrap();
+        let mut client = TcpStream::connect(("127.0.0.1", broker.port())).unwrap();
+        client
+            .write_all(
+                b"GET http://example.test/path?q=1 HTTP/1.1\r\nHost: example.test\r\nConnection: close\r\n\r\n",
+            )
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK"));
+        assert!(response.ends_with("OK"));
+        rx.recv().unwrap();
+        broker.stop();
+    }
+
+    #[test]
+    fn absolute_http_target_is_strict_and_rewritten_to_origin_form() {
+        assert_eq!(
+            parse_absolute_http_target("http://example.test?q=1").unwrap(),
+            HttpDestination {
+                authority: "example.test:80".to_owned(),
+                path_and_query: "/?q=1".to_owned(),
+            }
+        );
+        assert!(parse_absolute_http_target("https://example.test/").is_err());
+        assert!(parse_absolute_http_target("http://user@example.test/").is_err());
+        assert!(parse_absolute_http_target("http://example.test/#fragment").is_err());
+
+        let rewritten = rewrite_request_target(
+            b"GET http://example.test/a HTTP/1.1\r\nHost: example.test\r\n\r\n",
+            "/a",
+        )
+        .unwrap();
+        assert!(rewritten.starts_with(b"GET /a HTTP/1.1\r\n"));
     }
 }

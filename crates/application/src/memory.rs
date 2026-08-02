@@ -424,11 +424,16 @@ impl ProxyRepository for InMemoryProxyRuntime {
 pub struct InMemoryProxyConnectivityTester;
 
 impl ProxyConnectivityTester for InMemoryProxyConnectivityTester {
-    fn test(&self, _proxy: &ProxySpec) -> PortResult<ProxyConnectivityCheck> {
+    fn test(
+        &self,
+        _proxy: &ProxySpec,
+        _credential: Option<&SecretValue>,
+    ) -> PortResult<ProxyConnectivityCheck> {
         Ok(ProxyConnectivityCheck {
             reachable: true,
             latency_ms: 1,
             detail: "in-memory endpoint reachable".to_owned(),
+            exit_ip: Some("203.0.113.1".to_owned()),
         })
     }
 }
