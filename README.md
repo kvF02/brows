@@ -21,9 +21,14 @@ The repository contains the first implementation milestone:
   idempotent cleanup and a non-Windows unavailable stub;
 - a React management UI with a real, allow-listed Tauri client and a mock used
   only by browser development;
+- a read-only MoreLogin XLSX preview and metadata-only import path that never
+  returns password, 2FA, Cookie, proxy-secret or custom-UA values to the UI;
 - a Tauri 2 composition root covering the Profile and Session vertical slice;
 - the complete architecture and security plan in
   [`docs/architecture-plan.md`](docs/architecture-plan.md).
+
+The evidence-backed MoreLogin capability comparison and implementation order
+are documented in [`docs/morelogin-gap-analysis.md`](docs/morelogin-gap-analysis.md).
 
 The phase-one Windows desktop path now uses SQLite persistence and launches the
 locally installed, catalog-pinned Google Chrome runtime. It has passed the

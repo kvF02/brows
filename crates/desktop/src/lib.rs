@@ -2,11 +2,13 @@
 #![deny(missing_debug_implementations)]
 
 mod commands;
+mod morelogin;
 mod state;
 
 use commands::{
-    profile_archive, profile_clone, profile_create, profile_get, profile_list, profile_restore,
-    profile_update, session_cancel_queued, session_launch, session_list, session_stop,
+    morelogin_import, morelogin_preview, profile_archive, profile_clone, profile_create,
+    profile_get, profile_list, profile_restore, profile_update, session_cancel_queued,
+    session_launch, session_list, session_stop,
 };
 use state::AppState;
 use tauri::{Manager, Url, WebviewUrl, WebviewWindowBuilder};
@@ -38,6 +40,8 @@ pub fn run() {
             profile_clone,
             profile_archive,
             profile_restore,
+            morelogin_preview,
+            morelogin_import,
             session_launch,
             session_stop,
             session_cancel_queued,

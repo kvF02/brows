@@ -9,6 +9,7 @@ import {
   type DiagnosticReport,
   type EnvironmentPreset,
   type FingerprintScope,
+  type MoreLoginPreview,
   type Profile,
   type ProfileInput,
   type ProfileStatus,
@@ -72,6 +73,7 @@ function App() {
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
   const [showCreate, setShowCreate] = useState(false);
+  const [showMoreLoginImport, setShowMoreLoginImport] = useState(false);
   const [editingProfile, setEditingProfile] = useState<Profile | undefined>();
   const [showArchived, setShowArchived] = useState(false);
   const [search, setSearch] = useState("");
@@ -227,6 +229,7 @@ function App() {
             onSearch={setSearch}
             onShowArchived={setShowArchived}
             onCreate={() => setShowCreate(true)}
+            onImport={() => setShowMoreLoginImport(true)}
             onEdit={setEditingProfile}
             onRefresh={refresh}
             onError={setError}
@@ -363,6 +366,17 @@ function App() {
           onSubmit={(input) => void handleCreate(input)}
         />
       )}
+      {showMoreLoginImport && (
+        <MoreLoginImportModal
+          api={apiRef.current}
+          onClose={() => setShowMoreLoginImport(false)}
+          onImported={async (count) => {
+            setShowMoreLoginImport(false);
+            await refresh();
+            notify(`已安全导入 ${count} 个环境；敏感字段没有迁移。`);
+          }}
+        />
+      )}
       {editingProfile && (
         <ProfileModal
           initial={editingProfile}
@@ -419,6 +433,7 @@ function ProfilesView({
   onSearch,
   onShowArchived,
   onCreate,
+  onImport,
   onEdit,
   onRefresh,
   onError,
@@ -435,6 +450,7 @@ function ProfilesView({
   onSearch(value: string): void;
   onShowArchived(value: boolean): void;
   onCreate(): void;
+  onImport(): void;
   onEdit(profile: Profile): void;
   onRefresh(): Promise<void>;
   onError(message: string): void;
@@ -462,9 +478,12 @@ function ProfilesView({
           <h1>浏览器环境</h1>
           <p>每个环境都有独立的 Cookie、缓存、代理和登录状态，可安全地同时运行。</p>
         </div>
-        <button className="primary-button" type="button" onClick={onCreate}>
-          <span aria-hidden="true">＋</span> 新建环境
-        </button>
+        <div className="heading-actions">
+          <button className="secondary-button" type="button" onClick={onImport}>从 MoreLogin 导入</button>
+          <button className="primary-button" type="button" onClick={onCreate}>
+            <span aria-hidden="true">＋</span> 新建环境
+          </button>
+        </div>
       </div>
 
       <div className="notice-card">
@@ -702,6 +721,93 @@ function ProfileModal({
           {formError && <div className="form-error" role="alert">{formError}</div>}
           <div className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="submit">{initial ? "保存修改" : "创建环境"}</button></div>
         </form>
+      </section>
+    </div>
+  );
+}
+
+function MoreLoginImportModal({
+  api,
+  onClose,
+  onImported,
+}: {
+  api: ApiClient;
+  onClose(): void;
+  onImported(count: number): Promise<void>;
+}) {
+  const [sourcePath, setSourcePath] = useState("");
+  const [preview, setPreview] = useState<MoreLoginPreview>();
+  const [busy, setBusy] = useState(false);
+  const [formError, setFormError] = useState("");
+
+  const inspect = async () => {
+    if (!sourcePath.trim()) {
+      setFormError("请输入 MoreLogin 导出的 XLSX 文件路径。");
+      return;
+    }
+    setBusy(true);
+    setFormError("");
+    try {
+      setPreview(await api.previewMoreLogin(sourcePath.trim()));
+    } catch (cause) {
+      setPreview(undefined);
+      setFormError(getErrorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const importProfiles = async () => {
+    if (!preview) return;
+    setBusy(true);
+    setFormError("");
+    try {
+      const result = await api.importMoreLogin(sourcePath.trim());
+      if (result.failures.length > 0) {
+        setFormError(`已导入 ${result.importedCount} 个，另有 ${result.failures.length} 个失败。首个失败位于第 ${result.failures[0].rowNumber} 行：${result.failures[0].reason}`);
+        return;
+      }
+      await onImported(result.importedCount);
+    } catch (cause) {
+      setFormError(getErrorMessage(cause));
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="modal-backdrop" role="presentation" onMouseDown={(event) => event.target === event.currentTarget && !busy && onClose()}>
+      <section className="modal import-modal" role="dialog" aria-modal="true" aria-labelledby="morelogin-import-title">
+        <div className="modal-head">
+          <div><div className="eyebrow">SAFE LEGACY IMPORT</div><h2 id="morelogin-import-title">从 MoreLogin 导入</h2></div>
+          <button className="icon-button" type="button" aria-label="关闭" disabled={busy} onClick={onClose}>×</button>
+        </div>
+        <p className="modal-intro">先做只读预览。本阶段只导入环境名称与分类标签，不导入密码、2FA、Cookie、代理凭据或自定义 UA。</p>
+        <label className="field-label" htmlFor="morelogin-source">MoreLogin 导出文件</label>
+        <div className="import-source-row">
+          <input id="morelogin-source" className="text-input" value={sourcePath} onChange={(event) => { setSourcePath(event.target.value); setPreview(undefined); }} placeholder="例如：D:\\MoreLoginPlus\\export_profile.xlsx" />
+          <button className="secondary-button" type="button" disabled={busy} onClick={() => void inspect()}>{busy && !preview ? "读取中…" : "安全预览"}</button>
+        </div>
+        {preview && (
+          <div className="import-preview">
+            <div className="import-summary"><strong>{preview.profileCount}</strong><span>个可导入环境</span><strong>{preview.sensitiveProfileCount}</strong><span>个含已忽略的敏感字段</span></div>
+            <div className="import-notices">{preview.notices.map((notice) => <div key={notice}>• {notice}</div>)}</div>
+            <div className="import-candidate-list">
+              {preview.candidates.slice(0, 8).map((candidate) => (
+                <div className="import-candidate" key={candidate.rowNumber}>
+                  <div><strong>{candidate.name}</strong><small>第 {candidate.rowNumber} 行 · {candidate.tags.join(" / ") || "无标签"}</small></div>
+                  <span>{candidate.warnings.length > 0 ? `${candidate.warnings.length} 项已忽略` : "可直接导入"}</span>
+                </div>
+              ))}
+              {preview.profileCount > 8 && <div className="import-more">其余 {preview.profileCount - 8} 个环境将在确认后一起导入</div>}
+            </div>
+          </div>
+        )}
+        {formError && <div className="form-error" role="alert">{formError}</div>}
+        <div className="modal-actions">
+          <button className="secondary-button" type="button" disabled={busy} onClick={onClose}>取消</button>
+          <button className="primary-button" type="button" disabled={!preview || busy} onClick={() => void importProfiles()}>{busy && preview ? "正在导入…" : `确认导入${preview ? ` ${preview.profileCount} 个` : ""}`}</button>
+        </div>
       </section>
     </div>
   );

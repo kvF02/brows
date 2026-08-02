@@ -6,6 +6,8 @@ import {
   type BackupJob,
   type BrowserRuntime,
   type DiagnosticReport,
+  type MoreLoginImportResult,
+  type MoreLoginPreview,
   type Profile,
   type ProfileInput,
   type ProxyInput,
@@ -79,6 +81,14 @@ export class MockApiClient implements ApiClient {
   private backups: BackupJob[] = [];
   private settings: Settings = { ...EMPTY_SETTINGS };
   private sessions = new Map<string, SessionSummary>();
+
+  async previewMoreLogin(_sourcePath: string): Promise<MoreLoginPreview> {
+    throw new ApiError("CAPABILITY_UNSUPPORTED", "MoreLogin 导入仅在桌面版中可用");
+  }
+
+  async importMoreLogin(_sourcePath: string, _rowNumbers: number[] = []): Promise<MoreLoginImportResult> {
+    throw new ApiError("CAPABILITY_UNSUPPORTED", "MoreLogin 导入仅在桌面版中可用");
+  }
 
   async listProfiles(includeArchived = false): Promise<Profile[]> {
     return this.profiles

@@ -89,6 +89,31 @@ export interface ProfileInput {
   runtimeId: string;
 }
 
+export interface MoreLoginCandidate {
+  rowNumber: number;
+  name: string;
+  tags: string[];
+  hasProxy: boolean;
+  hasLoginData: boolean;
+  hasCookie: boolean;
+  hasCustomUa: boolean;
+  warnings: string[];
+}
+
+export interface MoreLoginPreview {
+  sourceName: string;
+  profileCount: number;
+  sensitiveProfileCount: number;
+  candidates: MoreLoginCandidate[];
+  notices: string[];
+}
+
+export interface MoreLoginImportResult {
+  importedCount: number;
+  skippedCount: number;
+  failures: Array<{ rowNumber: number; reason: string }>;
+}
+
 export interface SessionSummary {
   id: string;
   profileId: string;
@@ -170,6 +195,8 @@ export type CommandParams<Name extends CommandName> = CommandMap[Name]["params"]
 export type CommandResult<Name extends CommandName> = CommandMap[Name]["result"];
 
 export interface ApiClient {
+  previewMoreLogin(sourcePath: string): Promise<MoreLoginPreview>;
+  importMoreLogin(sourcePath: string, rowNumbers?: number[]): Promise<MoreLoginImportResult>;
   listProfiles(includeArchived?: boolean): Promise<Profile[]>;
   getProfile(id: string): Promise<Profile>;
   createProfile(input: ProfileInput): Promise<Profile>;

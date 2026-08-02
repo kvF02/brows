@@ -6,6 +6,8 @@ import {
   type BackupJob,
   type BrowserRuntime,
   type DiagnosticReport,
+  type MoreLoginImportResult,
+  type MoreLoginPreview,
   type Profile,
   type ProfileInput,
   type ProfileStatus,
@@ -78,6 +80,8 @@ const handlers = Object.freeze({
   sessionStop: "session_stop",
   sessionCancelQueued: "session_cancel_queued",
   sessionList: "session_list",
+  moreLoginPreview: "morelogin_preview",
+  moreLoginImport: "morelogin_import",
 });
 
 const prototypeRuntime: BrowserRuntime = {
@@ -109,13 +113,27 @@ export class TauriApiClient implements ApiClient {
 
   constructor(private readonly bridge: TypedCommandBridge) {}
 
+  async previewMoreLogin(sourcePath: string): Promise<MoreLoginPreview> {
+    return this.call<MoreLoginPreview>(handlers.moreLoginPreview, { request: { sourcePath } });
+  }
+
+  async importMoreLogin(sourcePath: string, rowNumbers: number[] = []): Promise<MoreLoginImportResult> {
+    return this.call<MoreLoginImportResult>(handlers.moreLoginImport, {
+      request: { sourcePath, rowNumbers },
+    });
+  }
+
   async listProfiles(includeArchived = false): Promise<Profile[]> {
-    const [profiles, sessions] = await Promise.all([
-      this.call<ProfileDto[]>(handlers.profileList, {
-        request: { page: 1, pageSize: 200, search: null, includeArchived },
-      }),
-      this.call<SessionDto[]>(handlers.sessionList),
-    ]);
+    const sessionsPromise = this.call<SessionDto[]>(handlers.sessionList);
+    const profiles: ProfileDto[] = [];
+    for (let page = 1; ; page += 1) {
+      const batch = await this.call<ProfileDto[]>(handlers.profileList, {
+        request: { page, pageSize: 200, search: null, includeArchived },
+      });
+      profiles.push(...batch);
+      if (batch.length < 200) break;
+    }
+    const sessions = await sessionsPromise;
     this.sessions = sessions;
     profiles.forEach((profile) => this.dtoCache.set(profile.id, profile));
     return profiles.map((profile) => this.toProfile(profile));

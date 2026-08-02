@@ -16,12 +16,14 @@ path = "src/main.rs"
 
 [dependencies]
 brows-adapters-runtime = { path = "../adapters-runtime" }
+calamine = "0.30"
 brows-adapters-sqlite = { path = "../adapters-sqlite" }
 brows-application = { path = "../application" }
 brows-contracts = { path = "../contracts" }
 brows-domain = { path = "../domain" }
 tauri = { version = "2", features = [] }
 uuid = { version = "1", features = ["v4"] }
+serde = { workspace = true }
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
