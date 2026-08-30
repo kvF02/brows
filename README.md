@@ -20,8 +20,9 @@ The repository contains the first implementation milestone:
 - versioned, allow-listed UI command and event contracts;
 - application services and ports with in-memory test adapters;
 - SQLite profile persistence, including `SeedableNoise` persona fields;
-- a Chromium runtime adapter that confines paths and rechecks SHA-256 before
-  every launch (publisher-signature verification is not implemented yet);
+- a Chromium runtime adapter that confines paths, verifies the Windows
+  Authenticode signer against the `Google LLC` allowlist and rechecks SHA-256
+  before every launch;
 - a Windows Credential Manager `SecretStore` adapter with redacted errors,
   idempotent cleanup and a non-Windows unavailable stub;
 - a React management UI with a real, allow-listed Tauri client and a mock used
@@ -36,14 +37,16 @@ The evidence-backed MoreLogin capability comparison and implementation order
 are documented in [`docs/morelogin-gap-analysis.md`](docs/morelogin-gap-analysis.md).
 
 The phase-one Windows desktop path now uses SQLite persistence and launches the
-locally installed Google Chrome runtime. Its current file digest is recorded
-when the app starts and checked again before each launch; this is not a signed
-runtime catalog. It has passed the
+locally installed Google Chrome runtime. At startup it validates the local
+Authenticode trust decision without network retrieval, requires the leaf
+certificate publisher to be `Google LLC`, records the current file digest and
+checks that digest again before each launch. This remains local admission, not
+a remotely signed runtime catalog. It has passed the
 repeatable two-profile smoke test documented in
 [`docs/phase-1-acceptance.md`](docs/phase-1-acceptance.md). It is still an MVP:
 DPAPI-backed secret migration, encrypted backup, managed runtime
-installation/update, publisher-signature verification and high-strength
-fingerprint resistance remain later milestones.
+installation/update, online revocation freshness and high-strength fingerprint
+resistance remain later milestones.
 
 The Windows secret adapter stores only Generic Credentials in the current
 user's Credential Manager namespace. Profile isolation and multi-open behavior
@@ -131,7 +134,8 @@ cargo +stable-x86_64-pc-windows-gnu test --workspace
 - Chromium sandbox must stay enabled.
 - No remote-debugging TCP port for normal profiles.
 - Proxy credentials must never enter SQLite, process arguments or logs.
-- Browser executables are confined to the managed runtime root and checked
+- Browser executables are confined to the managed runtime root, admitted only
+  after Windows Authenticode verifies an allow-listed publisher, and checked
   against their registered SHA-256 digest before launch.
 - Profile paths are allocated by the core and checked for traversal and
   reparse-point escapes.

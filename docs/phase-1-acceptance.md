@@ -1,6 +1,7 @@
 # Phase 1 Acceptance — Isolated Multi-Open MVP
 
-Status: **passed on Windows on 2026-08-02**.
+Status: **passed on Windows on 2026-08-02; runtime trust hardening revalidated
+on 2026-08-30**.
 
 ## Delivered boundary
 
@@ -11,9 +12,9 @@ Status: **passed on Windows on 2026-08-02**.
   `UserDataDirectory` launch argument.
 - `ManagedChromiumRuntime` launches the executable directly without a shell,
   verifies SHA-256 before every launch and accepts only registered builds and
-  allow-listed arguments. The production composition root records the current
-  local Chrome digest at startup; publisher-signature verification is not yet
-  implemented.
+  allow-listed arguments. The production composition root first requires a
+  valid Windows Authenticode trust decision and the `Google LLC` leaf
+  certificate publisher, then records the current local Chrome digest.
 - The scheduler permits up to ten concurrent profiles, rejects a second active
   session for the same profile and preserves FIFO ordering beyond capacity.
 - Stopping a session reaps its tracked process. The real smoke test confirmed
@@ -21,20 +22,23 @@ Status: **passed on Windows on 2026-08-02**.
 
 ## Runtime integrity record
 
-The local Chrome entry is admitted using trust-on-first-use for the current
-application run:
+The local Chrome entry is admitted after an Authenticode publisher check for
+the current application run:
 
 | Field | Accepted value |
 | --- | --- |
 | Executable | `C:\Program Files\Google\Chrome\Application\chrome.exe` |
 | Product version | Read from the installed Chrome version directory |
-| Authenticode status | Not checked yet |
-| Publisher | Recorded as `Google LLC`; not cryptographically verified yet |
+| Authenticode status | Windows trust policy passed; network retrieval disabled |
+| Publisher | Leaf signing certificate must match `Google LLC` |
 | SHA-256 | Calculated at app startup and rechecked before each launch |
 
 If Chrome changes during one app run, Brows refuses to start a profile because
-the recorded digest no longer matches. Restarting the app deliberately adopts
-the newly installed file digest.
+the recorded digest no longer matches. Restarting the app adopts a newly
+installed file only after Authenticode and publisher checks pass again. The
+check uses the local Windows trust state and does not fetch fresh revocation
+data from the network, so this is not an online revocation guarantee or a
+remotely signed runtime catalog.
 
 ## Verification performed
 

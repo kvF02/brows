@@ -1,7 +1,7 @@
 use brows_adapters_diagnostic::LocalNetworkDiagnosticRunner;
 use brows_adapters_morelogin::MoreLoginProfileDataMigrator;
 use brows_adapters_proxy::{StoredProxyRuntime, TcpProxyConnectivityTester};
-use brows_adapters_runtime::ManagedChromiumRuntime;
+use brows_adapters_runtime::{verify_authenticode_publisher, ManagedChromiumRuntime};
 use brows_adapters_secret_windows::WindowsCredentialStore;
 use brows_adapters_sqlite::{
     SqliteMigrationRecordRepository, SqliteProfileRepository, SqliteProxyRepository,
@@ -90,11 +90,15 @@ impl AppState {
             )
         })?;
         let browsers = Arc::new(ManagedChromiumRuntime::new(&browser_root, &profile_root)?);
-        // The system Chrome installation is discovered at runtime. Record its
-        // current digest and re-check it before every launch. This tolerates an
+        // The system Chrome installation is discovered at runtime. Verify its
+        // Authenticode chain and publisher before recording the current digest,
+        // then re-check that digest before every launch. This tolerates an
         // update between app runs while failing closed on changes during a run.
-        browsers
-            .register_build_with_current_digest(discovered_chrome_build(&browser_root)?, true)?;
+        let mut chrome_build = discovered_chrome_build(&browser_root)?;
+        chrome_build.publisher =
+            verify_authenticode_publisher(&chrome_build.executable_path, &["Google LLC"])
+                .map_err(brows_application::ApplicationError::from)?;
+        browsers.register_build_with_current_digest(chrome_build, true)?;
 
         let compiler = Arc::new(LaunchPlanCompiler::new(
             presets.clone(),

@@ -1,4 +1,4 @@
-#![forbid(unsafe_code)]
+#![deny(unsafe_code)]
 #![deny(missing_debug_implementations)]
 
 //! Managed Chromium runtime adapter.
@@ -24,6 +24,10 @@ use std::{
     sync::{Mutex, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
+
+mod authenticode;
+
+pub use authenticode::verify_authenticode_publisher;
 
 const MAX_PREFERENCES_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -77,14 +81,13 @@ impl ManagedChromiumRuntime {
         self.insert_registered_build(build, activate)
     }
 
-    /// Trusts the executable selected by the local composition root, records
-    /// its current digest, and then uses the normal fail-closed launch path.
+    /// Records the current digest of an executable already trusted by the
+    /// composition root, then uses the normal fail-closed launch path.
     ///
     /// This is useful for a system Chrome installation whose digest changes
-    /// after an automatic update. It is trust-on-first-use for the current app
-    /// run, not publisher-signature verification: any later file change is
-    /// rejected until the application is restarted and the build is admitted
-    /// again by the composition root.
+    /// after an automatic update. The caller must establish publisher trust
+    /// before invoking this helper. Any later file change is rejected until
+    /// the application is restarted and the build is admitted again.
     pub fn register_build_with_current_digest(
         &self,
         mut build: BrowserBuild,
