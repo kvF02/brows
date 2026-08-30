@@ -1,7 +1,8 @@
 use brows_domain::{
-    BrowserBuild, BrowserBuildSelector, DiagnosticReport, EnvironmentPreset, EnvironmentPresetRef,
-    FingerprintPersona, LaunchArgument, LaunchWarning, ProfileId, ProfileSpec, ProxyId,
-    ProxyLaunchBinding, ProxySpec, ResolvedLaunchPlan, Revision, SecretRef, SessionId,
+    BrowserBuild, BrowserBuildSelector, BrowserPreferences, DiagnosticReport, EnvironmentPreset,
+    EnvironmentPresetRef, FingerprintPersona, LaunchArgument, LaunchWarning, ProfileId,
+    ProfileSpec, ProxyId, ProxyLaunchBinding, ProxySpec, ResolvedLaunchPlan, Revision, SecretRef,
+    SessionId,
 };
 use std::{fmt, path::PathBuf};
 
@@ -140,6 +141,11 @@ pub struct BrowserProcess {
 
 pub trait BrowserRuntime: fmt::Debug + Send + Sync {
     fn resolve_build(&self, selector: &BrowserBuildSelector) -> PortResult<BrowserBuild>;
+    /// Returns the locally registered builds for management/diagnostic views.
+    /// Runtime adapters that cannot enumerate builds may keep the default.
+    fn list_builds(&self) -> PortResult<Vec<BrowserBuild>> {
+        Ok(Vec::new())
+    }
     fn launch(&self, plan: &ResolvedLaunchPlan) -> PortResult<BrowserProcess>;
     fn stop(&self, session_id: &SessionId) -> PortResult<()>;
     fn is_running(&self, session_id: &SessionId) -> PortResult<bool>;
@@ -164,6 +170,8 @@ pub trait ProxyRuntime: fmt::Debug + Send + Sync {
 pub struct FingerprintContribution {
     pub arguments: Vec<LaunchArgument>,
     pub warnings: Vec<LaunchWarning>,
+    /// Optional browser-preference overrides produced by the fingerprint runtime.
+    pub preferences: Option<BrowserPreferences>,
 }
 
 pub trait FingerprintRuntime: fmt::Debug + Send + Sync {
@@ -172,6 +180,17 @@ pub trait FingerprintRuntime: fmt::Debug + Send + Sync {
         persona: &FingerprintPersona,
         build: &BrowserBuild,
     ) -> PortResult<FingerprintContribution>;
+
+    /// Profile-aware variant used when materialized artifacts must be isolated
+    /// per profile. Existing adapters can rely on the default implementation.
+    fn compile_for_profile(
+        &self,
+        _profile_id: &ProfileId,
+        persona: &FingerprintPersona,
+        build: &BrowserBuild,
+    ) -> PortResult<FingerprintContribution> {
+        self.compile(persona, build)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

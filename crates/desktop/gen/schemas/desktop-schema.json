@@ -177,6 +177,162 @@
       "description": "Permission identifier",
       "oneOf": [
         {
+          "description": "Default permissions for the Brows app — all custom commands.\n#### This default permission set includes:\n\n- `allow-profile-list`\n- `allow-profile-get`\n- `allow-profile-create`\n- `allow-profile-update`\n- `allow-profile-clone`\n- `allow-profile-archive`\n- `allow-profile-restore`\n- `allow-proxy-list`\n- `allow-proxy-save`\n- `allow-proxy-remove`\n- `allow-proxy-test`\n- `allow-diagnostic-run`\n- `allow-diagnostic-list`\n- `allow-legacy-migration-inspect`\n- `allow-legacy-migration-execute`\n- `allow-legacy-migration-rollback`\n- `allow-legacy-migration-list`\n- `allow-morelogin-preview`\n- `allow-morelogin-import`\n- `allow-fingerprint-preview`\n- `allow-list-runtimes`\n- `allow-session-launch`\n- `allow-session-stop`\n- `allow-session-cancel-queued`\n- `allow-session-list`",
+          "type": "string",
+          "const": "default",
+          "markdownDescription": "Default permissions for the Brows app — all custom commands.\n#### This default permission set includes:\n\n- `allow-profile-list`\n- `allow-profile-get`\n- `allow-profile-create`\n- `allow-profile-update`\n- `allow-profile-clone`\n- `allow-profile-archive`\n- `allow-profile-restore`\n- `allow-proxy-list`\n- `allow-proxy-save`\n- `allow-proxy-remove`\n- `allow-proxy-test`\n- `allow-diagnostic-run`\n- `allow-diagnostic-list`\n- `allow-legacy-migration-inspect`\n- `allow-legacy-migration-execute`\n- `allow-legacy-migration-rollback`\n- `allow-legacy-migration-list`\n- `allow-morelogin-preview`\n- `allow-morelogin-import`\n- `allow-fingerprint-preview`\n- `allow-list-runtimes`\n- `allow-session-launch`\n- `allow-session-stop`\n- `allow-session-cancel-queued`\n- `allow-session-list`"
+        },
+        {
+          "description": "Enables the diagnostic_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-diagnostic-list",
+          "markdownDescription": "Enables the diagnostic_list command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the diagnostic_run command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-diagnostic-run",
+          "markdownDescription": "Enables the diagnostic_run command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the fingerprint_preview command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-fingerprint-preview",
+          "markdownDescription": "Enables the fingerprint_preview command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the legacy_migration_execute command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-legacy-migration-execute",
+          "markdownDescription": "Enables the legacy_migration_execute command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the legacy_migration_inspect command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-legacy-migration-inspect",
+          "markdownDescription": "Enables the legacy_migration_inspect command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the legacy_migration_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-legacy-migration-list",
+          "markdownDescription": "Enables the legacy_migration_list command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the legacy_migration_rollback command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-legacy-migration-rollback",
+          "markdownDescription": "Enables the legacy_migration_rollback command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the list_runtimes command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-list-runtimes",
+          "markdownDescription": "Enables the list_runtimes command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the morelogin_import command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-morelogin-import",
+          "markdownDescription": "Enables the morelogin_import command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the morelogin_preview command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-morelogin-preview",
+          "markdownDescription": "Enables the morelogin_preview command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the profile_archive command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-profile-archive",
+          "markdownDescription": "Enables the profile_archive command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the profile_clone command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-profile-clone",
+          "markdownDescription": "Enables the profile_clone command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the profile_create command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-profile-create",
+          "markdownDescription": "Enables the profile_create command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the profile_get command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-profile-get",
+          "markdownDescription": "Enables the profile_get command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the profile_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-profile-list",
+          "markdownDescription": "Enables the profile_list command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the profile_restore command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-profile-restore",
+          "markdownDescription": "Enables the profile_restore command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the profile_update command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-profile-update",
+          "markdownDescription": "Enables the profile_update command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the proxy_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-proxy-list",
+          "markdownDescription": "Enables the proxy_list command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the proxy_remove command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-proxy-remove",
+          "markdownDescription": "Enables the proxy_remove command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the proxy_save command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-proxy-save",
+          "markdownDescription": "Enables the proxy_save command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the proxy_test command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-proxy-test",
+          "markdownDescription": "Enables the proxy_test command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the session_cancel_queued command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-session-cancel-queued",
+          "markdownDescription": "Enables the session_cancel_queued command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the session_launch command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-session-launch",
+          "markdownDescription": "Enables the session_launch command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the session_list command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-session-list",
+          "markdownDescription": "Enables the session_list command without any pre-configured scope."
+        },
+        {
+          "description": "Enables the session_stop command without any pre-configured scope.",
+          "type": "string",
+          "const": "allow-session-stop",
+          "markdownDescription": "Enables the session_stop command without any pre-configured scope."
+        },
+        {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",
           "type": "string",
           "const": "core:default",

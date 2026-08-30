@@ -74,6 +74,37 @@ impl ManagedChromiumRuntime {
         verify_digest(&executable, &build.sha256)?;
         build.executable_path = executable;
 
+        self.insert_registered_build(build, activate)
+    }
+
+    /// Trusts the executable selected by the local composition root, records
+    /// its current digest, and then uses the normal fail-closed launch path.
+    ///
+    /// This is useful for a system Chrome installation whose digest changes
+    /// after an automatic update. It is trust-on-first-use for the current app
+    /// run, not publisher-signature verification: any later file change is
+    /// rejected until the application is restarted and the build is admitted
+    /// again by the composition root.
+    pub fn register_build_with_current_digest(
+        &self,
+        mut build: BrowserBuild,
+        activate: bool,
+    ) -> PortResult<()> {
+        if build.trust != RuntimeTrust::Verified {
+            return Err(PortError::new(
+                PortErrorKind::RuntimeUntrusted,
+                "only verified browser builds can be registered",
+            ));
+        }
+
+        let executable = canonical_regular_file(&build.executable_path, "browser executable")?;
+        ensure_within(&executable, &self.runtime_root, "browser executable")?;
+        build.sha256 = digest_file(&executable)?;
+        build.executable_path = executable;
+        self.register_build(build, activate)
+    }
+
+    fn insert_registered_build(&self, build: BrowserBuild, activate: bool) -> PortResult<()> {
         let mut registry = self
             .builds
             .write()
@@ -119,7 +150,6 @@ impl ManagedChromiumRuntime {
 
     fn verified_build_for_plan(&self, plan: &ResolvedLaunchPlan) -> PortResult<BrowserBuild> {
         let executable = canonical_regular_file(&plan.executable_path, "browser executable")?;
-        ensure_within(&executable, &self.runtime_root, "browser executable")?;
 
         let registry = self
             .builds
@@ -142,6 +172,7 @@ impl ManagedChromiumRuntime {
                 "browser runtime trust was revoked",
             ));
         }
+        ensure_within(&executable, &self.runtime_root, "browser executable")?;
         verify_digest(&executable, &build.sha256)?;
         Ok(build)
     }
@@ -199,6 +230,43 @@ impl ManagedChromiumRuntime {
                 LaunchArgument::WindowSize { width, height } => {
                     rendered.push(OsString::from(format!("--window-size={width},{height}")));
                 }
+                // ── v0.2 SeedableNoise arguments ──────────────────────────────
+                LaunchArgument::UserAgentOverride(ua) => {
+                    rendered.push(OsString::from(format!("--user-agent={ua}")));
+                }
+                LaunchArgument::ForceDeviceScaleFactor(hundredths) => {
+                    // Convert hundredths back to a decimal string (e.g. 150 → "1.5")
+                    let whole = hundredths / 100;
+                    let frac = hundredths % 100;
+                    let value = if frac == 0 {
+                        format!("{whole}")
+                    } else if frac % 10 == 0 {
+                        format!("{whole}.{}", frac / 10)
+                    } else {
+                        format!("{whole}.{frac:02}")
+                    };
+                    rendered.push(OsString::from(format!(
+                        "--force-device-scale-factor={value}"
+                    )));
+                }
+                LaunchArgument::LoadExtension(path) => {
+                    rendered.push(OsString::from(format!(
+                        "--load-extension={}",
+                        path.display()
+                    )));
+                }
+                LaunchArgument::DisableBlinkFeatures(features) => {
+                    rendered.push(OsString::from(format!(
+                        "--disable-blink-features={}",
+                        features.join(",")
+                    )));
+                }
+                LaunchArgument::EnableBlinkFeatures(features) => {
+                    rendered.push(OsString::from(format!(
+                        "--enable-blink-features={}",
+                        features.join(",")
+                    )));
+                }
             }
         }
         if !saw_user_data_dir {
@@ -217,6 +285,10 @@ impl ManagedChromiumRuntime {
 }
 
 impl BrowserRuntime for ManagedChromiumRuntime {
+    fn list_builds(&self) -> PortResult<Vec<BrowserBuild>> {
+        self.installed_builds()
+    }
+
     fn resolve_build(&self, selector: &BrowserBuildSelector) -> PortResult<BrowserBuild> {
         let registry = self
             .builds
@@ -276,11 +348,12 @@ impl BrowserRuntime for ManagedChromiumRuntime {
     }
 
     fn stop(&self, session_id: &SessionId) -> PortResult<()> {
-        let mut child = self
+        let mut processes = self
             .processes
             .lock()
-            .map_err(|_| internal("browser process registry lock is poisoned"))?
-            .remove(session_id)
+            .map_err(|_| internal("browser process registry lock is poisoned"))?;
+        let child = processes
+            .get_mut(session_id)
             .ok_or_else(|| PortError::not_found("browser process"))?;
         if child
             .try_wait()
@@ -297,6 +370,7 @@ impl BrowserRuntime for ManagedChromiumRuntime {
         child
             .wait()
             .map_err(|error| internal(format!("failed to reap browser process: {error}")))?;
+        processes.remove(session_id);
         Ok(())
     }
 
@@ -366,6 +440,51 @@ fn write_preferences(user_data_dir: &Path, plan: &ResolvedLaunchPlan) -> PortRes
         "accept_languages".to_owned(),
         Value::String(plan.preferences.accept_languages.join(",")),
     );
+
+    // ── v0.2 optional preference overrides ──────────────────────────────
+    if let Some(webgl_enabled) = plan.preferences.webgl_enabled {
+        let webkit = object
+            .entry("webkit")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| invalid_data("Preferences webkit field must be an object"))?;
+        let webgl = webkit
+            .entry("webgl")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| invalid_data("Preferences webkit.webgl field must be an object"))?;
+        webgl.insert("enabled".to_owned(), Value::Bool(webgl_enabled));
+    }
+    if let Some(hw_accel) = plan.preferences.hardware_acceleration {
+        let profile_obj = object
+            .entry("profile")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| invalid_data("Preferences profile field must be an object"))?;
+        let mode = profile_obj
+            .entry("hardware_acceleration_mode")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| {
+                invalid_data("Preferences hardware_acceleration_mode field must be an object")
+            })?;
+        mode.insert("enabled".to_owned(), Value::Bool(hw_accel));
+    }
+    if let Some(notif) = plan.preferences.notifications_setting {
+        let profile_obj = object
+            .entry("profile")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| invalid_data("Preferences profile field must be an object"))?;
+        let content_settings = profile_obj
+            .entry("default_content_setting_values")
+            .or_insert_with(|| Value::Object(Map::new()))
+            .as_object_mut()
+            .ok_or_else(|| {
+                invalid_data("Preferences default_content_setting_values must be an object")
+            })?;
+        content_settings.insert("notifications".to_owned(), Value::Number(notif.into()));
+    }
     let serialized = serde_json::to_vec(&root)
         .map_err(|error| internal(format!("failed to serialize Preferences: {error}")))?;
     let temporary = default_dir.join("Preferences.brows.tmp");
@@ -457,6 +576,17 @@ fn ensure_within(path: &Path, root: &Path, label: &str) -> PortResult<()> {
 }
 
 fn verify_digest(path: &Path, expected: &str) -> PortResult<()> {
+    let actual = digest_file(path)?;
+    if !actual.eq_ignore_ascii_case(expected) {
+        return Err(PortError::new(
+            PortErrorKind::RuntimeUntrusted,
+            "browser executable digest does not match the signed catalog",
+        ));
+    }
+    Ok(())
+}
+
+fn digest_file(path: &Path) -> PortResult<String> {
     let file = File::open(path)
         .map_err(|error| invalid_data(format!("cannot open browser executable: {error}")))?;
     let mut reader = BufReader::new(file);
@@ -471,18 +601,11 @@ fn verify_digest(path: &Path, expected: &str) -> PortResult<()> {
         }
         digest.update(&buffer[..read]);
     }
-    let actual = digest
+    Ok(digest
         .finalize()
         .iter()
         .map(|byte| format!("{byte:02x}"))
-        .collect::<String>();
-    if !actual.eq_ignore_ascii_case(expected) {
-        return Err(PortError::new(
-            PortErrorKind::RuntimeUntrusted,
-            "browser executable digest does not match the signed catalog",
-        ));
-    }
-    Ok(())
+        .collect())
 }
 
 fn channel_key(channel: BrowserChannel) -> &'static str {
@@ -557,6 +680,9 @@ mod tests {
                 accept_languages: vec!["zh-CN".to_owned(), "en-US".to_owned()],
                 startup_urls: vec!["https://example.com".to_owned()],
                 permissions_prompt: true,
+                webgl_enabled: None,
+                hardware_acceleration: None,
+                notifications_setting: None,
             },
             proxy: ProxyLaunchBinding::Direct,
             capabilities: BrowserCapabilities {
@@ -648,6 +774,42 @@ mod tests {
     }
 
     #[test]
+    fn current_digest_registration_rechecks_file_before_launch() {
+        let root = temp_root("current-digest");
+        let runtime_dir = root.join("runtime");
+        let profile_dir = root.join("profiles");
+        fs::create_dir_all(&runtime_dir).unwrap();
+        let executable = runtime_dir.join("chrome.exe");
+        fs::write(&executable, b"initial runtime").unwrap();
+
+        let runtime = ManagedChromiumRuntime::new(&runtime_dir, &profile_dir).unwrap();
+        let build = BrowserBuild {
+            id: BrowserBuildId::new("stable-current").unwrap(),
+            provider: "test".to_owned(),
+            version: "1".to_owned(),
+            channel: BrowserChannel::Stable,
+            executable_path: executable.clone(),
+            sha256: "0".repeat(64),
+            publisher: "Test Publisher".to_owned(),
+            trust: RuntimeTrust::Verified,
+            capabilities: BrowserCapabilities::default(),
+            installed_at_ms: 1,
+        };
+        runtime
+            .register_build_with_current_digest(build, true)
+            .unwrap();
+        let registered = runtime
+            .resolve_build(&BrowserBuildSelector::Channel(BrowserChannel::Stable))
+            .unwrap();
+        assert_ne!(registered.sha256, "0".repeat(64));
+
+        fs::write(&executable, b"changed runtime").unwrap();
+        let plan = sample_plan(registered.executable_path, &profile_dir);
+        let error = runtime.verified_build_for_plan(&plan).unwrap_err();
+        assert_eq!(error.kind, PortErrorKind::RuntimeUntrusted);
+    }
+
+    #[test]
     fn activation_replaces_the_active_build_for_a_channel() {
         let root = temp_root("activation");
         let runtime_dir = root.join("runtime");
@@ -696,5 +858,137 @@ mod tests {
                 .id,
             second_id
         );
+    }
+
+    // ── v0.2 SeedableNoise render tests ────────────────────────────────────
+
+    fn seedable_plan(profile_root: &Path, extra_args: Vec<LaunchArgument>) -> ResolvedLaunchPlan {
+        let user_data_dir = profile_root.join("profile-key").join("userdata");
+        let mut arguments = vec![
+            LaunchArgument::UserDataDirectory(user_data_dir.clone()),
+            LaunchArgument::AcceptLanguages(vec!["en-US".to_owned()]),
+            LaunchArgument::WindowSize {
+                width: 1920,
+                height: 1080,
+            },
+        ];
+        arguments.extend(extra_args);
+        ResolvedLaunchPlan {
+            session_id: SessionId::new("session-1").unwrap(),
+            profile_id: ProfileId::new("profile-1").unwrap(),
+            profile_revision: Revision::FIRST,
+            executable_path: PathBuf::from("chrome.exe"),
+            user_data_dir,
+            arguments,
+            preferences: BrowserPreferences {
+                accept_languages: vec!["en-US".to_owned()],
+                startup_urls: vec![],
+                permissions_prompt: true,
+                webgl_enabled: None,
+                hardware_acceleration: None,
+                notifications_setting: None,
+            },
+            proxy: ProxyLaunchBinding::Direct,
+            capabilities: BrowserCapabilities::default(),
+            warnings: Vec::new(),
+            plan_hash: "a".repeat(64),
+        }
+    }
+
+    #[test]
+    fn runtime_renders_user_agent_override_arg() {
+        let root = temp_root("ua");
+        let plan = seedable_plan(
+            &root,
+            vec![LaunchArgument::UserAgentOverride(
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/150.0.0.0".to_owned(),
+            )],
+        );
+        let rendered =
+            ManagedChromiumRuntime::render_arguments(&plan, &plan.user_data_dir).expect("render");
+        let text = rendered
+            .iter()
+            .map(|v| v.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            text.contains("--user-agent=Mozilla/5.0"),
+            "missing UA arg: {text}"
+        );
+    }
+
+    #[test]
+    fn runtime_renders_load_extension_arg() {
+        let root = temp_root("load-ext");
+        let ext_path = root.join("extensions").join("seed-abc");
+        fs::create_dir_all(&ext_path).unwrap();
+        let plan = seedable_plan(&root, vec![LaunchArgument::LoadExtension(ext_path.clone())]);
+        let rendered =
+            ManagedChromiumRuntime::render_arguments(&plan, &plan.user_data_dir).expect("render");
+        let text = rendered
+            .iter()
+            .map(|v| v.to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
+        assert!(
+            text.contains(&format!("--load-extension={}", ext_path.display())),
+            "missing load-extension arg: {text}"
+        );
+    }
+
+    #[test]
+    fn runtime_writes_webgl_preference_when_present() {
+        let root = temp_root("prefs-webgl");
+        let user_data = root.join("profile-key").join("userdata");
+        fs::create_dir_all(&user_data).unwrap();
+        let mut plan = seedable_plan(&root, vec![]);
+        plan.preferences.webgl_enabled = Some(false);
+        ManagedChromiumRuntime::render_arguments(&plan, &plan.user_data_dir).unwrap();
+        write_preferences(&user_data, &plan).expect("write_preferences");
+        let prefs_path = user_data.join("Default").join("Preferences");
+        let bytes = fs::read(&prefs_path).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json.get("webkit")
+                .and_then(|v| v.get("webgl"))
+                .and_then(|v| v.get("enabled"))
+                .and_then(|v| v.as_bool()),
+            Some(false)
+        );
+    }
+
+    #[test]
+    fn runtime_writes_notifications_preference_when_present() {
+        let root = temp_root("prefs-notif");
+        let user_data = root.join("profile-key").join("userdata");
+        fs::create_dir_all(&user_data).unwrap();
+        let mut plan = seedable_plan(&root, vec![]);
+        plan.preferences.notifications_setting = Some(2);
+        ManagedChromiumRuntime::render_arguments(&plan, &plan.user_data_dir).unwrap();
+        write_preferences(&user_data, &plan).expect("write_preferences");
+        let prefs_path = user_data.join("Default").join("Preferences");
+        let bytes = fs::read(&prefs_path).unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json.get("profile")
+                .and_then(|v| v.get("default_content_setting_values"))
+                .and_then(|v| v.get("notifications"))
+                .and_then(|v| v.as_u64()),
+            Some(2)
+        );
+    }
+
+    #[test]
+    fn runtime_rejects_unsupported_launch_argument_combinations() {
+        let _root = temp_root("validate");
+        // Empty path: validation should fail at the domain layer.
+        let err = LaunchArgument::LoadExtension(PathBuf::new()).validate();
+        assert!(err.is_err(), "empty extension path must be rejected");
+        // Empty UA: rejected.
+        let err = LaunchArgument::UserAgentOverride(String::new()).validate();
+        assert!(err.is_err(), "empty UA must be rejected");
+        // Empty feature list entry: rejected.
+        let err = LaunchArgument::DisableBlinkFeatures(vec![String::new()]).validate();
+        assert!(err.is_err(), "empty blink feature must be rejected");
     }
 }

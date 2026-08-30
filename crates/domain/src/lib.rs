@@ -10,12 +10,13 @@ pub use error::DomainError;
 pub use ids::{BrowserBuildId, PresetId, ProfileId, ProxyId, Revision, SecretRef, SessionId};
 pub use model::{
     BrowserBuild, BrowserBuildSelector, BrowserCapabilities, BrowserChannel, BrowserPreferences,
-    DiagnosticCheck, DiagnosticOverall, DiagnosticReport, DiagnosticScope, DiagnosticStatus,
-    DnsMode, EnvironmentPreset, EnvironmentPresetKind, EnvironmentPresetRef, FingerprintPersona,
-    LaunchArgument, LaunchWarning, LocaleConfig, PersonaKind, ProfileSpec, ProxyLaunchBinding,
-    ProxyScheme, ProxySpec, ResolvedLaunchPlan, RuntimeTrust, Session, SessionFailure,
-    SessionState, SystemNativePersona, WindowConfig, DEFAULT_MAX_CONCURRENT_SESSIONS,
-    DEFAULT_PROXY_TIMEOUT_MS, MAX_CONCURRENT_SESSIONS, MAX_PROFILE_NAME_CHARS, MAX_TAG_CHARS,
+    DeviceMemoryGb, DiagnosticCheck, DiagnosticOverall, DiagnosticReport, DiagnosticScope,
+    DiagnosticStatus, DnsMode, EnvironmentPreset, EnvironmentPresetKind, EnvironmentPresetRef,
+    FingerprintPersona, LaunchArgument, LaunchWarning, LocaleConfig, PersonaKind, PlatformKind,
+    ProfileSpec, ProxyLaunchBinding, ProxyScheme, ProxySpec, ResolvedLaunchPlan, RuntimeTrust,
+    ScreenConfig, SeedableNoisePersona, Session, SessionFailure, SessionState, SystemNativePersona,
+    WebGLProfile, WindowConfig, DEFAULT_MAX_CONCURRENT_SESSIONS, DEFAULT_PROXY_TIMEOUT_MS,
+    MAX_CONCURRENT_SESSIONS, MAX_PROFILE_NAME_CHARS, MAX_QUEUED_SESSIONS, MAX_TAG_CHARS,
 };
 pub use scheduler::{EnqueueOutcome, LaunchTicket, QueueSnapshot, SessionScheduler};
 
@@ -70,6 +71,9 @@ mod tests {
                 accept_languages: vec!["en-US".to_owned()],
                 startup_urls: vec![],
                 permissions_prompt: true,
+                webgl_enabled: None,
+                hardware_acceleration: None,
+                notifications_setting: None,
             },
             proxy: ProxyLaunchBinding::Direct,
             capabilities: BrowserCapabilities::default(),
@@ -93,6 +97,9 @@ mod tests {
                 accept_languages: vec!["en-US".to_owned()],
                 startup_urls: vec![],
                 permissions_prompt: true,
+                webgl_enabled: None,
+                hardware_acceleration: None,
+                notifications_setting: None,
             },
             proxy: ProxyLaunchBinding::Direct,
             capabilities: BrowserCapabilities::default(),
@@ -156,5 +163,95 @@ mod tests {
         assert!(
             matches!(value.validate(), Err(DomainError::InconsistentConfiguration(reason)) if reason.contains("host-level"))
         );
+    }
+
+    // ── v0.2 SeedableNoise domain tests ──────────────────────────────────────
+
+    fn seedable_profile() -> ProfileSpec {
+        let mut p = profile();
+        p.persona = FingerprintPersona::SeedableNoise(SeedableNoisePersona {
+            seed: "test-seed-001".to_owned(),
+            platform: PlatformKind::Windows,
+            hardware_concurrency: 8,
+            device_memory: DeviceMemoryGb::Eight,
+            touch_points: 0,
+            screen: ScreenConfig {
+                width: 1920,
+                height: 1080,
+                color_depth: 24,
+                device_scale_factor_hundredths: 100,
+            },
+            webgl: WebGLProfile::auto(),
+            spoof_canvas: true,
+            spoof_audio: false,
+        });
+        p
+    }
+
+    #[test]
+    fn seedable_noise_persona_requires_non_empty_seed() {
+        let mut p = seedable_profile();
+        if let FingerprintPersona::SeedableNoise(ref mut persona) = p.persona {
+            persona.seed = "   ".to_owned();
+        }
+        assert!(
+            matches!(p.validate(), Err(DomainError::InconsistentConfiguration(msg)) if msg.contains("seed"))
+        );
+    }
+
+    #[test]
+    fn seedable_noise_persona_validates_webgl_platform_consistency() {
+        let mut p = seedable_profile();
+        if let FingerprintPersona::SeedableNoise(ref mut persona) = p.persona {
+            // Apple Inc. vendor is only valid for MacOs, not Windows
+            persona.webgl = WebGLProfile {
+                vendor: "Apple Inc.".to_owned(),
+                unmasked_renderer: "Apple M2".to_owned(),
+            };
+        }
+        assert!(
+            matches!(p.validate(), Err(DomainError::InconsistentConfiguration(msg)) if msg.contains("vendor"))
+        );
+    }
+
+    #[test]
+    fn seedable_noise_persona_rejects_oversized_hardware_concurrency() {
+        let mut p = seedable_profile();
+        if let FingerprintPersona::SeedableNoise(ref mut persona) = p.persona {
+            persona.hardware_concurrency = 200;
+        }
+        assert!(
+            matches!(p.validate(), Err(DomainError::InconsistentConfiguration(msg)) if msg.contains("hardware_concurrency"))
+        );
+    }
+
+    #[test]
+    fn seedable_noise_validates_locale_consistency() {
+        let mut p = seedable_profile();
+        // Asia/Tokyo with German only is inconsistent (de not in Asia allowed list).
+        p.locale.timezone = Some("Asia/Tokyo".to_owned());
+        p.locale.accept_languages = vec!["de-DE".to_owned(), "de".to_owned()];
+        assert!(
+            matches!(p.validate(), Err(DomainError::InconsistentConfiguration(msg)) if msg.contains("timezone"))
+        );
+        // Adding ja makes it consistent.
+        p.locale.accept_languages.push("ja".to_owned());
+        assert!(p.validate().is_ok());
+        // Europe/Berlin + de-DE is consistent.
+        let mut q = seedable_profile();
+        q.locale.timezone = Some("Europe/Berlin".to_owned());
+        q.locale.accept_languages = vec!["de-DE".to_owned(), "de".to_owned()];
+        assert!(q.validate().is_ok());
+        // Europe/Berlin + zh-CN only is inconsistent.
+        q.locale.accept_languages = vec!["zh-CN".to_owned()];
+        assert!(
+            matches!(q.validate(), Err(DomainError::InconsistentConfiguration(msg)) if msg.contains("timezone"))
+        );
+    }
+
+    #[test]
+    fn seedable_persona_marks_zero_host_shared_fields() {
+        let p = seedable_profile();
+        assert_eq!(p.persona.host_shared_fields(), &[] as &[&str]);
     }
 }

@@ -12,11 +12,14 @@ mod compiler;
 mod error;
 pub mod memory;
 mod migration_service;
+pub mod persona_fingerprint;
 mod ports;
 mod profile_service;
 mod proxy_service;
 mod session_service;
 mod sha256;
+#[path = "stealth_template/mod.rs"]
+mod stealth_template;
 
 #[cfg(test)]
 mod tests;

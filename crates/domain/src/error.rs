@@ -24,6 +24,7 @@ pub enum DomainError {
     InvalidStateTransition { from: String, to: String },
     DuplicateSession,
     ProfileAlreadyScheduled,
+    QueueFull,
     SessionNotFound,
     SchedulerLimitInvalid,
     SessionNotActive,
@@ -59,6 +60,7 @@ impl fmt::Display for DomainError {
             Self::ProfileAlreadyScheduled => {
                 f.write_str("profile already has an active or queued session")
             }
+            Self::QueueFull => f.write_str("session queue is full"),
             Self::SessionNotFound => f.write_str("session was not found"),
             Self::SchedulerLimitInvalid => f.write_str("scheduler limit must be between 1 and 10"),
             Self::SessionNotActive => f.write_str("session is not active"),

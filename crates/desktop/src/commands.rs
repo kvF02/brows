@@ -1,25 +1,142 @@
 use crate::state::AppState;
 use brows_adapters_morelogin::{inspect_export as inspect_morelogin, MoreLoginPreview};
 use brows_application::{
-    ApplicationResult, DiagnosticRequest, DiagnosticRunner, LegacyProfileDataSummary,
-    MigrationRecord, MigrationRecordStatus, SessionLaunchOutcome,
+    persona_fingerprint::PersonaFingerprint, ApplicationResult, DiagnosticRequest,
+    DiagnosticRunner, LegacyProfileDataSummary, MigrationRecord, MigrationRecordStatus,
+    SessionLaunchOutcome,
 };
 use brows_contracts::{
-    BrowserBuildIdDto, BrowserSelectorDto, DiagnosticListRequest, DiagnosticReportDto,
-    DiagnosticRunRequest, ErrorCode, ErrorDto, LegacyMigrationExecuteRequest,
-    LegacyMigrationInspectRequest, LegacyMigrationInspectionDto, LegacyMigrationListRequest,
-    LegacyMigrationRecordDto, LegacyMigrationRollbackRequest, LegacyMigrationStatusDto, LocaleDto,
-    PersonaDto, PresetIdDto, ProfileCreateRequest, ProfileDraftDto, ProfileDto, ProfileIdRequest,
-    ProfileListRequest, ProfileRevisionRequest, ProfileUpdateRequest, ProxyConnectivityCheckDto,
-    ProxyDto, ProxyRemoveRequest, ProxySaveRequest, ProxyTestRequest, SessionCancelQueuedRequest,
-    SessionDto, SessionLaunchRequest, SessionStopRequest, WindowDto,
+    BrowserBuildIdDto, BrowserRuntimeDto, BrowserSelectorDto, DiagnosticListRequest,
+    DiagnosticReportDto, DiagnosticRunRequest, ErrorCode, ErrorDto, EventEnvelope,
+    FingerprintPreviewDto, LegacyMigrationExecuteRequest, LegacyMigrationInspectRequest,
+    LegacyMigrationInspectionDto, LegacyMigrationListRequest, LegacyMigrationRecordDto,
+    LegacyMigrationRollbackRequest, LegacyMigrationStatusDto, LocaleDto, PersonaDto, PresetIdDto,
+    ProfileCreateRequest, ProfileDraftDto, ProfileDto, ProfileIdRequest, ProfileListRequest,
+    ProfileRevisionRequest, ProfileUpdateRequest, ProxyConnectivityCheckDto, ProxyDto,
+    ProxyRemoveRequest, ProxySaveRequest, ProxyTestRequest, SessionCancelQueuedRequest, SessionDto,
+    SessionLaunchRequest, SessionStopRequest, WindowDto,
 };
 use brows_domain::ProfileId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
-use tauri::State;
+use tauri::{Emitter, State};
 
 type IpcResult<T> = Result<T, ErrorDto>;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FingerprintPreviewRequest {
+    persona: PersonaDto,
+    accept_languages: Vec<String>,
+    window_width: u32,
+    window_height: u32,
+}
+
+#[tauri::command]
+pub(crate) fn list_runtimes(state: State<'_, AppState>) -> IpcResult<Vec<BrowserRuntimeDto>> {
+    let builds = state
+        .browsers
+        .list_builds()
+        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
+    Ok(builds.iter().map(Into::into).collect())
+}
+
+#[tauri::command]
+pub(crate) fn fingerprint_preview(
+    state: State<'_, AppState>,
+    request: FingerprintPreviewRequest,
+) -> IpcResult<FingerprintPreviewDto> {
+    let persona = fingerprint_persona(request.persona)?;
+    let brows_domain::FingerprintPersona::SeedableNoise(seedable) = persona else {
+        return Err(ErrorDto {
+            code: ErrorCode::ValidationFailed,
+            message: "fingerprint preview requires a SeedableNoise persona".to_owned(),
+            violations: Vec::new(),
+        });
+    };
+    seedable.validate().map_err(|error| ErrorDto {
+        code: ErrorCode::ValidationFailed,
+        message: error.to_string(),
+        violations: Vec::new(),
+    })?;
+    let fingerprint = PersonaFingerprint::derive(&seedable).map_err(|error| ErrorDto {
+        code: ErrorCode::ValidationFailed,
+        message: error.to_string(),
+        violations: Vec::new(),
+    })?;
+    let build = state
+        .browsers
+        .list_builds()
+        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?
+        .into_iter()
+        .max_by_key(|build| build.installed_at_ms)
+        .ok_or_else(|| ErrorDto {
+            code: ErrorCode::CapabilityUnsupported,
+            message: "fingerprint preview requires an installed browser runtime".to_owned(),
+            violations: Vec::new(),
+        })?;
+    let mut declared_only_fields = Vec::new();
+    if seedable.spoof_canvas {
+        declared_only_fields.push("canvas".to_owned());
+    }
+    if seedable.spoof_audio {
+        declared_only_fields.push("audio".to_owned());
+    }
+    Ok(FingerprintPreviewDto {
+        effective_user_agent: fingerprint.user_agent_for_chromium(&build.version),
+        effective_platform: fingerprint.platform_string.to_owned(),
+        effective_languages: request.accept_languages,
+        effective_window_width: request.window_width,
+        effective_window_height: request.window_height,
+        effective_webgl_vendor: fingerprint.webgl_vendor,
+        effective_webgl_renderer: fingerprint.webgl_renderer,
+        hardware_concurrency: fingerprint.hardware_concurrency,
+        device_memory_gb: fingerprint.device_memory_gb,
+        declared_only_fields,
+        host_shared_fields: Vec::new(),
+    })
+}
+
+fn fingerprint_persona(value: PersonaDto) -> IpcResult<brows_domain::FingerprintPersona> {
+    Ok(match value {
+        PersonaDto::SystemNative {
+            preserve_system_timezone,
+            preserve_system_fonts,
+            preserve_system_gpu,
+            preserve_system_audio,
+        } => brows_domain::FingerprintPersona::SystemNative(brows_domain::SystemNativePersona {
+            preserve_system_timezone,
+            preserve_system_fonts,
+            preserve_system_gpu,
+            preserve_system_audio,
+        }),
+        PersonaDto::SeedableNoise {
+            seed,
+            platform,
+            hardware_concurrency,
+            device_memory,
+            touch_points,
+            screen,
+            webgl_vendor,
+            webgl_renderer,
+            spoof_canvas,
+            spoof_audio,
+        } => brows_domain::FingerprintPersona::SeedableNoise(brows_domain::SeedableNoisePersona {
+            seed,
+            platform: platform.into(),
+            hardware_concurrency,
+            device_memory: device_memory.into(),
+            touch_points,
+            screen: screen.into(),
+            webgl: brows_domain::WebGLProfile {
+                vendor: webgl_vendor,
+                unmasked_renderer: webgl_renderer,
+            },
+            spoof_canvas,
+            spoof_audio,
+        }),
+    })
+}
 
 fn ipc<T>(result: ApplicationResult<T>) -> IpcResult<T> {
     result.map_err(|error| error.to_contract())
@@ -371,6 +488,18 @@ pub(crate) fn profile_archive(
     state: State<'_, AppState>,
     request: ProfileRevisionRequest,
 ) -> IpcResult<ProfileDto> {
+    let id = profile_id(&request.profile_id)?;
+    if state
+        .sessions
+        .has_active_profile(&id)
+        .map_err(|error| error.to_contract())?
+    {
+        return Err(ErrorDto {
+            code: ErrorCode::ProfileLocked,
+            message: "stop the profile session before archiving".to_owned(),
+            violations: Vec::new(),
+        });
+    }
     ipc(state.profiles.archive(request))
 }
 
@@ -384,13 +513,19 @@ pub(crate) fn profile_restore(
 
 #[tauri::command]
 pub(crate) fn session_launch(
+    app: tauri::AppHandle,
     state: State<'_, AppState>,
     request: SessionLaunchRequest,
 ) -> IpcResult<SessionDto> {
-    ipc(state.sessions.launch(request)).map(|outcome| match outcome {
-        SessionLaunchOutcome::Started { session, .. }
-        | SessionLaunchOutcome::Queued { session, .. } => session,
-    })
+    let outcome = ipc(state.sessions.launch(request))?;
+    let (session, event) = match outcome {
+        SessionLaunchOutcome::Started { session, event } => (session, event),
+        SessionLaunchOutcome::Queued { session, event, .. } => (session, event),
+    };
+    if let Ok(envelope) = EventEnvelope::new(format!("session-{}", uuid::Uuid::new_v4()), event) {
+        let _ = app.emit("brows://session", envelope);
+    }
+    Ok(session)
 }
 
 #[tauri::command]

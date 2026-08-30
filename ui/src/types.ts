@@ -80,6 +80,7 @@ export interface Profile {
   createdAt: string;
   lastUsedAt?: string;
   diagnostic: DiagnosticSummary;
+  persona?: PersonaConfig;
 }
 
 export interface ProfileInput {
@@ -88,6 +89,51 @@ export interface ProfileInput {
   presetId: string;
   proxyId?: string;
   runtimeId: string;
+  /** v0.2: optional SeedableNoise persona. If omitted, SystemNative is used. */
+  persona?: PersonaConfig;
+}
+
+// ── v0.2 Fingerprint Persona (SeedableNoise) ────────────────────────────────
+
+export type PersonaKind = "system_native" | "seedable_noise";
+
+export type PlatformKind = "windows" | "mac_os" | "linux";
+
+export type DeviceMemoryGb = "0.25" | "0.5" | "1" | "2" | "4" | "8";
+
+export interface SeedableNoisePersonaConfig {
+  seed: string;
+  platform: PlatformKind;
+  hardwareConcurrency: number;
+  deviceMemory: DeviceMemoryGb;
+  touchPoints: number;
+  screenWidth: number;
+  screenHeight: number;
+  colorDepth: number;
+  deviceScaleFactor: number; // multiplier, e.g. 1.0, 1.5, 2.0
+  webglVendor: string;       // empty = auto-derive
+  webglRenderer: string;     // empty = auto-derive
+  spoofCanvas: boolean;
+  spoofAudio: boolean;
+}
+
+export interface PersonaConfig {
+  kind: PersonaKind;
+  seedable?: SeedableNoisePersonaConfig;
+}
+
+export interface FingerprintPreview {
+  effectiveUserAgent: string;
+  effectivePlatform: string;
+  effectiveLanguages: string[];
+  effectiveWindowWidth: number;
+  effectiveWindowHeight: number;
+  effectiveWebglVendor: string;
+  effectiveWebglRenderer: string;
+  hardwareConcurrency: number;
+  deviceMemoryGb: string;
+  declaredOnlyFields: string[];
+  hostSharedFields: string[];
 }
 
 export interface MoreLoginCandidate {
@@ -225,6 +271,15 @@ export type CommandParams<Name extends CommandName> = CommandMap[Name]["params"]
 export type CommandResult<Name extends CommandName> = CommandMap[Name]["result"];
 
 export interface ApiClient {
+  /** v0.2: derive the effective SeedableNoise fingerprint for a draft persona (no browser launch). */
+  fingerprintPreview(input: {
+    persona: PersonaConfig;
+    acceptLanguages: string[];
+    windowWidth: number;
+    windowHeight: number;
+  }): Promise<FingerprintPreview>;
+  /** List registered browser runtimes (auto-detected from the local system). */
+  listRuntimes(): Promise<BrowserRuntime[]>;
   previewMoreLogin(sourcePath: string): Promise<MoreLoginPreview>;
   importMoreLogin(sourcePath: string, rowNumbers?: number[]): Promise<MoreLoginImportResult>;
   inspectLegacyMigration(profileId: string, sourceProfileId: string): Promise<LegacyMigrationInspection>;
@@ -282,22 +337,6 @@ export const DEFAULT_PRESETS: EnvironmentPreset[] = [
     locale: "zh-CN",
     timezonePolicy: "system",
     fingerprintScope: "host-shared",
-  },
-  {
-    id: "regional-network",
-    name: "区域网络",
-    description: "语言和代理区域可配置，并检查出口一致性",
-    locale: "en-US",
-    timezonePolicy: "proxy-region",
-    fingerprintScope: "configurable",
-  },
-  {
-    id: "qa-restricted",
-    name: "QA 隔离",
-    description: "强化权限与 WebRTC 泄漏提示，适合测试环境",
-    locale: "en-US",
-    timezonePolicy: "explicit",
-    fingerprintScope: "configurable",
   },
 ];
 

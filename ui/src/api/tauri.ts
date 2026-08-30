@@ -13,6 +13,7 @@ import {
   type Profile,
   type ProfileInput,
   type ProfileStatus,
+  type PersonaConfig,
   type ProxyInput,
   type ProxySummary,
   type SessionSummary,
@@ -43,10 +44,42 @@ interface ProfileDraftDto {
       preserveSystemGpu: true;
       preserveSystemAudio: true;
     };
+  } | {
+    seedable_noise: {
+      seed: string;
+      platform: "windows" | "mac_os" | "linux";
+      hardwareConcurrency: number;
+      deviceMemory: "quarter" | "half" | "one" | "two" | "four" | "eight";
+      touchPoints: number;
+      screen: {
+        width: number;
+        height: number;
+        colorDepth: number;
+        deviceScaleFactorHundredths: number;
+      };
+      webglVendor: string;
+      webglRenderer: string;
+      spoofCanvas: boolean;
+      spoofAudio: boolean;
+    };
   };
   locale: { acceptLanguages: string[]; timezone?: string };
   window: { width: number; height: number; startMaximized: boolean };
   startupUrls: string[];
+}
+
+interface FingerprintPreviewDto {
+  effectiveUserAgent: string;
+  effectivePlatform: string;
+  effectiveLanguages: string[];
+  effectiveWindowWidth: number;
+  effectiveWindowHeight: number;
+  effectiveWebglVendor: string;
+  effectiveWebglRenderer: string;
+  hardwareConcurrency: number;
+  deviceMemoryGb: string;
+  declaredOnlyFields: string[];
+  hostSharedFields: string[];
 }
 
 interface ProfileDto extends ProfileDraftDto {
@@ -122,6 +155,8 @@ const handlers = Object.freeze({
   legacyMigrationExecute: "legacy_migration_execute",
   legacyMigrationRollback: "legacy_migration_rollback",
   legacyMigrationList: "legacy_migration_list",
+  fingerprintPreview: "fingerprint_preview",
+  listRuntimes: "list_runtimes",
 });
 
 const prototypeRuntime: BrowserRuntime = {
@@ -134,12 +169,20 @@ const prototypeRuntime: BrowserRuntime = {
 };
 
 export function isTauriRuntime(): boolean {
-  return typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+  if (typeof window === "undefined") return false;
+  // Brows sets a custom marker in the Tauri runtime setup so the frontend can
+  // detect its environment even when running against an external Vite dev URL.
+  return (
+    "__BROWS_IS_TAURI__" in window ||
+    "__TAURI_INTERNALS__" in window ||
+    "__TAURI__" in window ||
+    "isTauri" in window
+  );
 }
 
 export function createTauriBridge(): TypedCommandBridge {
   return {
-    invoke(handler, args) {
+    invoke(handler: string, args?: Record<string, unknown>): Promise<unknown> {
       return tauriInvoke(handler, args);
     },
   };
@@ -162,6 +205,41 @@ export class TauriApiClient implements ApiClient {
     return this.call<MoreLoginImportResult>(handlers.moreLoginImport, {
       request: { sourcePath, rowNumbers },
     });
+  }
+
+  async fingerprintPreview(input: {
+    persona: import("../types").PersonaConfig;
+    acceptLanguages: string[];
+    windowWidth: number;
+    windowHeight: number;
+  }): Promise<FingerprintPreviewDto> {
+    return this.call<FingerprintPreviewDto>(handlers.fingerprintPreview, {
+      request: {
+        ...input,
+        persona: buildPersonaDto(input.persona),
+      },
+    });
+  }
+
+  async listRuntimes(): Promise<BrowserRuntime[]> {
+    // list_runtimes takes no payload; passing { request: undefined } would be
+    // rejected by Tauri.
+    const raw = (await this.bridge.invoke(handlers.listRuntimes, undefined)) as Array<{
+      id: string;
+      name: string;
+      version: string;
+      channel: string;
+      trusted: boolean;
+      active: boolean;
+    }>;
+    return raw.map((r) => ({
+      id: r.id,
+      name: r.name,
+      version: r.version,
+      channel: r.channel as BrowserRuntime["channel"],
+      trusted: r.trusted,
+      active: r.active,
+    }));
   }
 
   async inspectLegacyMigration(profileId: string, sourceProfileId: string): Promise<LegacyMigrationInspection> {
@@ -358,9 +436,6 @@ export class TauriApiClient implements ApiClient {
   ): Promise<BackupJob> {
     return unsupported("加密备份");
   }
-  async listRuntimes(): Promise<BrowserRuntime[]> {
-    return [{ ...prototypeRuntime }];
-  }
   async getSettings(): Promise<Settings> {
     return { ...EMPTY_SETTINGS };
   }
@@ -407,6 +482,7 @@ export class TauriApiClient implements ApiClient {
       createdAt,
       lastUsedAt: session ? new Date(session.updatedAtMs).toISOString() : undefined,
       diagnostic: { overall: "not-run", issueCount: 0 },
+      persona: personaFromDto(dto.persona),
     };
   }
 
@@ -456,6 +532,29 @@ export class TauriApiClient implements ApiClient {
   }
 }
 
+function personaFromDto(dto: ProfileDto["persona"]): PersonaConfig {
+  if ("system_native" in dto) return { kind: "system_native" };
+  const value = dto.seedable_noise;
+  return {
+    kind: "seedable_noise",
+    seedable: {
+      seed: value.seed,
+      platform: value.platform,
+      hardwareConcurrency: value.hardwareConcurrency,
+      deviceMemory: ({ quarter: "0.25", half: "0.5", one: "1", two: "2", four: "4", eight: "8" } as const)[value.deviceMemory],
+      touchPoints: value.touchPoints,
+      screenWidth: value.screen.width,
+      screenHeight: value.screen.height,
+      colorDepth: value.screen.colorDepth,
+      deviceScaleFactor: value.screen.deviceScaleFactorHundredths / 100,
+      webglVendor: value.webglVendor,
+      webglRenderer: value.webglRenderer,
+      spoofCanvas: value.spoofCanvas,
+      spoofAudio: value.spoofAudio,
+    },
+  };
+}
+
 function draftFromInput(input: ProfileInput): ProfileDraftDto {
   return {
     name: input.name,
@@ -464,17 +563,64 @@ function draftFromInput(input: ProfileInput): ProfileDraftDto {
     presetVersion: 1,
     proxyId: input.proxyId,
     browser: { mode: "pinned", value: { buildId: input.runtimeId } },
-    persona: {
-      system_native: {
-        preserveSystemTimezone: true,
-        preserveSystemFonts: true,
-        preserveSystemGpu: true,
-        preserveSystemAudio: true,
-      },
-    },
+    persona: buildPersonaDto(input.persona) as ProfileDraftDto extends never ? never : ProfileDraftDto["persona"],
     locale: { acceptLanguages: ["zh-CN", "zh"] },
     window: { width: 1280, height: 800, startMaximized: false },
     startupUrls: [],
+  };
+}
+
+/** Convert a UI `PersonaConfig` into the Rust DTO shape.
+ * Defaults to SystemNative when no persona is supplied.
+ */
+function buildPersonaDto(config: PersonaConfig | undefined): ProfileDraftDto["persona"] {
+  const input = config;
+  if (input?.kind === "seedable_noise") {
+    const cfg = input.seedable;
+    if (!cfg) return systemNativePersona();
+    return {
+      seedable_noise: {
+        seed: cfg.seed,
+        platform: cfg.platform === "mac_os" ? "mac_os" : cfg.platform,
+        hardwareConcurrency: cfg.hardwareConcurrency,
+        deviceMemory: deviceMemoryDto(cfg.deviceMemory),
+        touchPoints: cfg.touchPoints,
+        screen: {
+          width: cfg.screenWidth,
+          height: cfg.screenHeight,
+          colorDepth: cfg.colorDepth,
+          deviceScaleFactorHundredths: Math.round(cfg.deviceScaleFactor * 100),
+        },
+        webglVendor: cfg.webglVendor,
+        webglRenderer: cfg.webglRenderer,
+        spoofCanvas: cfg.spoofCanvas,
+        spoofAudio: cfg.spoofAudio,
+      },
+    };
+  }
+  return systemNativePersona();
+}
+
+function deviceMemoryDto(value: string): "quarter" | "half" | "one" | "two" | "four" | "eight" {
+  switch (value) {
+    case "0.25": return "quarter";
+    case "0.5": return "half";
+    case "1": return "one";
+    case "2": return "two";
+    case "4": return "four";
+    case "8": return "eight";
+    default: return "eight";
+  }
+}
+
+function systemNativePersona(): ProfileDraftDto["persona"] {
+  return {
+    system_native: {
+      preserveSystemTimezone: true,
+      preserveSystemFonts: true,
+      preserveSystemGpu: true,
+      preserveSystemAudio: true,
+    },
   };
 }
 
@@ -490,7 +636,7 @@ function mergeDraft(dto: ProfileDto, changes: Partial<ProfileInput>): ProfileDra
     browser: changes.runtimeId
       ? { mode: "pinned", value: { buildId: changes.runtimeId } }
       : dto.browser,
-    persona: dto.persona,
+    persona: changes.persona ? buildPersonaDto(changes.persona) : dto.persona,
     locale: dto.locale,
     window: dto.window,
     startupUrls: [...dto.startupUrls],

@@ -11,35 +11,36 @@ Status: **passed on Windows on 2026-08-02**.
   `UserDataDirectory` launch argument.
 - `ManagedChromiumRuntime` launches the executable directly without a shell,
   verifies SHA-256 before every launch and accepts only registered builds and
-  allow-listed arguments.
+  allow-listed arguments. The production composition root records the current
+  local Chrome digest at startup; publisher-signature verification is not yet
+  implemented.
 - The scheduler permits up to ten concurrent profiles, rejects a second active
   session for the same profile and preserves FIFO ordering beyond capacity.
 - Stopping a session reaps its tracked process. The real smoke test confirmed
   that no Chrome process referencing its temporary profile roots remained.
 
-## Runtime trust record
+## Runtime integrity record
 
-The first local catalog entry is deliberately fail-closed:
+The local Chrome entry is admitted using trust-on-first-use for the current
+application run:
 
 | Field | Accepted value |
 | --- | --- |
 | Executable | `C:\Program Files\Google\Chrome\Application\chrome.exe` |
-| Product version | `150.0.7871.188` |
-| Authenticode status | Valid |
-| Publisher | Google LLC |
-| Certificate thumbprint | `607A3EDAA64933E94422FC8F0C80388E0590986C` |
-| SHA-256 | `36BD4EB0917605DCDDA6458215D5657B320B0CEF1B29BC03A1AA10976159162A` |
+| Product version | Read from the installed Chrome version directory |
+| Authenticode status | Not checked yet |
+| Publisher | Recorded as `Google LLC`; not cryptographically verified yet |
+| SHA-256 | Calculated at app startup and rechecked before each launch |
 
-If Chrome updates and the executable hash changes, Brows refuses to start a
-profile until the local catalog is deliberately updated after signature and
-hash verification.
+If Chrome changes during one app run, Brows refuses to start a profile because
+the recorded digest no longer matches. Restarting the app deliberately adopts
+the newly installed file digest.
 
 ## Verification performed
 
-The normal workspace suite passed 46 tests across the domain, contracts,
-application services, SQLite, Chromium runtime, Windows Credential Manager and
-desktop command boundary. UI type checking and the Vite production build also
-passed.
+The normal workspace suite, clippy checks, UI type checking and the Vite
+production build all pass. The ignored, opt-in smoke test exercises the real
+Windows Chrome path.
 
 The ignored, opt-in `phase_one_real_chrome_smoke_test` then exercised the real
 production composition root:
@@ -60,10 +61,12 @@ cargo test -p brows-desktop phase_one_real_chrome_smoke_test -- --ignored --noca
 
 ## Honest fingerprint scope
 
-Phase 1 gives every environment different cookies, cache, site storage, login
-state and profile preferences. It does **not** claim a different physical host
-fingerprint. Canvas, WebGL, GPU, installed fonts, AudioContext and other
-host-derived signals remain shared and are labelled as such in the UI.
+The default `SystemNative` persona gives every environment different cookies,
+cache, site storage, login state and profile preferences, but does not claim a
+different physical host fingerprint. The opt-in `SeedableNoise` persona adds
+deterministic UA/platform/WebGL and navigator hooks; Canvas, Audio and Client
+Hints remain incomplete and high-strength fingerprint tests can still identify
+the browser.
 
 The next phase may introduce controlled, internally consistent personas. It
 must not silently randomize individual signals or weaken the Chromium sandbox.

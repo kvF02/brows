@@ -1234,3 +1234,222 @@ select.text-input { cursor: pointer; }
 .migration-history { display: flex; flex-direction: column; gap: 7px; margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
 .migration-history > strong { font-size: 13px; }
 .migration-history-row { display: grid; grid-template-columns: 1fr 80px auto; align-items: center; min-height: 36px; padding: 5px 9px; border-radius: 7px; background: rgba(255, 255, 255, 0.025); color: #9099aa; font-size: 11px; }
+
+/* ── v0.2 Persona editor ──────────────────────────────────────────────── */
+.persona-editor {
+  margin-top: 16px;
+  padding: 14px 16px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(15, 22, 39, 0.45);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.persona-editor > legend {
+  padding: 0 6px;
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.persona-tabs {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+}
+
+.persona-tab {
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 11px 14px;
+  background: rgba(15, 22, 39, 0.55);
+  color: var(--text-soft);
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  cursor: pointer;
+  text-align: left;
+  transition: border-color 120ms ease, background 120ms ease;
+  font-weight: 500;
+}
+
+.persona-tab small {
+  font-size: 11px;
+  color: var(--muted);
+  letter-spacing: 0.02em;
+  font-weight: 400;
+}
+
+.persona-tab.active {
+  border-color: rgba(143, 110, 248, 0.55);
+  background: rgba(143, 110, 248, 0.1);
+  color: var(--text);
+}
+
+.persona-tab:hover:not(.active) {
+  border-color: var(--line-strong);
+}
+
+.seedable-noise-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.seed-row {
+  display: flex;
+  gap: 6px;
+  align-items: stretch;
+}
+
+.seed-row .text-input {
+  flex: 1;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.form-toggle-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  margin-top: 4px;
+}
+
+.toggle-row {
+  display: flex;
+  gap: 9px;
+  align-items: flex-start;
+  padding: 9px 11px;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  background: rgba(15, 22, 39, 0.45);
+  cursor: pointer;
+  font-size: 12px;
+}
+
+.toggle-row input[type="checkbox"] {
+  margin-top: 2px;
+}
+
+.toggle-row span {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex: 1;
+}
+
+.toggle-row small {
+  font-size: 11px;
+  color: var(--muted);
+}
+
+/* ── v0.2 Fingerprint preview ─────────────────────────────────────────── */
+.fingerprint-preview {
+  margin-top: 6px;
+  padding: 14px 16px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: rgba(8, 12, 23, 0.55);
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.preview-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.preview-head .eyebrow {
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.preview-head small {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.preview-body {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.preview-row {
+  display: grid;
+  grid-template-columns: 130px 1fr;
+  gap: 9px;
+  align-items: baseline;
+}
+
+.preview-label {
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  color: var(--muted);
+  text-transform: uppercase;
+}
+
+.preview-value {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  word-break: break-all;
+  color: var(--text);
+  background: rgba(15, 22, 39, 0.65);
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--line);
+}
+
+.preview-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 14px;
+  font-size: 12px;
+  color: var(--text-soft);
+  padding-top: 4px;
+}
+
+.preview-meta strong {
+  color: var(--text);
+  font-weight: 600;
+  margin-left: 3px;
+}
+
+.preview-warning {
+  border: 1px solid rgba(240, 111, 128, 0.32);
+  border-radius: 9px;
+  padding: 9px 11px;
+  background: rgba(240, 111, 128, 0.08);
+  font-size: 12px;
+  color: var(--text-soft);
+}
+
+.preview-warning strong {
+  display: block;
+  font-size: 11px;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--red);
+  margin-bottom: 5px;
+}
+
+.preview-warning ul {
+  margin: 0;
+  padding-left: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.preview-warning li {
+  color: var(--text);
+}

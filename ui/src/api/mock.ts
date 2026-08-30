@@ -74,9 +74,9 @@ function makeProfile(
 /** In-memory preview adapter; the desktop build injects TauriApiClient. */
 export class MockApiClient implements ApiClient {
   private profiles: Profile[] = [
-    makeProfile("profile-demo-1", "研究环境 · 东京", "regional-network", "proxy-local"),
+    makeProfile("profile-demo-1", "研究环境 · 东京", "system-native", "proxy-local"),
     makeProfile("profile-demo-2", "QA 环境 · 原生", "system-native"),
-    makeProfile("profile-demo-3", "社媒测试 · 美国", "regional-network"),
+    makeProfile("profile-demo-3", "社媒测试 · 美国", "system-native"),
   ];
   private proxies = [...initialProxies];
   private diagnostics: DiagnosticReport[] = [];
@@ -86,6 +86,41 @@ export class MockApiClient implements ApiClient {
 
   async previewMoreLogin(_sourcePath: string): Promise<MoreLoginPreview> {
     throw new ApiError("CAPABILITY_UNSUPPORTED", "MoreLogin 导入仅在桌面版中可用");
+  }
+
+  async fingerprintPreview(input: {
+    persona: { kind?: string; seedable?: { seed?: string } };
+    acceptLanguages: string[];
+    windowWidth: number;
+    windowHeight: number;
+  }): Promise<{
+    effectiveUserAgent: string;
+    effectivePlatform: string;
+    effectiveLanguages: string[];
+    effectiveWindowWidth: number;
+    effectiveWindowHeight: number;
+    effectiveWebglVendor: string;
+    effectiveWebglRenderer: string;
+    hardwareConcurrency: number;
+    deviceMemoryGb: string;
+    declaredOnlyFields: string[];
+    hostSharedFields: string[];
+  }> {
+    // Browser-only preview: mock returns a deterministic but clearly fake result.
+    const seed = input.persona.seedable?.seed ?? "mock";
+    return {
+      effectiveUserAgent: `Mozilla/5.0 (mock) Chrome/150.0.0.0 Safari/537.36 (seed=${seed})`,
+      effectivePlatform: "mock",
+      effectiveLanguages: input.acceptLanguages,
+      effectiveWindowWidth: input.windowWidth,
+      effectiveWindowHeight: input.windowHeight,
+      effectiveWebglVendor: "Mock GPU",
+      effectiveWebglRenderer: "Mock Renderer",
+      hardwareConcurrency: 8,
+      deviceMemoryGb: "8",
+      declaredOnlyFields: [],
+      hostSharedFields: [],
+    };
   }
 
   async importMoreLogin(_sourcePath: string, _rowNumbers: number[] = []): Promise<MoreLoginImportResult> {

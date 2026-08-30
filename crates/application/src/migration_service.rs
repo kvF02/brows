@@ -5,7 +5,7 @@ use crate::{
 };
 use brows_contracts::ErrorCode;
 use brows_domain::ProfileId;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, MutexGuard};
 
 #[derive(Debug)]
 pub struct MigrationApplicationService {
@@ -14,6 +14,7 @@ pub struct MigrationApplicationService {
     migrator: Arc<dyn LegacyProfileDataMigrator>,
     records: Arc<dyn MigrationRecordRepository>,
     clock: Arc<dyn Clock>,
+    operations: Mutex<()>,
 }
 
 impl MigrationApplicationService {
@@ -30,6 +31,7 @@ impl MigrationApplicationService {
             migrator,
             records,
             clock,
+            operations: Mutex::new(()),
         }
     }
 
@@ -38,6 +40,7 @@ impl MigrationApplicationService {
         profile_id: ProfileId,
         source_profile_id: String,
     ) -> ApplicationResult<LegacyProfileDataSummary> {
+        let _operation = self.lock_operations()?;
         validate_source_id(&source_profile_id)?;
         self.profiles.get(&profile_id)?;
         self.ensure_stopped(&profile_id)?;
@@ -49,6 +52,7 @@ impl MigrationApplicationService {
         profile_id: ProfileId,
         source_profile_id: String,
     ) -> ApplicationResult<MigrationRecord> {
+        let _operation = self.lock_operations()?;
         validate_source_id(&source_profile_id)?;
         self.profiles.get(&profile_id)?;
         self.ensure_stopped(&profile_id)?;
@@ -82,6 +86,7 @@ impl MigrationApplicationService {
     }
 
     pub fn rollback(&self, id: u64) -> ApplicationResult<MigrationRecord> {
+        let _operation = self.lock_operations()?;
         let record = self.records.get(id)?;
         if record.status != MigrationRecordStatus::Completed {
             return Err(ApplicationError::new(
@@ -115,6 +120,12 @@ impl MigrationApplicationService {
             ));
         }
         Ok(())
+    }
+
+    fn lock_operations(&self) -> ApplicationResult<MutexGuard<'_, ()>> {
+        self.operations
+            .lock()
+            .map_err(|_| ApplicationError::poisoned("migration operation"))
     }
 }
 

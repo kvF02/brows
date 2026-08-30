@@ -1,4 +1,4 @@
-use crate::{DomainError, ProfileId, SessionId, MAX_CONCURRENT_SESSIONS};
+use crate::{DomainError, ProfileId, SessionId, MAX_CONCURRENT_SESSIONS, MAX_QUEUED_SESSIONS};
 use std::collections::{BTreeMap, VecDeque};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -84,6 +84,9 @@ impl SessionScheduler {
                 .insert(ticket.session_id.clone(), ticket.profile_id.clone());
             Ok(EnqueueOutcome::Started(ticket))
         } else {
+            if self.queued.len() >= MAX_QUEUED_SESSIONS {
+                return Err(DomainError::QueueFull);
+            }
             self.queued.push_back(ticket.clone());
             Ok(EnqueueOutcome::Queued {
                 ticket,

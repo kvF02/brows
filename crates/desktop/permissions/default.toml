@@ -1,0 +1,160 @@
+# Default app permissions — defines `default` as a permission set that includes
+# every command-level allow-* permission defined below.
+#
+# Tauri 2 ACL manifest output should show each allow-* with its single command.
+
+[[permission]]
+identifier = "allow-profile-list"
+description = "Enables the profile_list command without any pre-configured scope."
+commands = { allow = ["profile_list"] }
+
+[[permission]]
+identifier = "allow-profile-get"
+description = "Enables the profile_get command without any pre-configured scope."
+commands = { allow = ["profile_get"] }
+
+[[permission]]
+identifier = "allow-profile-create"
+description = "Enables the profile_create command without any pre-configured scope."
+commands = { allow = ["profile_create"] }
+
+[[permission]]
+identifier = "allow-profile-update"
+description = "Enables the profile_update command without any pre-configured scope."
+commands = { allow = ["profile_update"] }
+
+[[permission]]
+identifier = "allow-profile-clone"
+description = "Enables the profile_clone command without any pre-configured scope."
+commands = { allow = ["profile_clone"] }
+
+[[permission]]
+identifier = "allow-profile-archive"
+description = "Enables the profile_archive command without any pre-configured scope."
+commands = { allow = ["profile_archive"] }
+
+[[permission]]
+identifier = "allow-profile-restore"
+description = "Enables the profile_restore command without any pre-configured scope."
+commands = { allow = ["profile_restore"] }
+
+[[permission]]
+identifier = "allow-proxy-list"
+description = "Enables the proxy_list command without any pre-configured scope."
+commands = { allow = ["proxy_list"] }
+
+[[permission]]
+identifier = "allow-proxy-save"
+description = "Enables the proxy_save command without any pre-configured scope."
+commands = { allow = ["proxy_save"] }
+
+[[permission]]
+identifier = "allow-proxy-remove"
+description = "Enables the proxy_remove command without any pre-configured scope."
+commands = { allow = ["proxy_remove"] }
+
+[[permission]]
+identifier = "allow-proxy-test"
+description = "Enables the proxy_test command without any pre-configured scope."
+commands = { allow = ["proxy_test"] }
+
+[[permission]]
+identifier = "allow-diagnostic-run"
+description = "Enables the diagnostic_run command without any pre-configured scope."
+commands = { allow = ["diagnostic_run"] }
+
+[[permission]]
+identifier = "allow-diagnostic-list"
+description = "Enables the diagnostic_list command without any pre-configured scope."
+commands = { allow = ["diagnostic_list"] }
+
+[[permission]]
+identifier = "allow-legacy-migration-inspect"
+description = "Enables the legacy_migration_inspect command without any pre-configured scope."
+commands = { allow = ["legacy_migration_inspect"] }
+
+[[permission]]
+identifier = "allow-legacy-migration-execute"
+description = "Enables the legacy_migration_execute command without any pre-configured scope."
+commands = { allow = ["legacy_migration_execute"] }
+
+[[permission]]
+identifier = "allow-legacy-migration-rollback"
+description = "Enables the legacy_migration_rollback command without any pre-configured scope."
+commands = { allow = ["legacy_migration_rollback"] }
+
+[[permission]]
+identifier = "allow-legacy-migration-list"
+description = "Enables the legacy_migration_list command without any pre-configured scope."
+commands = { allow = ["legacy_migration_list"] }
+
+[[permission]]
+identifier = "allow-morelogin-preview"
+description = "Enables the morelogin_preview command without any pre-configured scope."
+commands = { allow = ["morelogin_preview"] }
+
+[[permission]]
+identifier = "allow-morelogin-import"
+description = "Enables the morelogin_import command without any pre-configured scope."
+commands = { allow = ["morelogin_import"] }
+
+[[permission]]
+identifier = "allow-fingerprint-preview"
+description = "Enables the fingerprint_preview command without any pre-configured scope."
+commands = { allow = ["fingerprint_preview"] }
+
+[[permission]]
+identifier = "allow-list-runtimes"
+description = "Enables the list_runtimes command without any pre-configured scope."
+commands = { allow = ["list_runtimes"] }
+
+[[permission]]
+identifier = "allow-session-launch"
+description = "Enables the session_launch command without any pre-configured scope."
+commands = { allow = ["session_launch"] }
+
+[[permission]]
+identifier = "allow-session-stop"
+description = "Enables the session_stop command without any pre-configured scope."
+commands = { allow = ["session_stop"] }
+
+[[permission]]
+identifier = "allow-session-cancel-queued"
+description = "Enables the session_cancel_queued command without any pre-configured scope."
+commands = { allow = ["session_cancel_queued"] }
+
+[[permission]]
+identifier = "allow-session-list"
+description = "Enables the session_list command without any pre-configured scope."
+commands = { allow = ["session_list"] }
+
+# Default permission set: auto-allowed for all capabilities.
+[default]
+description = "Default permissions for the Brows app — all custom commands."
+permissions = [
+  "allow-profile-list",
+  "allow-profile-get",
+  "allow-profile-create",
+  "allow-profile-update",
+  "allow-profile-clone",
+  "allow-profile-archive",
+  "allow-profile-restore",
+  "allow-proxy-list",
+  "allow-proxy-save",
+  "allow-proxy-remove",
+  "allow-proxy-test",
+  "allow-diagnostic-run",
+  "allow-diagnostic-list",
+  "allow-legacy-migration-inspect",
+  "allow-legacy-migration-execute",
+  "allow-legacy-migration-rollback",
+  "allow-legacy-migration-list",
+  "allow-morelogin-preview",
+  "allow-morelogin-import",
+  "allow-fingerprint-preview",
+  "allow-list-runtimes",
+  "allow-session-launch",
+  "allow-session-stop",
+  "allow-session-cancel-queued",
+  "allow-session-list",
+]

@@ -4,9 +4,12 @@ Brows is a Windows-first, local profile isolation browser manager. The first
 release focuses on reliable multi-session isolation: each profile has its own
 Chromium user-data directory, cookies, storage, cache and optional proxy.
 
-Brows does not currently spoof Canvas, WebGL, Audio, GPU, fonts or other
-host-level signals. Those values are deliberately reported as shared instead
-of being presented as unique fingerprints.
+Brows supports a conservative `SeedableNoise` persona that applies typed
+Chromium flags, preferences and an MV3 JavaScript hook. This is not a complete
+anti-detect implementation: Canvas and Audio coverage is weak, Client Hints
+are not fully aligned, and high-strength fingerprint tests can still identify
+the browser. The default `SystemNative` persona remains truthful and reports
+host-level signals as shared.
 
 ## Current Status
 
@@ -16,7 +19,9 @@ The repository contains the first implementation milestone:
 - a ten-session FIFO scheduler with duplicate-profile protection;
 - versioned, allow-listed UI command and event contracts;
 - application services and ports with in-memory test adapters;
-- SQLite profile persistence and a verified Chromium runtime adapter;
+- SQLite profile persistence, including `SeedableNoise` persona fields;
+- a Chromium runtime adapter that confines paths and rechecks SHA-256 before
+  every launch (publisher-signature verification is not implemented yet);
 - a Windows Credential Manager `SecretStore` adapter with redacted errors,
   idempotent cleanup and a non-Windows unavailable stub;
 - a React management UI with a real, allow-listed Tauri client and a mock used
@@ -31,17 +36,19 @@ The evidence-backed MoreLogin capability comparison and implementation order
 are documented in [`docs/morelogin-gap-analysis.md`](docs/morelogin-gap-analysis.md).
 
 The phase-one Windows desktop path now uses SQLite persistence and launches the
-locally installed, catalog-pinned Google Chrome runtime. It has passed the
+locally installed Google Chrome runtime. Its current file digest is recorded
+when the app starts and checked again before each launch; this is not a signed
+runtime catalog. It has passed the
 repeatable two-profile smoke test documented in
 [`docs/phase-1-acceptance.md`](docs/phase-1-acceptance.md). It is still an MVP:
-DPAPI-backed secret migration, the authenticated proxy broker, encrypted
-backup, managed runtime installation/update and controlled fingerprint
-profiles remain later milestones.
+DPAPI-backed secret migration, encrypted backup, managed runtime
+installation/update, publisher-signature verification and high-strength
+fingerprint resistance remain later milestones.
 
 The Windows secret adapter stores only Generic Credentials in the current
-user's Credential Manager namespace. It does not change browser or host-level
-fingerprint signals; profile isolation and multi-open behavior remain the
-primary v0.1 guarantee.
+user's Credential Manager namespace. Profile isolation and multi-open behavior
+remain the primary guarantee; optional fingerprint hooks are explicitly
+best-effort and do not imply a separate physical device.
 
 ## Architecture
 

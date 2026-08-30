@@ -1,9 +1,11 @@
 use super::*;
 use brows_application::{PortErrorKind, ProfileQuery, ProfileRepository, ProxyRepository};
 use brows_domain::{
-    BrowserBuildId, BrowserBuildSelector, BrowserChannel, DnsMode, EnvironmentPresetRef,
-    FingerprintPersona, LocaleConfig, PresetId, ProfileId, ProfileSpec, ProxyId, ProxyScheme,
-    ProxySpec, Revision, SecretRef, SystemNativePersona, WindowConfig, DEFAULT_PROXY_TIMEOUT_MS,
+    BrowserBuildId, BrowserBuildSelector, BrowserChannel, DeviceMemoryGb, DnsMode,
+    EnvironmentPresetRef, FingerprintPersona, LocaleConfig, PlatformKind, PresetId, ProfileId,
+    ProfileSpec, ProxyId, ProxyScheme, ProxySpec, Revision, ScreenConfig, SecretRef,
+    SeedableNoisePersona, SystemNativePersona, WebGLProfile, WindowConfig,
+    DEFAULT_PROXY_TIMEOUT_MS,
 };
 use rusqlite::Connection;
 use std::{
@@ -105,6 +107,34 @@ fn migration_enables_wal_and_round_trips_every_profile_field() {
     let reopened = SqliteProfileRepository::open(database.path()).unwrap();
     assert_eq!(reopened.get(&expected.id).unwrap(), expected);
     assert_eq!(reopened.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+}
+
+#[test]
+fn seedable_noise_persona_round_trips_through_sqlite() {
+    let database = TemporaryDatabase::new("seedable-roundtrip");
+    let repository = SqliteProfileRepository::open(database.path()).unwrap();
+    let mut expected = profile("profile-seed", "Seedable");
+    expected.persona = FingerprintPersona::SeedableNoise(SeedableNoisePersona {
+        seed: "stable-seed".to_owned(),
+        platform: PlatformKind::Windows,
+        hardware_concurrency: 8,
+        device_memory: DeviceMemoryGb::Eight,
+        touch_points: 0,
+        screen: ScreenConfig {
+            width: 1920,
+            height: 1080,
+            color_depth: 24,
+            device_scale_factor_hundredths: 100,
+        },
+        webgl: WebGLProfile::auto(),
+        spoof_canvas: true,
+        spoof_audio: false,
+    });
+    repository.create(expected.clone()).unwrap();
+    assert_eq!(repository.get(&expected.id).unwrap(), expected);
+    drop(repository);
+    let reopened = SqliteProfileRepository::open(database.path()).unwrap();
+    assert_eq!(reopened.get(&expected.id).unwrap(), expected);
 }
 
 #[test]

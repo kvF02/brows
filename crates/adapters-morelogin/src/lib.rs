@@ -14,6 +14,8 @@ use std::fs;
 use std::path::{Component, Path, PathBuf};
 
 const MAX_EXPORT_BYTES: u64 = 32 * 1024 * 1024;
+const MAX_MIGRATION_FILES: u64 = 500_000;
+const MAX_MIGRATION_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const REQUIRED_HEADERS: [&str; 17] = [
     "Profile name",
     "Platform",
@@ -352,6 +354,8 @@ fn source_may_be_running(root: &Path) -> bool {
 fn copy_tree(source: &Path, target: &Path) -> PortResult<()> {
     fs::create_dir(target).map_err(|error| io_error("create staging directory", error))?;
     let mut stack = vec![(source.to_path_buf(), target.to_path_buf())];
+    let mut files = 0u64;
+    let mut bytes = 0u64;
     while let Some((from, to)) = stack.pop() {
         for entry in
             fs::read_dir(&from).map_err(|error| io_error("read source directory", error))?
@@ -369,6 +373,17 @@ fn copy_tree(source: &Path, target: &Path) -> PortResult<()> {
                     .map_err(|error| io_error("create copied directory", error))?;
                 stack.push((entry.path(), destination));
             } else if file_type.is_file() {
+                let metadata = entry
+                    .metadata()
+                    .map_err(|error| io_error("read source file metadata", error))?;
+                files = files.saturating_add(1);
+                bytes = bytes.saturating_add(metadata.len());
+                if files > MAX_MIGRATION_FILES || bytes > MAX_MIGRATION_BYTES {
+                    return Err(PortError::new(
+                        PortErrorKind::InvalidData,
+                        "profile migration exceeds configured size limits",
+                    ));
+                }
                 fs::copy(entry.path(), destination)
                     .map_err(|error| io_error("copy profile file", error))?;
             }
@@ -386,17 +401,26 @@ fn inspect_tree(root: &Path) -> PortResult<(u64, u64)> {
             fs::read_dir(path).map_err(|error| io_error("inspect profile directory", error))?
         {
             let entry = entry.map_err(|error| io_error("inspect profile entry", error))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|error| io_error("inspect profile entry type", error))?;
+            if file_type.is_symlink() {
+                continue;
+            }
             let metadata = entry
                 .metadata()
                 .map_err(|error| io_error("inspect profile metadata", error))?;
-            if metadata.file_type().is_symlink() {
-                continue;
-            }
-            if metadata.is_dir() {
+            if file_type.is_dir() {
                 stack.push(entry.path());
-            } else if metadata.is_file() {
+            } else if file_type.is_file() {
                 files = files.saturating_add(1);
                 bytes = bytes.saturating_add(metadata.len());
+                if files > MAX_MIGRATION_FILES || bytes > MAX_MIGRATION_BYTES {
+                    return Err(PortError::new(
+                        PortErrorKind::InvalidData,
+                        "profile migration exceeds configured size limits",
+                    ));
+                }
             }
         }
     }

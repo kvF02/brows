@@ -9,17 +9,18 @@ use brows_adapters_sqlite::{
 #[cfg(test)]
 use brows_application::memory::InMemoryProxyRuntime;
 #[cfg(test)]
+use brows_application::memory::SystemNativeFingerprintRuntime;
+#[cfg(test)]
 use brows_application::memory::{
     InMemoryBrowserRuntime, InMemoryProfileRepository, ManualClock, SequentialIdGenerator,
 };
 use brows_application::{
     memory::{
-        system_native_preset, InMemoryAuditSink, InMemoryPresetCatalog,
-        SystemNativeFingerprintRuntime,
+        system_native_preset, FingerprintRuntimeRouter, InMemoryAuditSink, InMemoryPresetCatalog,
     },
-    ApplicationResult, Clock, IdGenerator, LaunchPlanCompiler, MigrationApplicationService,
-    PortError, PortErrorKind, PortResult, ProfileApplicationService, ProxyApplicationService,
-    SessionApplicationService,
+    ApplicationResult, BrowserRuntime, Clock, IdGenerator, LaunchPlanCompiler,
+    MigrationApplicationService, PortError, PortErrorKind, PortResult, ProfileApplicationService,
+    ProxyApplicationService, SessionApplicationService,
 };
 use brows_domain::{
     BrowserBuild, BrowserBuildId, BrowserCapabilities, BrowserChannel, ProfileId, RuntimeTrust,
@@ -35,6 +36,7 @@ use std::{
 /// assembled once and remain hidden behind the application's ports.
 #[derive(Debug)]
 pub(crate) struct AppState {
+    pub(crate) browsers: Arc<dyn BrowserRuntime>,
     pub(crate) profiles: Arc<ProfileApplicationService>,
     pub(crate) sessions: Arc<SessionApplicationService>,
     pub(crate) migrations: Option<Arc<MigrationApplicationService>>,
@@ -63,7 +65,7 @@ impl AppState {
             proxy_records.clone(),
             credential_store.clone(),
         ));
-        let fingerprints = Arc::new(SystemNativeFingerprintRuntime);
+        let fingerprints = Arc::new(FingerprintRuntimeRouter::new(data_root.join("extensions"))?);
         let audit = Arc::new(InMemoryAuditSink::default());
         let diagnostics = Arc::new(LocalNetworkDiagnosticRunner::new(
             proxies.clone(),
@@ -73,7 +75,7 @@ impl AppState {
 
         presets.insert(system_native_preset())?;
 
-        let browser_root = PathBuf::from(r"C:\Program Files\Google\Chrome\Application");
+        let browser_root = discover_chrome_root()?;
         let profile_root = data_root.join("profiles");
         std::fs::create_dir_all(&profile_root).map_err(|error| {
             brows_application::ApplicationError::new(
@@ -88,7 +90,11 @@ impl AppState {
             )
         })?;
         let browsers = Arc::new(ManagedChromiumRuntime::new(&browser_root, &profile_root)?);
-        browsers.register_build(verified_chrome_build(&browser_root)?, true)?;
+        // The system Chrome installation is discovered at runtime. Record its
+        // current digest and re-check it before every launch. This tolerates an
+        // update between app runs while failing closed on changes during a run.
+        browsers
+            .register_build_with_current_digest(discovered_chrome_build(&browser_root)?, true)?;
 
         let compiler = Arc::new(LaunchPlanCompiler::new(
             presets.clone(),
@@ -109,7 +115,7 @@ impl AppState {
         let session_service = Arc::new(SessionApplicationService::new(
             profiles.clone(),
             compiler,
-            browsers,
+            browsers.clone(),
             proxies,
             audit,
             clock.clone(),
@@ -134,6 +140,7 @@ impl AppState {
         ));
 
         Ok(Self {
+            browsers: browsers.clone(),
             profiles: profile_service,
             sessions: session_service,
             migrations: Some(migration_service),
@@ -183,7 +190,7 @@ impl AppState {
         let session_service = Arc::new(SessionApplicationService::new(
             profiles,
             compiler,
-            browsers,
+            browsers.clone(),
             proxies,
             audit,
             clock,
@@ -192,6 +199,7 @@ impl AppState {
         )?);
 
         Ok(Self {
+            browsers: browsers.clone(),
             profiles: profile_service,
             sessions: session_service,
             migrations: None,
@@ -209,6 +217,28 @@ fn default_morelogin_cache_root() -> PathBuf {
     .into_iter()
     .find(|path| path.is_dir())
     .unwrap_or_else(|| PathBuf::from(r"D:\.MoreLogin\cache"))
+}
+
+fn discover_chrome_root() -> ApplicationResult<PathBuf> {
+    let mut candidates = Vec::new();
+    for variable in ["ProgramFiles", "ProgramFiles(x86)", "LocalAppData"] {
+        if let Some(root) = std::env::var_os(variable) {
+            candidates.push(PathBuf::from(root).join("Google/Chrome/Application"));
+        }
+    }
+    candidates.push(PathBuf::from(r"C:\Program Files\Google\Chrome\Application"));
+    candidates.push(PathBuf::from(
+        r"C:\Program Files (x86)\Google\Chrome\Application",
+    ));
+    candidates
+        .into_iter()
+        .find(|root| root.join("chrome.exe").is_file())
+        .ok_or_else(|| {
+            brows_application::ApplicationError::new(
+                brows_contracts::ErrorCode::CapabilityUnsupported,
+                "Google Chrome installation was not found",
+            )
+        })
 }
 
 #[derive(Debug, Default)]
@@ -253,14 +283,15 @@ fn new_id<T>(
     })
 }
 
-fn verified_chrome_build(browser_root: &std::path::Path) -> ApplicationResult<BrowserBuild> {
+fn discovered_chrome_build(browser_root: &std::path::Path) -> ApplicationResult<BrowserBuild> {
+    let version = installed_chrome_version(browser_root);
     Ok(BrowserBuild {
         id: BrowserBuildId::new("google-chrome-stable-150")?,
         provider: "Google Chrome".to_owned(),
-        version: "150.0.7871.188".to_owned(),
+        version,
         channel: BrowserChannel::Stable,
         executable_path: browser_root.join("chrome.exe"),
-        sha256: "36bd4eb0917605dcdda6458215d5657b320b0cef1b29bc03a1aa10976159162a".to_owned(),
+        sha256: "0".repeat(64),
         publisher: "Google LLC".to_owned(),
         trust: RuntimeTrust::Verified,
         capabilities: BrowserCapabilities {
@@ -271,6 +302,29 @@ fn verified_chrome_build(browser_root: &std::path::Path) -> ApplicationResult<Br
         },
         installed_at_ms: unix_time_ms(),
     })
+}
+
+fn installed_chrome_version(root: &std::path::Path) -> String {
+    std::fs::read_dir(root)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(Result::ok)
+        .filter(|entry| entry.file_type().map(|kind| kind.is_dir()).unwrap_or(false))
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .filter_map(|name| chrome_version_key(&name).map(|key| (key, name)))
+        .max_by(|left, right| left.0.cmp(&right.0))
+        .map(|(_, name)| name)
+        .unwrap_or_else(|| "installed".to_owned())
+}
+
+fn chrome_version_key(version: &str) -> Option<Vec<u64>> {
+    let parts = version
+        .split('.')
+        .map(str::parse::<u64>)
+        .collect::<Result<Vec<_>, _>>()
+        .ok()?;
+    (!parts.is_empty()).then_some(parts)
 }
 
 #[cfg(test)]
@@ -338,6 +392,12 @@ mod tests {
             },
             startup_urls: Vec::new(),
         }
+    }
+
+    #[test]
+    fn chrome_versions_are_compared_numerically() {
+        assert!(chrome_version_key("150.0.1").unwrap() > chrome_version_key("99.9.9").unwrap());
+        assert!(chrome_version_key("150.preview").is_none());
     }
 
     #[test]

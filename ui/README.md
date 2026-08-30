@@ -29,6 +29,10 @@ npm run preview
 profile_list / profile_get / profile_create / profile_update
 profile_clone / profile_archive / profile_restore
 session_list / session_launch / session_stop / session_cancel_queued
+proxy_list / proxy_save / proxy_test / proxy_remove
+diagnostic_run / diagnostic_list
+legacy_migration_inspect / legacy_migration_execute / legacy_migration_rollback / legacy_migration_list
+fingerprint_preview / list_runtimes
 ```
 
 浏览器开发态仍可显式注入 `window.__BROWS_BRIDGE__` 进行契约测试，但业务组件无法直接访问它。没有通用 `execute`、`readFile`、`writeFile` 或 `request` 方法；不要为了省事扩展成任意 JSON/命令通道。
@@ -65,6 +69,10 @@ UI 将属性分为三类并始终展示标签：
 
 - **独立隔离**：Cookie、LocalStorage、IndexedDB、缓存、Service Worker 和登录状态。
 - **可配置**：代理、语言、启动页和权限策略（受 Chromium 能力限制）。
-- **主机共享**：首版真实 Windows 的 Canvas、WebGL、GPU、字体、Audio、CPU 和 TLS 特征。
+- **主机共享**：SystemNative 下真实 Windows 的 Canvas、WebGL、GPU、字体、Audio、CPU 和 TLS 特征。
+
+SeedableNoise 是可选的 best-effort 能力：它对 UA/platform/WebGL 和部分
+navigator 属性做确定性覆盖，但 Canvas、Audio、Client Hints 等仍不完整，
+不能当作完整 anti-detect。
 
 因此“可以多开”表示多个环境可同时拥有独立浏览器状态，不代表每个环境已经成为一台完整的虚拟设备。后续差异指纹能力必须通过新的 `FingerprintRuntime`/Persona 适配器接入，不在 UI 内注入临时脚本。

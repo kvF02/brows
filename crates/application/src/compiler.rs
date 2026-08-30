@@ -86,15 +86,14 @@ impl LaunchPlanCompiler {
             ));
         }
 
-        let fingerprint = self.fingerprints.compile(&profile.persona, &build)?;
-        // v0.1 has no fingerprint-specific launch argument variants. Keeping
-        // this boundary strict prevents an adapter from overriding storage,
-        // proxy, locale, or window settings through duplicate arguments.
-        if !fingerprint.arguments.is_empty() {
-            return Err(ApplicationError::new(
-                ErrorCode::CapabilityUnsupported,
-                "the fingerprint runtime emitted unsupported launch arguments",
-            ));
+        let fingerprint =
+            self.fingerprints
+                .compile_for_profile(&profile.id, &profile.persona, &build)?;
+        // v0.1: fingerprint arguments must be empty.
+        // v0.2+: accept typed fingerprint arguments from SeedableNoiseFingerprintRuntime.
+        // All LaunchArgument variants are allowlisted in the domain, so this is safe.
+        for argument in &fingerprint.arguments {
+            argument.validate().map_err(ApplicationError::from)?;
         }
 
         // A digest-derived directory component remains safe even if a future
@@ -102,6 +101,9 @@ impl LaunchPlanCompiler {
         let directory_key = digest_hex(profile.id.as_str().as_bytes());
         let user_data_dir = self.profile_data_root.join(directory_key).join("userdata");
         let mut arguments = vec![LaunchArgument::UserDataDirectory(user_data_dir.clone())];
+        // v0.2: append fingerprint runtime arguments (UA, scale factor, extension load, etc.)
+        // They were already validated above.
+        arguments.extend(fingerprint.arguments);
         let mut warnings = fingerprint.warnings;
 
         if build.capabilities.supports_language {
@@ -111,10 +113,15 @@ impl LaunchPlanCompiler {
         } else {
             warnings.push(LaunchWarning::UnsupportedCapability("language"));
         }
-        arguments.push(LaunchArgument::WindowSize {
-            width: profile.window.width,
-            height: profile.window.height,
-        });
+        if !arguments
+            .iter()
+            .any(|argument| matches!(argument, LaunchArgument::WindowSize { .. }))
+        {
+            arguments.push(LaunchArgument::WindowSize {
+                width: profile.window.width,
+                height: profile.window.height,
+            });
+        }
 
         for field in profile.persona.host_shared_fields() {
             let warning = LaunchWarning::HostFingerprintShared(field);
@@ -152,9 +159,9 @@ impl LaunchPlanCompiler {
                 host,
                 port,
             });
-            arguments.push(LaunchArgument::ProxyBypassList(vec![
-                "<-loopback>".to_owned()
-            ]));
+            let mut bypass_hosts = vec!["<-loopback>".to_owned()];
+            bypass_hosts.extend(proxy_spec.bypass_hosts.iter().cloned());
+            arguments.push(LaunchArgument::ProxyBypassList(bypass_hosts));
             if build.capabilities.supports_webrtc_policy {
                 arguments.push(LaunchArgument::DisableNonProxiedWebRtc);
             }
@@ -169,6 +176,18 @@ impl LaunchPlanCompiler {
             accept_languages: profile.locale.accept_languages.clone(),
             startup_urls: profile.startup_urls.clone(),
             permissions_prompt: true,
+            webgl_enabled: fingerprint
+                .preferences
+                .as_ref()
+                .and_then(|p| p.webgl_enabled),
+            hardware_acceleration: fingerprint
+                .preferences
+                .as_ref()
+                .and_then(|p| p.hardware_acceleration),
+            notifications_setting: fingerprint
+                .preferences
+                .as_ref()
+                .and_then(|p| p.notifications_setting),
         };
         let hash_material = format!(
             "brows-launch-v1\0{}\0{}\0{}\0{}\0{:?}\0{:?}\0{:?}\0{:?}",

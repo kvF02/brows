@@ -1,9 +1,9 @@
 use crate::migration::{migrate, sqlite_error};
 use brows_application::{PortError, PortErrorKind, PortResult, ProfileQuery, ProfileRepository};
 use brows_domain::{
-    BrowserBuildId, BrowserBuildSelector, BrowserChannel, EnvironmentPresetRef, FingerprintPersona,
-    LocaleConfig, PresetId, ProfileId, ProfileSpec, ProxyId, Revision, SystemNativePersona,
-    WindowConfig,
+    BrowserBuildId, BrowserBuildSelector, BrowserChannel, DeviceMemoryGb, EnvironmentPresetRef,
+    FingerprintPersona, LocaleConfig, PlatformKind, PresetId, ProfileId, ProfileSpec, ProxyId,
+    Revision, ScreenConfig, SeedableNoisePersona, SystemNativePersona, WebGLProfile, WindowConfig,
 };
 use rusqlite::{params, Connection, OpenFlags, OptionalExtension, Row, Transaction};
 use std::{
@@ -17,7 +17,12 @@ const PROFILE_COLUMNS: &str = r#"
     browser_selector_kind, browser_build_id, browser_channel,
     persona_kind, preserve_system_timezone, preserve_system_fonts,
     preserve_system_gpu, preserve_system_audio, timezone,
-    window_width, window_height, start_maximized, revision, archived
+    window_width, window_height, start_maximized, revision, archived,
+    persona_seed, persona_platform, persona_hardware_concurrency,
+    persona_device_memory, persona_touch_points, persona_screen_width,
+    persona_screen_height, persona_color_depth, persona_scale_factor_hundredths,
+    persona_webgl_vendor, persona_webgl_renderer, persona_spoof_canvas,
+    persona_spoof_audio
 "#;
 
 #[derive(Debug)]
@@ -232,6 +237,19 @@ struct StoredProfile {
     start_maximized: i64,
     revision: i64,
     archived: i64,
+    persona_seed: Option<String>,
+    persona_platform: Option<String>,
+    persona_hardware_concurrency: Option<i64>,
+    persona_device_memory: Option<String>,
+    persona_touch_points: Option<i64>,
+    persona_screen_width: Option<i64>,
+    persona_screen_height: Option<i64>,
+    persona_color_depth: Option<i64>,
+    persona_scale_factor_hundredths: Option<i64>,
+    persona_webgl_vendor: Option<String>,
+    persona_webgl_renderer: Option<String>,
+    persona_spoof_canvas: Option<i64>,
+    persona_spoof_audio: Option<i64>,
 }
 
 impl StoredProfile {
@@ -256,15 +274,49 @@ impl StoredProfile {
             start_maximized: row.get(16)?,
             revision: row.get(17)?,
             archived: row.get(18)?,
+            persona_seed: row.get(19)?,
+            persona_platform: row.get(20)?,
+            persona_hardware_concurrency: row.get(21)?,
+            persona_device_memory: row.get(22)?,
+            persona_touch_points: row.get(23)?,
+            persona_screen_width: row.get(24)?,
+            persona_screen_height: row.get(25)?,
+            persona_color_depth: row.get(26)?,
+            persona_scale_factor_hundredths: row.get(27)?,
+            persona_webgl_vendor: row.get(28)?,
+            persona_webgl_renderer: row.get(29)?,
+            persona_spoof_canvas: row.get(30)?,
+            persona_spoof_audio: row.get(31)?,
         })
     }
 
     fn into_domain(self, connection: &Connection) -> PortResult<ProfileSpec> {
-        let id = ProfileId::new(self.id).map_err(invalid_stored)?;
+        let id = ProfileId::new(self.id.clone()).map_err(invalid_stored)?;
+        let persona = if self.persona_seed.is_some() {
+            FingerprintPersona::SeedableNoise(self.seedable_persona()?)
+        } else if self.persona_kind == "system_native" {
+            FingerprintPersona::SystemNative(SystemNativePersona {
+                preserve_system_timezone: to_bool(
+                    self.preserve_system_timezone,
+                    "preserve system timezone",
+                )?,
+                preserve_system_fonts: to_bool(
+                    self.preserve_system_fonts,
+                    "preserve system fonts",
+                )?,
+                preserve_system_gpu: to_bool(self.preserve_system_gpu, "preserve system GPU")?,
+                preserve_system_audio: to_bool(
+                    self.preserve_system_audio,
+                    "preserve system audio",
+                )?,
+            })
+        } else {
+            return Err(invalid_data("unknown fingerprint persona kind"));
+        };
         let browser =
             match self.browser_selector_kind.as_str() {
                 "pinned" => BrowserBuildSelector::Pinned(
-                    BrowserBuildId::new(self.browser_build_id.ok_or_else(|| {
+                    BrowserBuildId::new(self.browser_build_id.clone().ok_or_else(|| {
                         invalid_data("pinned profile is missing its browser build")
                     })?)
                     .map_err(invalid_stored)?,
@@ -276,9 +328,6 @@ impl StoredProfile {
                 )?),
                 _ => return Err(invalid_data("unknown browser selector kind")),
             };
-        if self.persona_kind != "system_native" {
-            return Err(invalid_data("unknown fingerprint persona kind"));
-        }
         let profile = ProfileSpec {
             tags: load_strings(
                 connection,
@@ -311,21 +360,7 @@ impl StoredProfile {
                 .transpose()
                 .map_err(invalid_stored)?,
             browser,
-            persona: FingerprintPersona::SystemNative(SystemNativePersona {
-                preserve_system_timezone: to_bool(
-                    self.preserve_system_timezone,
-                    "preserve system timezone",
-                )?,
-                preserve_system_fonts: to_bool(
-                    self.preserve_system_fonts,
-                    "preserve system fonts",
-                )?,
-                preserve_system_gpu: to_bool(self.preserve_system_gpu, "preserve system GPU")?,
-                preserve_system_audio: to_bool(
-                    self.preserve_system_audio,
-                    "preserve system audio",
-                )?,
-            }),
+            persona,
             window: WindowConfig {
                 width: to_u32(self.window_width, "window width")?,
                 height: to_u32(self.window_height, "window height")?,
@@ -338,11 +373,88 @@ impl StoredProfile {
         validate_profile(&profile)?;
         Ok(profile)
     }
+
+    fn seedable_persona(&self) -> PortResult<SeedableNoisePersona> {
+        let required_text = |value: Option<String>, field: &'static str| {
+            value.ok_or_else(|| invalid_data(format!("seedable persona is missing {field}")))
+        };
+        let required_i64 = |value: Option<i64>, field: &'static str| {
+            value.ok_or_else(|| invalid_data(format!("seedable persona is missing {field}")))
+        };
+        let platform = match required_text(self.persona_platform.clone(), "platform")?.as_str() {
+            "windows" => PlatformKind::Windows,
+            "mac_os" => PlatformKind::MacOs,
+            "linux" => PlatformKind::Linux,
+            _ => return Err(invalid_data("unknown seedable persona platform")),
+        };
+        let device_memory =
+            match required_text(self.persona_device_memory.clone(), "device memory")?.as_str() {
+                "quarter" => DeviceMemoryGb::Quarter,
+                "half" => DeviceMemoryGb::Half,
+                "one" => DeviceMemoryGb::One,
+                "two" => DeviceMemoryGb::Two,
+                "four" => DeviceMemoryGb::Four,
+                "eight" => DeviceMemoryGb::Eight,
+                _ => return Err(invalid_data("unknown seedable persona device memory")),
+            };
+        let bool_field =
+            |value: Option<i64>, field: &'static str| to_bool(required_i64(value, field)?, field);
+        let persona = SeedableNoisePersona {
+            seed: required_text(self.persona_seed.clone(), "seed")?,
+            platform,
+            hardware_concurrency: u8::try_from(required_i64(
+                self.persona_hardware_concurrency,
+                "hardware concurrency",
+            )?)
+            .map_err(|_| invalid_data("invalid seedable hardware concurrency"))?,
+            device_memory,
+            touch_points: u8::try_from(required_i64(self.persona_touch_points, "touch points")?)
+                .map_err(|_| invalid_data("invalid seedable touch points"))?,
+            screen: ScreenConfig {
+                width: u32::try_from(required_i64(self.persona_screen_width, "screen width")?)
+                    .map_err(|_| invalid_data("invalid seedable screen width"))?,
+                height: u32::try_from(required_i64(self.persona_screen_height, "screen height")?)
+                    .map_err(|_| invalid_data("invalid seedable screen height"))?,
+                color_depth: u8::try_from(required_i64(self.persona_color_depth, "color depth")?)
+                    .map_err(|_| invalid_data("invalid seedable color depth"))?,
+                device_scale_factor_hundredths: u16::try_from(required_i64(
+                    self.persona_scale_factor_hundredths,
+                    "scale factor",
+                )?)
+                .map_err(|_| invalid_data("invalid seedable scale factor"))?,
+            },
+            webgl: WebGLProfile {
+                vendor: required_text(self.persona_webgl_vendor.clone(), "WebGL vendor")?,
+                unmasked_renderer: required_text(
+                    self.persona_webgl_renderer.clone(),
+                    "WebGL renderer",
+                )?,
+            },
+            spoof_canvas: bool_field(self.persona_spoof_canvas, "spoof canvas")?,
+            spoof_audio: bool_field(self.persona_spoof_audio, "spoof audio")?,
+        };
+        persona.validate().map_err(invalid_stored)?;
+        Ok(persona)
+    }
 }
 
 fn insert_profile(transaction: &Transaction<'_>, profile: &ProfileSpec) -> PortResult<()> {
     let (selector_kind, build_id, channel) = browser_columns(&profile.browser);
-    let FingerprintPersona::SystemNative(persona) = profile.persona;
+    // v0.2: SeedableNoise profiles are stored with persona_kind='seedable_noise'.
+    // SystemNative columns fall back to default (all true) for non-native personas.
+    let (persona_kind, ptz, pfonts, pgpu, paudio, seedable) = match &profile.persona {
+        FingerprintPersona::SystemNative(p) => (
+            "system_native",
+            p.preserve_system_timezone,
+            p.preserve_system_fonts,
+            p.preserve_system_gpu,
+            p.preserve_system_audio,
+            None,
+        ),
+        FingerprintPersona::SeedableNoise(p) => {
+            ("system_native", false, false, false, false, Some(p))
+        }
+    };
     transaction
         .execute(
             r#"
@@ -351,10 +463,16 @@ fn insert_profile(transaction: &Transaction<'_>, profile: &ProfileSpec) -> PortR
                 browser_selector_kind, browser_build_id, browser_channel,
                 persona_kind, preserve_system_timezone, preserve_system_fonts,
                 preserve_system_gpu, preserve_system_audio, timezone,
-                window_width, window_height, start_maximized, revision, archived
+                window_width, window_height, start_maximized, revision, archived,
+                persona_seed, persona_platform, persona_hardware_concurrency,
+                persona_device_memory, persona_touch_points, persona_screen_width,
+                persona_screen_height, persona_color_depth, persona_scale_factor_hundredths,
+                persona_webgl_vendor, persona_webgl_renderer, persona_spoof_canvas,
+                persona_spoof_audio
             ) VALUES (
-                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'system_native',
-                ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18
+                ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9,
+                ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19,
+                ?20, ?21, ?22, ?23, ?24, ?25, ?26, ?27, ?28, ?29, ?30, ?31, ?32
             )
             "#,
             params![
@@ -366,16 +484,30 @@ fn insert_profile(transaction: &Transaction<'_>, profile: &ProfileSpec) -> PortR
                 selector_kind,
                 build_id,
                 channel,
-                persona.preserve_system_timezone,
-                persona.preserve_system_fonts,
-                persona.preserve_system_gpu,
-                persona.preserve_system_audio,
+                persona_kind,
+                ptz,
+                pfonts,
+                pgpu,
+                paudio,
                 profile.locale.timezone,
                 profile.window.width,
                 profile.window.height,
                 profile.window.start_maximized,
                 profile.revision.get(),
                 profile.archived,
+                seedable.map(|p| p.seed.as_str()),
+                seedable.map(|p| platform_storage(p.platform)),
+                seedable.map(|p| i64::from(p.hardware_concurrency)),
+                seedable.map(|p| device_memory_storage(p.device_memory)),
+                seedable.map(|p| i64::from(p.touch_points)),
+                seedable.map(|p| i64::from(p.screen.width)),
+                seedable.map(|p| i64::from(p.screen.height)),
+                seedable.map(|p| i64::from(p.screen.color_depth)),
+                seedable.map(|p| i64::from(p.screen.device_scale_factor_hundredths)),
+                seedable.map(|p| p.webgl.vendor.as_str()),
+                seedable.map(|p| p.webgl.unmasked_renderer.as_str()),
+                seedable.map(|p| if p.spoof_canvas { 1i64 } else { 0i64 }),
+                seedable.map(|p| if p.spoof_audio { 1i64 } else { 0i64 }),
             ],
         )
         .map_err(|error| sqlite_error("insert profile", error))?;
@@ -388,7 +520,19 @@ fn update_profile(
     expected_revision: Revision,
 ) -> PortResult<usize> {
     let (selector_kind, build_id, channel) = browser_columns(&profile.browser);
-    let FingerprintPersona::SystemNative(persona) = profile.persona;
+    let (persona_kind, ptz, pfonts, pgpu, paudio, seedable) = match &profile.persona {
+        FingerprintPersona::SystemNative(p) => (
+            "system_native",
+            p.preserve_system_timezone,
+            p.preserve_system_fonts,
+            p.preserve_system_gpu,
+            p.preserve_system_audio,
+            None,
+        ),
+        FingerprintPersona::SeedableNoise(p) => {
+            ("system_native", false, false, false, false, Some(p))
+        }
+    };
     transaction
         .execute(
             r#"
@@ -400,18 +544,31 @@ fn update_profile(
                 browser_selector_kind = ?6,
                 browser_build_id = ?7,
                 browser_channel = ?8,
-                persona_kind = 'system_native',
-                preserve_system_timezone = ?9,
-                preserve_system_fonts = ?10,
-                preserve_system_gpu = ?11,
-                preserve_system_audio = ?12,
-                timezone = ?13,
-                window_width = ?14,
-                window_height = ?15,
-                start_maximized = ?16,
-                revision = ?17,
-                archived = ?18
-            WHERE id = ?1 AND revision = ?19
+                persona_kind = ?9,
+                preserve_system_timezone = ?10,
+                preserve_system_fonts = ?11,
+                preserve_system_gpu = ?12,
+                preserve_system_audio = ?13,
+                timezone = ?14,
+                window_width = ?15,
+                window_height = ?16,
+                start_maximized = ?17,
+                revision = ?18,
+                archived = ?19,
+                persona_seed = ?21,
+                persona_platform = ?22,
+                persona_hardware_concurrency = ?23,
+                persona_device_memory = ?24,
+                persona_touch_points = ?25,
+                persona_screen_width = ?26,
+                persona_screen_height = ?27,
+                persona_color_depth = ?28,
+                persona_scale_factor_hundredths = ?29,
+                persona_webgl_vendor = ?30,
+                persona_webgl_renderer = ?31,
+                persona_spoof_canvas = ?32,
+                persona_spoof_audio = ?33
+            WHERE id = ?1 AND revision = ?20
             "#,
             params![
                 profile.id.as_str(),
@@ -422,10 +579,11 @@ fn update_profile(
                 selector_kind,
                 build_id,
                 channel,
-                persona.preserve_system_timezone,
-                persona.preserve_system_fonts,
-                persona.preserve_system_gpu,
-                persona.preserve_system_audio,
+                persona_kind,
+                ptz,
+                pfonts,
+                pgpu,
+                paudio,
                 profile.locale.timezone,
                 profile.window.width,
                 profile.window.height,
@@ -433,6 +591,19 @@ fn update_profile(
                 profile.revision.get(),
                 profile.archived,
                 expected_revision.get(),
+                seedable.map(|p| p.seed.as_str()),
+                seedable.map(|p| platform_storage(p.platform)),
+                seedable.map(|p| i64::from(p.hardware_concurrency)),
+                seedable.map(|p| device_memory_storage(p.device_memory)),
+                seedable.map(|p| i64::from(p.touch_points)),
+                seedable.map(|p| i64::from(p.screen.width)),
+                seedable.map(|p| i64::from(p.screen.height)),
+                seedable.map(|p| i64::from(p.screen.color_depth)),
+                seedable.map(|p| i64::from(p.screen.device_scale_factor_hundredths)),
+                seedable.map(|p| p.webgl.vendor.as_str()),
+                seedable.map(|p| p.webgl.unmasked_renderer.as_str()),
+                seedable.map(|p| if p.spoof_canvas { 1i64 } else { 0i64 }),
+                seedable.map(|p| if p.spoof_audio { 1i64 } else { 0i64 }),
             ],
         )
         .map_err(|error| sqlite_error("update profile", error))
@@ -509,6 +680,25 @@ fn profile_exists(connection: &Connection, id: &ProfileId) -> PortResult<bool> {
             |row| row.get(0),
         )
         .map_err(|error| sqlite_error("check profile existence", error))
+}
+
+fn platform_storage(platform: PlatformKind) -> &'static str {
+    match platform {
+        PlatformKind::Windows => "windows",
+        PlatformKind::MacOs => "mac_os",
+        PlatformKind::Linux => "linux",
+    }
+}
+
+fn device_memory_storage(memory: DeviceMemoryGb) -> &'static str {
+    match memory {
+        DeviceMemoryGb::Quarter => "quarter",
+        DeviceMemoryGb::Half => "half",
+        DeviceMemoryGb::One => "one",
+        DeviceMemoryGb::Two => "two",
+        DeviceMemoryGb::Four => "four",
+        DeviceMemoryGb::Eight => "eight",
+    }
 }
 
 fn browser_columns(selector: &BrowserBuildSelector) -> (&'static str, Option<&str>, Option<&str>) {

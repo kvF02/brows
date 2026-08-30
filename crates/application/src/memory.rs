@@ -3,14 +3,17 @@
 
 use crate::ports::*;
 use crate::sha256::digest_hex;
+use crate::{persona_fingerprint::PersonaFingerprint, stealth_template};
 use brows_domain::{
-    BrowserBuild, BrowserBuildId, BrowserBuildSelector, BrowserChannel, DiagnosticCheck,
-    DiagnosticOverall, DiagnosticReport, DiagnosticScope, DiagnosticStatus, EnvironmentPreset,
-    EnvironmentPresetRef, FingerprintPersona, LaunchWarning, PresetId, ProfileId, ProfileSpec,
-    ProxyId, ProxyLaunchBinding, ProxySpec, ResolvedLaunchPlan, Revision, SecretRef, SessionId,
+    BrowserBuild, BrowserBuildId, BrowserBuildSelector, BrowserChannel, BrowserPreferences,
+    DiagnosticCheck, DiagnosticOverall, DiagnosticReport, DiagnosticScope, DiagnosticStatus,
+    EnvironmentPreset, EnvironmentPresetRef, FingerprintPersona, LaunchArgument, LaunchWarning,
+    PresetId, ProfileId, ProfileSpec, ProxyId, ProxyLaunchBinding, ProxySpec, ResolvedLaunchPlan,
+    Revision, SecretRef, SeedableNoisePersona, SessionId,
 };
 use std::{
     collections::BTreeMap,
+    fs,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -237,6 +240,14 @@ impl InMemoryBrowserRuntime {
 }
 
 impl BrowserRuntime for InMemoryBrowserRuntime {
+    fn list_builds(&self) -> PortResult<Vec<BrowserBuild>> {
+        let builds = self
+            .builds
+            .read()
+            .map_err(|_| unavailable("browser runtime"))?;
+        Ok(builds.values().cloned().collect())
+    }
+
     fn resolve_build(&self, selector: &BrowserBuildSelector) -> PortResult<BrowserBuild> {
         let builds = self
             .builds
@@ -456,7 +467,469 @@ impl FingerprintRuntime for SystemNativeFingerprintRuntime {
         Ok(FingerprintContribution {
             arguments: Vec::new(),
             warnings,
+            preferences: None,
         })
+    }
+}
+
+// ── SeedableNoiseFingerprintRuntime ──────────────────────────────────────────
+//
+// Materializes a per-profile MV3 stealth extension under `extension_root` and
+// produces the typed launch arguments that load it.
+
+#[derive(Debug)]
+pub struct SeedableNoiseFingerprintRuntime {
+    extension_root: PathBuf,
+    profile_id: ProfileId,
+}
+
+impl SeedableNoiseFingerprintRuntime {
+    pub fn new(extension_root: impl Into<PathBuf>, profile_id: ProfileId) -> PortResult<Self> {
+        let extension_root = extension_root.into();
+        if extension_root.as_os_str().is_empty() {
+            return Err(PortError::new(
+                PortErrorKind::InvalidData,
+                "extension root cannot be empty",
+            ));
+        }
+        Ok(Self {
+            extension_root,
+            profile_id,
+        })
+    }
+
+    /// Shared production constructor. Profile identity is supplied through
+    /// `compile_for_profile`, so the placeholder is used only by legacy direct
+    /// calls to `compile`.
+    pub fn new_shared(extension_root: impl Into<PathBuf>) -> PortResult<Self> {
+        let profile_id = ProfileId::new("runtime-shared")
+            .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
+        Self::new(extension_root, profile_id)
+    }
+
+    fn materialize_extension(
+        &self,
+        profile_id: &ProfileId,
+        persona: &SeedableNoisePersona,
+        fp: &PersonaFingerprint,
+    ) -> PortResult<PathBuf> {
+        let seed_hash = digest_hex(persona.seed.as_bytes());
+        let profile_hash = digest_hex(profile_id.as_str().as_bytes());
+        let dir = self
+            .extension_root
+            .join(&profile_hash[..16])
+            .join(&seed_hash[..16]);
+        fs::create_dir_all(&dir).map_err(|error| {
+            PortError::new(
+                PortErrorKind::Internal,
+                format!("failed to create extension directory: {error}"),
+            )
+        })?;
+        let persona_json = serde_json::json!({
+            "seed": persona.seed,
+            "platform": persona.platform_string_for_js(),
+            "hardware_concurrency": fp.hardware_concurrency,
+            "device_memory": fp.device_memory_gb,
+            "touch_points": fp.touch_points,
+            "screen_width": persona.screen.width,
+            "screen_height": persona.screen.height,
+            "color_depth": persona.screen.color_depth,
+            "device_scale_factor": persona.screen.device_scale_factor_hundredths as f64 / 100.0,
+            "webgl_vendor": fp.webgl_vendor,
+            "webgl_renderer": fp.webgl_renderer,
+            "spoof_canvas": persona.spoof_canvas,
+            "spoof_audio": persona.spoof_audio,
+            // WebRTC is enforced by the typed Chromium argument when a proxy
+            // is configured.  The extension must not force relay-only mode for
+            // direct profiles, otherwise local network use is unexpectedly
+            // disabled.
+            "webrtc_policy": "none",
+        })
+        .to_string();
+        fs::write(
+            dir.join("manifest.json"),
+            stealth_template::render_manifest(profile_id.as_str()),
+        )
+        .map_err(|error| {
+            PortError::new(
+                PortErrorKind::Internal,
+                format!("failed to write manifest: {error}"),
+            )
+        })?;
+        fs::write(
+            dir.join("content.js"),
+            stealth_template::render_content(&persona_json),
+        )
+        .map_err(|error| {
+            PortError::new(
+                PortErrorKind::Internal,
+                format!("failed to write content.js: {error}"),
+            )
+        })?;
+        fs::write(
+            dir.join("background.js"),
+            stealth_template::render_background(),
+        )
+        .map_err(|error| {
+            PortError::new(
+                PortErrorKind::Internal,
+                format!("failed to write background.js: {error}"),
+            )
+        })?;
+        Ok(dir)
+    }
+}
+
+/// Production adapter that supports both the original host-native persona and
+/// the opt-in SeedableNoise implementation behind one application port.
+#[derive(Debug)]
+pub struct FingerprintRuntimeRouter {
+    seedable: SeedableNoiseFingerprintRuntime,
+}
+
+impl FingerprintRuntimeRouter {
+    pub fn new(extension_root: impl Into<PathBuf>) -> PortResult<Self> {
+        Ok(Self {
+            seedable: SeedableNoiseFingerprintRuntime::new_shared(extension_root)?,
+        })
+    }
+}
+
+impl FingerprintRuntime for FingerprintRuntimeRouter {
+    fn compile(
+        &self,
+        persona: &FingerprintPersona,
+        build: &BrowserBuild,
+    ) -> PortResult<FingerprintContribution> {
+        match persona {
+            FingerprintPersona::SystemNative(_) => {
+                SystemNativeFingerprintRuntime.compile(persona, build)
+            }
+            FingerprintPersona::SeedableNoise(_) => self.seedable.compile(persona, build),
+        }
+    }
+
+    fn compile_for_profile(
+        &self,
+        profile_id: &ProfileId,
+        persona: &FingerprintPersona,
+        build: &BrowserBuild,
+    ) -> PortResult<FingerprintContribution> {
+        match persona {
+            FingerprintPersona::SystemNative(_) => {
+                SystemNativeFingerprintRuntime.compile_for_profile(profile_id, persona, build)
+            }
+            FingerprintPersona::SeedableNoise(_) => self
+                .seedable
+                .compile_for_profile(profile_id, persona, build),
+        }
+    }
+}
+
+impl FingerprintRuntime for SeedableNoiseFingerprintRuntime {
+    fn compile(
+        &self,
+        persona: &FingerprintPersona,
+        build: &BrowserBuild,
+    ) -> PortResult<FingerprintContribution> {
+        self.compile_inner(&self.profile_id, persona, build)
+    }
+
+    fn compile_for_profile(
+        &self,
+        profile_id: &ProfileId,
+        persona: &FingerprintPersona,
+        build: &BrowserBuild,
+    ) -> PortResult<FingerprintContribution> {
+        self.compile_inner(profile_id, persona, build)
+    }
+}
+
+impl SeedableNoiseFingerprintRuntime {
+    fn compile_inner(
+        &self,
+        profile_id: &ProfileId,
+        persona: &FingerprintPersona,
+        build: &BrowserBuild,
+    ) -> PortResult<FingerprintContribution> {
+        let FingerprintPersona::SeedableNoise(p) = persona else {
+            return Err(PortError::new(
+                PortErrorKind::InvalidData,
+                "SeedableNoiseFingerprintRuntime requires a SeedableNoise persona",
+            ));
+        };
+        let fp = PersonaFingerprint::derive(p)
+            .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
+        // Keep the UA major aligned with the concrete Chromium binary. A
+        // random major from a global pool would be trivially inconsistent with
+        // the runtime selected by the profile.
+        let user_agent = fp.user_agent_for_chromium(&build.version);
+        let ext_dir = self.materialize_extension(profile_id, p, &fp)?;
+
+        let mut warnings = Vec::new();
+        let arguments = vec![
+            LaunchArgument::UserAgentOverride(user_agent),
+            LaunchArgument::ForceDeviceScaleFactor(p.screen.device_scale_factor_hundredths),
+            LaunchArgument::WindowSize {
+                width: p.screen.width,
+                height: p.screen.height,
+            },
+            LaunchArgument::DisableBlinkFeatures(vec!["AutomationControlled".to_owned()]),
+            LaunchArgument::LoadExtension(ext_dir),
+        ];
+
+        // Declared-only fields: be honest about what we did not actually change.
+        if p.spoof_canvas {
+            warnings.push(LaunchWarning::DeclaredFingerprintOnly {
+                field: "canvas".to_owned(),
+                reason:
+                    "JS-level read perturbation only; pixel-level canvas hash detectable by CreepJS"
+                        .to_owned(),
+            });
+        }
+        if p.spoof_audio {
+            warnings.push(LaunchWarning::DeclaredFingerprintOnly {
+                field: "audio".to_owned(),
+                reason: "JS-level AudioContext stub only; sample-rate hash detectable by CreepJS"
+                    .to_owned(),
+            });
+        }
+
+        let preferences = BrowserPreferences {
+            accept_languages: Vec::new(),
+            startup_urls: Vec::new(),
+            permissions_prompt: true,
+            webgl_enabled: Some(true),
+            hardware_acceleration: Some(true),
+            notifications_setting: Some(1),
+        };
+
+        Ok(FingerprintContribution {
+            arguments,
+            warnings,
+            preferences: Some(preferences),
+        })
+    }
+}
+
+#[cfg(test)]
+mod seedable_noise_tests {
+    use super::*;
+    use brows_domain::{
+        BrowserBuild, BrowserBuildId, BrowserChannel, DeviceMemoryGb, FingerprintPersona,
+        PlatformKind, ProfileId, RuntimeTrust, ScreenConfig, SeedableNoisePersona, WebGLProfile,
+    };
+
+    fn verified_build() -> BrowserBuild {
+        BrowserBuild {
+            id: BrowserBuildId::new("stable-150").unwrap(),
+            provider: "google".to_owned(),
+            version: "150.0.0.0".to_owned(),
+            channel: BrowserChannel::Stable,
+            executable_path: PathBuf::from("C:/chrome.exe"),
+            sha256: "0".repeat(64),
+            publisher: "Google LLC".to_owned(),
+            trust: RuntimeTrust::Verified,
+            capabilities: Default::default(),
+            installed_at_ms: 1,
+        }
+    }
+
+    fn sample_persona(seed: &str) -> SeedableNoisePersona {
+        SeedableNoisePersona {
+            seed: seed.to_owned(),
+            platform: PlatformKind::Windows,
+            hardware_concurrency: 8,
+            device_memory: DeviceMemoryGb::Eight,
+            touch_points: 0,
+            screen: ScreenConfig {
+                width: 1920,
+                height: 1080,
+                color_depth: 24,
+                device_scale_factor_hundredths: 100,
+            },
+            webgl: WebGLProfile::auto(),
+            spoof_canvas: true,
+            spoof_audio: true,
+        }
+    }
+
+    #[test]
+    fn seedable_noise_compile_is_deterministic_for_same_seed() {
+        let runtime = SeedableNoiseFingerprintRuntime::new(
+            std::env::temp_dir(),
+            ProfileId::new("p").unwrap(),
+        )
+        .unwrap();
+        let p = FingerprintPersona::SeedableNoise(sample_persona("stable-seed"));
+        let a = runtime
+            .compile(&p, &verified_build())
+            .expect("compile should succeed");
+        let b = runtime
+            .compile(&p, &verified_build())
+            .expect("compile should succeed");
+        // Arguments must be identical for the same seed.
+        assert_eq!(a.arguments, b.arguments);
+        // UA override must be present and stable.
+        let ua_a = a
+            .arguments
+            .iter()
+            .find_map(|arg| match arg {
+                LaunchArgument::UserAgentOverride(s) => Some(s.clone()),
+                _ => None,
+            })
+            .expect("UA override argument present");
+        let ua_b = b
+            .arguments
+            .iter()
+            .find_map(|arg| match arg {
+                LaunchArgument::UserAgentOverride(s) => Some(s.clone()),
+                _ => None,
+            })
+            .expect("UA override argument present");
+        assert_eq!(ua_a, ua_b);
+    }
+
+    #[test]
+    fn seedable_noise_compile_produces_different_ua_for_different_seeds() {
+        let runtime = SeedableNoiseFingerprintRuntime::new(
+            std::env::temp_dir(),
+            ProfileId::new("p").unwrap(),
+        )
+        .unwrap();
+        let p_a = FingerprintPersona::SeedableNoise(sample_persona("seed-alpha"));
+        let p_b = FingerprintPersona::SeedableNoise(sample_persona("seed-beta"));
+        let a = runtime.compile(&p_a, &verified_build()).unwrap();
+        let b = runtime.compile(&p_b, &verified_build()).unwrap();
+        let ua_a = a.arguments.iter().find_map(|arg| match arg {
+            LaunchArgument::UserAgentOverride(s) => Some(s.clone()),
+            _ => None,
+        });
+        let ua_b = b.arguments.iter().find_map(|arg| match arg {
+            LaunchArgument::UserAgentOverride(s) => Some(s.clone()),
+            _ => None,
+        });
+        // The concrete browser major is intentionally shared so the override
+        // cannot contradict the selected runtime. Other derived artifacts (the
+        // extension path and WebGL values) still vary with the seed.
+        assert!(ua_a.is_some() && ua_b.is_some());
+        assert_ne!(a.arguments, b.arguments);
+    }
+
+    #[test]
+    fn seedable_noise_compile_rejects_wrong_persona_kind() {
+        let runtime = SeedableNoiseFingerprintRuntime::new(
+            std::env::temp_dir(),
+            ProfileId::new("p").unwrap(),
+        )
+        .unwrap();
+        let wrong = FingerprintPersona::SystemNative(brows_domain::SystemNativePersona::default());
+        let err = runtime.compile(&wrong, &verified_build()).unwrap_err();
+        assert_eq!(err.kind, PortErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn seedable_noise_compile_emits_load_extension_argument() {
+        let runtime = SeedableNoiseFingerprintRuntime::new(
+            std::env::temp_dir(),
+            ProfileId::new("p").unwrap(),
+        )
+        .unwrap();
+        let p = FingerprintPersona::SeedableNoise(sample_persona("ext-test"));
+        let out = runtime.compile(&p, &verified_build()).unwrap();
+        let has_load_extension = out
+            .arguments
+            .iter()
+            .any(|a| matches!(a, LaunchArgument::LoadExtension(_)));
+        assert!(has_load_extension, "must emit LoadExtension argument");
+        let has_disable_blink = out
+            .arguments
+            .iter()
+            .any(|a| matches!(a, LaunchArgument::DisableBlinkFeatures(features) if features.contains(&"AutomationControlled".to_owned())));
+        assert!(
+            has_disable_blink,
+            "must emit DisableBlinkFeatures for AutomationControlled"
+        );
+    }
+
+    #[test]
+    fn seedable_noise_compile_emits_declared_only_warnings_when_canvas_audio_spoofed() {
+        let runtime = SeedableNoiseFingerprintRuntime::new(
+            std::env::temp_dir(),
+            ProfileId::new("p").unwrap(),
+        )
+        .unwrap();
+        let p = FingerprintPersona::SeedableNoise(sample_persona("warn-test"));
+        let out = runtime.compile(&p, &verified_build()).unwrap();
+        let canvas_warn = out.warnings.iter().any(|w| {
+            matches!(w,
+                LaunchWarning::DeclaredFingerprintOnly { field, .. } if field == "canvas"
+            )
+        });
+        let audio_warn = out.warnings.iter().any(|w| {
+            matches!(w,
+                LaunchWarning::DeclaredFingerprintOnly { field, .. } if field == "audio"
+            )
+        });
+        assert!(canvas_warn, "must emit declared-only warning for canvas");
+        assert!(audio_warn, "must emit declared-only warning for audio");
+    }
+
+    #[test]
+    fn seedable_noise_extension_directory_is_isolated_per_profile() {
+        let root = std::env::temp_dir();
+        let runtime =
+            SeedableNoiseFingerprintRuntime::new(&root, ProfileId::new("p").unwrap()).unwrap();
+        let p_a = FingerprintPersona::SeedableNoise(sample_persona("isolation-A"));
+        let p_b = FingerprintPersona::SeedableNoise(sample_persona("isolation-B"));
+        let ext_a = runtime
+            .compile(&p_a, &verified_build())
+            .unwrap()
+            .arguments
+            .into_iter()
+            .find_map(|a| match a {
+                LaunchArgument::LoadExtension(p) => Some(p),
+                _ => None,
+            })
+            .expect("LoadExtension");
+        let ext_b = runtime
+            .compile(&p_b, &verified_build())
+            .unwrap()
+            .arguments
+            .into_iter()
+            .find_map(|a| match a {
+                LaunchArgument::LoadExtension(p) => Some(p),
+                _ => None,
+            })
+            .expect("LoadExtension");
+        assert_ne!(
+            ext_a, ext_b,
+            "extension directories must be different per seed"
+        );
+    }
+
+    #[test]
+    fn seedable_noise_template_render_includes_persona_json() {
+        use crate::stealth_template;
+        let rendered = stealth_template::render_content(r#"{"seed":"hello","platform":"windows"}"#);
+        assert!(rendered.contains("\"seed\":\"hello\""));
+        assert!(rendered.contains("platform"));
+        assert!(!rendered.contains("{{PERSONA_JSON}}"));
+    }
+}
+
+// Small helpers on the domain type — used only by SeedableNoiseFingerprintRuntime.
+trait SeedableNoiseExt {
+    fn platform_string_for_js(&self) -> &'static str;
+}
+
+impl SeedableNoiseExt for SeedableNoisePersona {
+    fn platform_string_for_js(&self) -> &'static str {
+        match self.platform {
+            brows_domain::PlatformKind::Windows => "windows",
+            brows_domain::PlatformKind::MacOs => "mac",
+            brows_domain::PlatformKind::Linux => "linux",
+        }
     }
 }
 

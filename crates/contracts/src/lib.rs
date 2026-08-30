@@ -168,6 +168,7 @@ impl ErrorDto {
             DomainError::ProfileAlreadyScheduled | DomainError::DuplicateSession => {
                 (ErrorCode::AlreadyExists, error.to_string())
             }
+            DomainError::QueueFull => (ErrorCode::QueueFull, error.to_string()),
             DomainError::SessionNotFound => (ErrorCode::NotFound, error.to_string()),
             DomainError::InvalidHash
             | DomainError::InvalidPath
@@ -195,6 +196,137 @@ pub enum PersonaDto {
         preserve_system_gpu: bool,
         preserve_system_audio: bool,
     },
+    SeedableNoise {
+        seed: String,
+        platform: PlatformDto,
+        hardware_concurrency: u8,
+        device_memory: DeviceMemoryDto,
+        touch_points: u8,
+        screen: ScreenConfigDto,
+        webgl_vendor: String,
+        webgl_renderer: String,
+        spoof_canvas: bool,
+        spoof_audio: bool,
+    },
+}
+
+/// Device memory discrete values mirroring `domain::DeviceMemoryGb`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeviceMemoryDto {
+    Quarter,
+    Half,
+    One,
+    Two,
+    Four,
+    Eight,
+}
+
+impl From<DeviceMemoryDto> for domain::DeviceMemoryGb {
+    fn from(v: DeviceMemoryDto) -> Self {
+        match v {
+            DeviceMemoryDto::Quarter => domain::DeviceMemoryGb::Quarter,
+            DeviceMemoryDto::Half => domain::DeviceMemoryGb::Half,
+            DeviceMemoryDto::One => domain::DeviceMemoryGb::One,
+            DeviceMemoryDto::Two => domain::DeviceMemoryGb::Two,
+            DeviceMemoryDto::Four => domain::DeviceMemoryGb::Four,
+            DeviceMemoryDto::Eight => domain::DeviceMemoryGb::Eight,
+        }
+    }
+}
+
+impl From<domain::DeviceMemoryGb> for DeviceMemoryDto {
+    fn from(v: domain::DeviceMemoryGb) -> Self {
+        match v {
+            domain::DeviceMemoryGb::Quarter => DeviceMemoryDto::Quarter,
+            domain::DeviceMemoryGb::Half => DeviceMemoryDto::Half,
+            domain::DeviceMemoryGb::One => DeviceMemoryDto::One,
+            domain::DeviceMemoryGb::Two => DeviceMemoryDto::Two,
+            domain::DeviceMemoryGb::Four => DeviceMemoryDto::Four,
+            domain::DeviceMemoryGb::Eight => DeviceMemoryDto::Eight,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PlatformDto {
+    Windows,
+    MacOs,
+    Linux,
+}
+
+impl From<PlatformDto> for domain::PlatformKind {
+    fn from(v: PlatformDto) -> Self {
+        match v {
+            PlatformDto::Windows => domain::PlatformKind::Windows,
+            PlatformDto::MacOs => domain::PlatformKind::MacOs,
+            PlatformDto::Linux => domain::PlatformKind::Linux,
+        }
+    }
+}
+
+impl From<domain::PlatformKind> for PlatformDto {
+    fn from(v: domain::PlatformKind) -> Self {
+        match v {
+            domain::PlatformKind::Windows => PlatformDto::Windows,
+            domain::PlatformKind::MacOs => PlatformDto::MacOs,
+            domain::PlatformKind::Linux => PlatformDto::Linux,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScreenConfigDto {
+    pub width: u32,
+    pub height: u32,
+    pub color_depth: u8,
+    /// Scale factor in hundredths: 100 = 1.0×, 200 = 2.0×.
+    pub device_scale_factor_hundredths: u16,
+}
+
+impl From<ScreenConfigDto> for domain::ScreenConfig {
+    fn from(v: ScreenConfigDto) -> Self {
+        domain::ScreenConfig {
+            width: v.width,
+            height: v.height,
+            color_depth: v.color_depth,
+            device_scale_factor_hundredths: v.device_scale_factor_hundredths,
+        }
+    }
+}
+
+impl From<domain::ScreenConfig> for ScreenConfigDto {
+    fn from(v: domain::ScreenConfig) -> Self {
+        ScreenConfigDto {
+            width: v.width,
+            height: v.height,
+            color_depth: v.color_depth,
+            device_scale_factor_hundredths: v.device_scale_factor_hundredths,
+        }
+    }
+}
+
+/// Preview of the effective fingerprint properties compiled for a SeedableNoise profile.
+/// Returned by `fingerprint.preview` — never launches a browser.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FingerprintPreviewDto {
+    pub effective_user_agent: String,
+    pub effective_platform: String,
+    pub effective_languages: Vec<String>,
+    pub effective_window_width: u32,
+    pub effective_window_height: u32,
+    pub effective_webgl_vendor: String,
+    pub effective_webgl_renderer: String,
+    pub hardware_concurrency: u8,
+    /// Device memory as a display string ("0.25", "0.5", "1", "2", "4", "8") in GB.
+    pub device_memory_gb: String,
+    /// Fields that are configured at the JS level only (not kernel/GPU level).
+    pub declared_only_fields: Vec<String>,
+    /// Fields still reported at host-system values.
+    pub host_shared_fields: Vec<String>,
 }
 
 impl Default for PersonaDto {
@@ -337,12 +469,24 @@ impl From<&domain::ProfileSpec> for ProfileDto {
                 channel: (*channel).into(),
             },
         };
-        let persona = match value.persona {
+        let persona = match &value.persona {
             domain::FingerprintPersona::SystemNative(persona) => PersonaDto::SystemNative {
                 preserve_system_timezone: persona.preserve_system_timezone,
                 preserve_system_fonts: persona.preserve_system_fonts,
                 preserve_system_gpu: persona.preserve_system_gpu,
                 preserve_system_audio: persona.preserve_system_audio,
+            },
+            domain::FingerprintPersona::SeedableNoise(p) => PersonaDto::SeedableNoise {
+                seed: p.seed.clone(),
+                platform: p.platform.into(),
+                hardware_concurrency: p.hardware_concurrency,
+                device_memory: p.device_memory.into(),
+                touch_points: p.touch_points,
+                screen: p.screen.into(),
+                webgl_vendor: p.webgl.vendor.clone(),
+                webgl_renderer: p.webgl.unmasked_renderer.clone(),
+                spoof_canvas: p.spoof_canvas,
+                spoof_audio: p.spoof_audio,
             },
         };
         Self {
@@ -393,6 +537,31 @@ impl TryFrom<ProfileDto> for domain::ProfileSpec {
                 preserve_system_fonts,
                 preserve_system_gpu,
                 preserve_system_audio,
+            }),
+            PersonaDto::SeedableNoise {
+                seed,
+                platform,
+                hardware_concurrency,
+                device_memory,
+                touch_points,
+                screen,
+                webgl_vendor,
+                webgl_renderer,
+                spoof_canvas,
+                spoof_audio,
+            } => domain::FingerprintPersona::SeedableNoise(domain::SeedableNoisePersona {
+                seed,
+                platform: platform.into(),
+                hardware_concurrency,
+                device_memory: device_memory.into(),
+                touch_points,
+                screen: screen.into(),
+                webgl: domain::WebGLProfile {
+                    vendor: webgl_vendor,
+                    unmasked_renderer: webgl_renderer,
+                },
+                spoof_canvas,
+                spoof_audio,
             }),
         };
         let profile = domain::ProfileSpec {
@@ -978,6 +1147,36 @@ pub struct SettingsPatchDto {
 #[serde(rename_all = "camelCase")]
 pub struct SettingsUpdateRequest {
     pub changes: SettingsPatchDto,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BrowserRuntimeDto {
+    pub id: String,
+    pub name: String,
+    pub version: String,
+    pub channel: BrowserChannelDto,
+    pub trusted: bool,
+    pub active: bool,
+    pub provider: String,
+    pub publisher: String,
+    pub executable_path: String,
+}
+
+impl From<&domain::BrowserBuild> for BrowserRuntimeDto {
+    fn from(value: &domain::BrowserBuild) -> Self {
+        Self {
+            id: value.id.as_str().to_owned(),
+            name: format!("{} {}", value.provider, value.version),
+            version: value.version.clone(),
+            channel: value.channel.into(),
+            trusted: matches!(value.trust, domain::RuntimeTrust::Verified),
+            active: true,
+            provider: value.provider.clone(),
+            publisher: value.publisher.clone(),
+            executable_path: value.executable_path.to_string_lossy().into_owned(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

@@ -1,6 +1,6 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
 use brows_application::{PortError, PortErrorKind, PortResult, SecretValue};
-use brows_domain::{ProxyScheme, ProxySpec};
+use brows_domain::{DnsMode, ProxyScheme, ProxySpec};
 use std::{
     io::{Read, Write},
     net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs},
@@ -195,7 +195,7 @@ fn handle(
     let head = read_head(&mut client)?;
     let line = head.split(|b| *b == b'\n').next().unwrap_or(&[]);
     let line = String::from_utf8_lossy(line);
-    let mut parts = line.trim().split_whitespace();
+    let mut parts = line.split_whitespace();
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("");
     if method.eq_ignore_ascii_case("CONNECT") {
@@ -216,7 +216,15 @@ fn handle(
         tunnel(client, upstream);
         return Ok(());
     }
-    let mut upstream = TcpStream::connect((proxy.host.as_str(), proxy.port))
+    let timeout = Duration::from_millis(proxy.connect_timeout_ms.into());
+    let address = (proxy.host.as_str(), proxy.port)
+        .to_socket_addrs()
+        .map_err(|e| ioerr("resolve upstream proxy", e))?
+        .next()
+        .ok_or_else(|| {
+            PortError::new(PortErrorKind::ProxyConnect, "upstream proxy has no address")
+        })?;
+    let mut upstream = TcpStream::connect_timeout(&address, timeout)
         .map_err(|e| ioerr("connect upstream proxy", e))?;
     let forwarded = inject_auth(&head, proxy, secret)?;
     upstream
@@ -407,14 +415,38 @@ fn socks_connect(
         ));
     }
     let (host, port) = split_target(target)?;
-    if host.len() > 255 {
-        return Err(PortError::new(
-            PortErrorKind::InvalidData,
-            "target host too long",
-        ));
+    let mut b = vec![5, 1, 0];
+    match proxy.dns_mode {
+        DnsMode::Proxy => {
+            if host.len() > 255 {
+                return Err(PortError::new(
+                    PortErrorKind::InvalidData,
+                    "target host too long",
+                ));
+            }
+            b.extend([3, host.len() as u8]);
+            b.extend(host.as_bytes());
+        }
+        DnsMode::Local => {
+            let address = (host, port)
+                .to_socket_addrs()
+                .map_err(|e| ioerr("resolve SOCKS target locally", e))?
+                .next()
+                .ok_or_else(|| {
+                    PortError::new(PortErrorKind::ProxyConnect, "target has no address")
+                })?;
+            match address.ip() {
+                std::net::IpAddr::V4(ip) => {
+                    b.push(1);
+                    b.extend(ip.octets());
+                }
+                std::net::IpAddr::V6(ip) => {
+                    b.push(4);
+                    b.extend(ip.octets());
+                }
+            }
+        }
     }
-    let mut b = vec![5, 1, 0, 3, host.len() as u8];
-    b.extend(host.as_bytes());
     b.extend(port.to_be_bytes());
     s.write_all(&b)
         .map_err(|e| ioerr("send SOCKS connect", e))?;

@@ -6,14 +6,16 @@ mod state;
 
 use brows_contracts::SessionStateDto;
 use commands::{
-    diagnostic_list, diagnostic_run, legacy_migration_execute, legacy_migration_inspect,
-    legacy_migration_list, legacy_migration_rollback, morelogin_import, morelogin_preview,
-    profile_archive, profile_clone, profile_create, profile_get, profile_list, profile_restore,
-    profile_update, proxy_list, proxy_remove, proxy_save, proxy_test, session_cancel_queued,
-    session_launch, session_list, session_stop,
+    diagnostic_list, diagnostic_run, fingerprint_preview, legacy_migration_execute,
+    legacy_migration_inspect, legacy_migration_list, legacy_migration_rollback, list_runtimes,
+    morelogin_import, morelogin_preview, profile_archive, profile_clone, profile_create,
+    profile_get, profile_list, profile_restore, profile_update, proxy_list, proxy_remove,
+    proxy_save, proxy_test, session_cancel_queued, session_launch, session_list, session_stop,
 };
 use state::AppState;
 use tauri::{Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder};
+
+const TAURI_RUNTIME_MARKER_SCRIPT: &str = "window.__BROWS_IS_TAURI__ = true;";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
@@ -28,10 +30,19 @@ pub fn run() {
                 .title("Brows")
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(1040.0, 680.0)
-                .on_navigation(is_allowed_navigation);
+                .on_navigation(is_allowed_navigation)
+                // Inject a Tauri runtime marker via init_script so the frontend
+                // can detect it's running inside the Tauri WebView, even when
+                // the dev URL is loaded from an external Vite dev server. Do
+                // not write Tauri's reserved __TAURI_INTERNALS__ object: the
+                // framework owns it and uses it to expose the IPC bridge.
+                .initialization_script(TAURI_RUNTIME_MARKER_SCRIPT);
             #[cfg(all(windows, feature = "webview-diagnostics"))]
             let window = window.additional_browser_args("--remote-debugging-port=9223");
-            window.build()?;
+            let window = window.build()?;
+            window.show()?;
+            window.set_focus()?;
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -58,6 +69,8 @@ pub fn run() {
             session_stop,
             session_cancel_queued,
             session_list,
+            fingerprint_preview,
+            list_runtimes,
         ])
         .build(tauri::generate_context!())
         .expect("Brows desktop runtime failed to build")
@@ -73,6 +86,17 @@ fn cleanup_sessions(state: &AppState) {
         Ok(sessions) => sessions,
         Err(_) => return,
     };
+    // Cancel queued work first.  Stopping an active session promotes the oldest
+    // queued ticket synchronously; cancelling the snapshot's queued tickets
+    // up front prevents a new browser from being launched during shutdown.
+    for session in sessions
+        .iter()
+        .filter(|session| session.state == SessionStateDto::Queued)
+    {
+        let _ = state.sessions.stop(brows_contracts::SessionStopRequest {
+            session_id: session.id.clone(),
+        });
+    }
     for session in sessions {
         if matches!(
             session.state,
@@ -137,5 +161,22 @@ mod tests {
         assert!(!is_allowed_navigation(
             &"http://127.0.0.1:4174/".parse().unwrap()
         ));
+    }
+
+    #[test]
+    fn runtime_marker_does_not_overwrite_tauri_ipc_internals() {
+        assert!(TAURI_RUNTIME_MARKER_SCRIPT.contains("__BROWS_IS_TAURI__"));
+        assert!(!TAURI_RUNTIME_MARKER_SCRIPT.contains("__TAURI_INTERNALS__"));
+    }
+
+    #[test]
+    fn development_origin_is_explicitly_authorized_for_ipc() {
+        let capability: serde_json::Value =
+            serde_json::from_str(include_str!("../capabilities/main-window.json")).unwrap();
+        assert_eq!(capability["local"], true);
+        assert_eq!(
+            capability["remote"]["urls"],
+            serde_json::json!(["http://127.0.0.1:4173/*"])
+        );
     }
 }

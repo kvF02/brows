@@ -4,6 +4,7 @@
 # Frontend
 /ui/node_modules/
 /ui/dist/
+/node_modules/
 
 # Local tool installers and build tools
 /.tools/
@@ -22,6 +23,11 @@
 .env
 .env.*
 !.env.example
+/.claude/settings.local.json
+
+# Local development logs
+/ipc.log
+/stderr.log
 
 # Editors and OS metadata
 .idea/

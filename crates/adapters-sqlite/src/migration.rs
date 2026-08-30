@@ -1,7 +1,7 @@
 use brows_application::{PortError, PortErrorKind, PortResult};
 use rusqlite::{Connection, TransactionBehavior};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 3;
+pub const CURRENT_SCHEMA_VERSION: u32 = 4;
 
 const MIGRATION_1: &str = r#"
 CREATE TABLE profiles (
@@ -109,6 +109,26 @@ CREATE TABLE proxy_bypass_hosts (
 CREATE INDEX proxies_name_idx ON proxies (name COLLATE NOCASE, id);
 "#;
 
+// SeedableNoise fields are kept nullable so databases created by v0.1 can be
+// upgraded without rewriting the profile table.  `persona_kind` remains
+// constrained for backwards compatibility; the presence of `persona_seed`
+// is the authoritative discriminator for the new persona variant.
+const MIGRATION_4: &str = r#"
+ALTER TABLE profiles ADD COLUMN persona_seed TEXT;
+ALTER TABLE profiles ADD COLUMN persona_platform TEXT;
+ALTER TABLE profiles ADD COLUMN persona_hardware_concurrency INTEGER;
+ALTER TABLE profiles ADD COLUMN persona_device_memory TEXT;
+ALTER TABLE profiles ADD COLUMN persona_touch_points INTEGER;
+ALTER TABLE profiles ADD COLUMN persona_screen_width INTEGER;
+ALTER TABLE profiles ADD COLUMN persona_screen_height INTEGER;
+ALTER TABLE profiles ADD COLUMN persona_color_depth INTEGER;
+ALTER TABLE profiles ADD COLUMN persona_scale_factor_hundredths INTEGER;
+ALTER TABLE profiles ADD COLUMN persona_webgl_vendor TEXT;
+ALTER TABLE profiles ADD COLUMN persona_webgl_renderer TEXT;
+ALTER TABLE profiles ADD COLUMN persona_spoof_canvas INTEGER;
+ALTER TABLE profiles ADD COLUMN persona_spoof_audio INTEGER;
+"#;
+
 pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
     let found: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -137,6 +157,9 @@ pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
             3 => transaction
                 .execute_batch(MIGRATION_3)
                 .map_err(|error| sqlite_error("apply schema migration 3", error))?,
+            4 => transaction
+                .execute_batch(MIGRATION_4)
+                .map_err(|error| sqlite_error("apply schema migration 4", error))?,
             target => {
                 return Err(PortError::new(
                     PortErrorKind::Incompatible,

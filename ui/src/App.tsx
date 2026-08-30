@@ -1,23 +1,30 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { createApiClient } from "./api/client";
+import { isTauriRuntime } from "./api/tauri";
 import {
   ApiError,
   DEFAULT_PRESETS,
   type ApiClient,
   type BackupJob,
   type BrowserRuntime,
+  type DeviceMemoryGb,
   type DiagnosticReport,
   type EnvironmentPreset,
+  type FingerprintPreview,
   type FingerprintScope,
   type LegacyMigrationInspection,
   type LegacyMigrationRecord,
   type MoreLoginPreview,
   type MoreLoginImportResult,
+  type PersonaConfig,
+  type PlatformKind,
   type Profile,
   type ProfileInput,
   type ProfileStatus,
   type ProxyKind,
   type ProxySummary,
+  type SeedableNoisePersonaConfig,
   type Settings,
 } from "./types";
 
@@ -66,6 +73,52 @@ function formatBytes(value: number): string {
   return `${size.toFixed(size >= 10 ? 1 : 2)} ${units[index]}`;
 }
 
+// ── v0.2 SeedableNoise persona helpers ──────────────────────────────────────
+
+const DEFAULT_SEEDABLE: SeedableNoisePersonaConfig = {
+  seed: "",
+  platform: "windows",
+  hardwareConcurrency: 8,
+  deviceMemory: "8",
+  touchPoints: 0,
+  screenWidth: 1920,
+  screenHeight: 1080,
+  colorDepth: 24,
+  deviceScaleFactor: 1,
+  webglVendor: "",
+  webglRenderer: "",
+  spoofCanvas: false,
+  spoofAudio: false,
+};
+
+const PLATFORM_OPTIONS: { value: PlatformKind; label: string }[] = [
+  { value: "windows", label: "Windows" },
+  { value: "mac_os", label: "macOS" },
+  { value: "linux", label: "Linux" },
+];
+
+const MEMORY_OPTIONS: { value: DeviceMemoryGb; label: string }[] = [
+  { value: "0.25", label: "0.25 GB" },
+  { value: "0.5", label: "0.5 GB" },
+  { value: "1", label: "1 GB" },
+  { value: "2", label: "2 GB" },
+  { value: "4", label: "4 GB" },
+  { value: "8", label: "8 GB" },
+];
+
+const SCALE_OPTIONS = [1, 1.25, 1.5, 2, 2.5, 3];
+
+function randomSeed(): string {
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function deviceMemoryLabel(v: DeviceMemoryGb): string {
+  const found = MEMORY_OPTIONS.find((option) => option.value === v);
+  return found?.label ?? v;
+}
+
 function migrationStatusLabel(status: LegacyMigrationRecord["status"]): string {
   return { running: "进行中", completed: "已完成", failed: "失败", rolled_back: "已回滚" }[status];
 }
@@ -97,31 +150,54 @@ function App() {
   const refresh = useCallback(async () => {
     setLoading(true);
     setError("");
-    try {
-      const [nextProfiles, nextProxies, nextDiagnostics, nextBackups, nextRuntimes, nextSettings] =
-        await Promise.all([
-          apiRef.current.listProfiles(true),
-          apiRef.current.listProxies(),
-          apiRef.current.listDiagnostics(),
-          apiRef.current.listBackups(),
-          apiRef.current.listRuntimes(),
-          apiRef.current.getSettings(),
-        ]);
-      setProfiles(nextProfiles);
-      setProxies(nextProxies);
-      setDiagnostics(nextDiagnostics);
-      setBackups(nextBackups);
-      setRuntimes(nextRuntimes);
-      setSettings(nextSettings);
-    } catch (cause) {
-      setError(getErrorMessage(cause));
-    } finally {
-      setLoading(false);
-    }
+    const results = await Promise.allSettled([
+      apiRef.current.listProfiles(true),
+      apiRef.current.listProxies(),
+      apiRef.current.listDiagnostics(),
+      apiRef.current.listBackups(),
+      apiRef.current.listRuntimes(),
+      apiRef.current.getSettings(),
+    ]);
+    const failures: string[] = [];
+    const apply = <T,>(
+      result: PromiseSettledResult<T>,
+      setValue: (value: T) => void,
+      label: string,
+    ) => {
+      if (result.status === "fulfilled") setValue(result.value);
+      else failures.push(`${label}：${getErrorMessage(result.reason)}`);
+    };
+    apply(results[0], setProfiles, "环境");
+    apply(results[1], setProxies, "代理");
+    apply(results[2], setDiagnostics, "诊断");
+    apply(results[3], setBackups, "备份");
+    apply(results[4], setRuntimes, "浏览器运行时");
+    apply(results[5], setSettings, "设置");
+    if (failures.length > 0) setError(failures.join("；"));
+    setLoading(false);
   }, []);
 
   useEffect(() => {
     void refresh();
+  }, [refresh]);
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return;
+    let disposed = false;
+    let unlisten: (() => void) | undefined;
+    void listen("brows://session", () => {
+      if (!disposed) void refresh();
+    }).then((cleanup) => {
+      if (disposed) cleanup();
+      else unlisten = cleanup;
+    }).catch(() => {
+      // Event delivery is an optimization; periodic/manual refresh remains the
+      // fallback if a host version does not expose the event bridge.
+    });
+    return () => {
+      disposed = true;
+      unlisten?.();
+    };
   }, [refresh]);
 
   useEffect(() => {
@@ -375,6 +451,7 @@ function App() {
 
       {showCreate && (
         <ProfileModal
+          api={apiRef.current}
           presets={DEFAULT_PRESETS}
           proxies={proxies}
           runtimes={runtimes}
@@ -395,6 +472,7 @@ function App() {
       )}
       {editingProfile && (
         <ProfileModal
+          api={apiRef.current}
           initial={editingProfile}
           presets={DEFAULT_PRESETS}
           proxies={proxies}
@@ -658,6 +736,7 @@ function ProfileModal({
   presets,
   proxies,
   runtimes,
+  api,
   onClose,
   onSubmit,
 }: {
@@ -665,6 +744,7 @@ function ProfileModal({
   presets: EnvironmentPreset[];
   proxies: ProxySummary[];
   runtimes: BrowserRuntime[];
+  api: ApiClient;
   onClose(): void;
   onSubmit(input: ProfileInput): void;
 }) {
@@ -673,7 +753,20 @@ function ProfileModal({
   const [presetId, setPresetId] = useState(initial?.presetId ?? presets[0]?.id ?? "system-native");
   const [proxyId, setProxyId] = useState(initial?.proxyId ?? "");
   const [runtimeId, setRuntimeId] = useState(initial?.runtimeId ?? runtimes.find((runtime) => runtime.active)?.id ?? runtimes[0]?.id ?? "");
+  const [persona, setPersona] = useState<PersonaConfig>(initial?.persona ?? { kind: "system_native" });
   const [formError, setFormError] = useState("");
+
+  // Runtime discovery is asynchronous. Keep the form selection in sync when
+  // the list arrives after the modal has already been mounted, while
+  // preserving an existing profile's pinned runtime whenever it is present.
+  useEffect(() => {
+    if (runtimeId && runtimes.some((runtime) => runtime.id === runtimeId)) return;
+    setRuntimeId(
+      runtimes.find((runtime) => runtime.active && runtime.trusted)?.id ??
+        runtimes.find((runtime) => runtime.trusted)?.id ??
+        "",
+    );
+  }, [runtimes, runtimeId]);
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -682,7 +775,8 @@ function ProfileModal({
       setFormError("名称长度需要在 1 到 64 个字符之间。");
       return;
     }
-    if (!runtimeId) {
+    const selectedRuntime = runtimes.find((runtime) => runtime.id === runtimeId);
+    if (!selectedRuntime || !selectedRuntime.trusted) {
       setFormError("请先安装或选择一个可信的浏览器运行时。");
       return;
     }
@@ -693,6 +787,7 @@ function ProfileModal({
       presetId,
       proxyId: proxyId || undefined,
       runtimeId,
+      persona: persona.kind === "seedable_noise" ? persona : undefined,
     });
   };
 
@@ -728,16 +823,386 @@ function ProfileModal({
           </div>
 
           <label className="field-label" htmlFor="profile-runtime">浏览器运行时</label>
-          <select id="profile-runtime" className="text-input" value={runtimeId} onChange={(event) => setRuntimeId(event.target.value)}>
+          <select id="profile-runtime" className="text-input" value={runtimeId} disabled={runtimes.length === 0} onChange={(event) => setRuntimeId(event.target.value)}>
             {runtimes.length === 0 && <option value="">没有可用运行时</option>}
             {runtimes.map((runtime) => <option value={runtime.id} key={runtime.id} disabled={!runtime.trusted}>{runtime.name} {runtime.version}{runtime.trusted ? "" : " · 未验证"}</option>)}
           </select>
 
-          <div className="form-info"><span aria-hidden="true">i</span> 首版不修改 Canvas、WebGL、Audio 等主机共享属性，诊断报告会明确标注范围。</div>
+          <PersonaEditor value={persona} onChange={setPersona} api={api} />
+
           {formError && <div className="form-error" role="alert">{formError}</div>}
           <div className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="submit">{initial ? "保存修改" : "创建环境"}</button></div>
         </form>
       </section>
+    </div>
+  );
+}
+
+// ── v0.2 PersonaEditor ──────────────────────────────────────────────────────
+
+function PersonaEditor({
+  value,
+  onChange,
+  api,
+}: {
+  value: PersonaConfig;
+  onChange(next: PersonaConfig): void;
+  api: ApiClient;
+}) {
+  return (
+    <fieldset className="persona-editor">
+      <legend className="field-label">指纹 Persona</legend>
+      <div className="persona-tabs" role="tablist">
+        <button
+          type="button"
+          role="tab"
+          aria-selected={value.kind === "system_native"}
+          className={`persona-tab ${value.kind === "system_native" ? "active" : ""}`}
+          onClick={() => onChange({ kind: "system_native" })}
+        >
+          系统原生
+          <small>v0.1 · 主机共享</small>
+        </button>
+        <button
+          type="button"
+          role="tab"
+          aria-selected={value.kind === "seedable_noise"}
+          className={`persona-tab ${value.kind === "seedable_noise" ? "active" : ""}`}
+          onClick={() =>
+            onChange({
+              kind: "seedable_noise",
+              seedable: { ...DEFAULT_SEEDABLE, seed: randomSeed() },
+            })
+          }
+        >
+          SeedableNoise
+          <small>v0.2 · 可配置</small>
+        </button>
+      </div>
+
+      {value.kind === "seedable_noise" && value.seedable && (
+        <SeedableNoiseFields
+          value={value.seedable}
+          onChange={(seedable) => onChange({ kind: "seedable_noise", seedable })}
+          api={api}
+        />
+      )}
+    </fieldset>
+  );
+}
+
+function SeedableNoiseFields({
+  value,
+  onChange,
+  api,
+}: {
+  value: SeedableNoisePersonaConfig;
+  onChange(next: SeedableNoisePersonaConfig): void;
+  api: ApiClient;
+}) {
+  const [preview, setPreview] = useState<FingerprintPreview | undefined>();
+  const [previewError, setPreviewError] = useState("");
+  const [previewing, setPreviewing] = useState(false);
+
+  const requestPreview = useCallback(async () => {
+    setPreviewing(true);
+    setPreviewError("");
+    try {
+      const result = await api.fingerprintPreview({
+        persona: {
+          kind: "seedable_noise",
+          seedable: value,
+        },
+        acceptLanguages: ["en-US", "en"],
+        windowWidth: value.screenWidth,
+        windowHeight: value.screenHeight,
+      });
+      setPreview(result);
+    } catch (error) {
+      setPreviewError(getErrorMessage(error));
+    } finally {
+      setPreviewing(false);
+    }
+  }, [api, value]);
+
+  return (
+    <div className="seedable-noise-fields">
+      <div className="form-info">
+        <span aria-hidden="true">⚠</span>
+        本能力通过 MV3 扩展注入确定性钩子。Canvas / Audio 目前仅有弱覆盖，
+        Client Hints 等信号也未完整对齐；高强度检测仍可识别，请勿将其视为完整 anti-detect。
+      </div>
+
+      <label className="field-label" htmlFor="persona-seed">种子</label>
+      <div className="seed-row">
+        <input
+          id="persona-seed"
+          className="text-input"
+          value={value.seed}
+          onChange={(event) => onChange({ ...value, seed: event.target.value })}
+          placeholder="任意字符串 · 相同 seed → 相同指纹"
+          maxLength={128}
+        />
+        <button
+          type="button"
+          className="secondary-button"
+          onClick={() => onChange({ ...value, seed: randomSeed() })}
+        >
+          随机生成
+        </button>
+      </div>
+
+      <div className="form-grid">
+        <div>
+          <label className="field-label" htmlFor="persona-platform">平台</label>
+          <select
+            id="persona-platform"
+            className="text-input"
+            value={value.platform}
+            onChange={(event) =>
+              onChange({ ...value, platform: event.target.value as PlatformKind })
+            }
+          >
+            {PLATFORM_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </div>
+        <div>
+          <label className="field-label" htmlFor="persona-mem">设备内存</label>
+          <select
+            id="persona-mem"
+            className="text-input"
+            value={value.deviceMemory}
+            onChange={(event) =>
+              onChange({ ...value, deviceMemory: event.target.value as DeviceMemoryGb })
+            }
+          >
+            {MEMORY_OPTIONS.map((opt) => (
+              <option key={opt.value} value={opt.value}>{opt.label}</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <div className="form-grid">
+        <div>
+          <label className="field-label" htmlFor="persona-cores">CPU 核心数</label>
+          <input
+            id="persona-cores"
+            type="number"
+            min={1}
+            max={128}
+            className="text-input"
+            value={value.hardwareConcurrency}
+            onChange={(event) =>
+              onChange({ ...value, hardwareConcurrency: Math.max(1, Math.min(128, Number(event.target.value) || 1)) })
+            }
+          />
+        </div>
+        <div>
+          <label className="field-label" htmlFor="persona-touch">触摸点</label>
+          <input
+            id="persona-touch"
+            type="number"
+            min={0}
+            max={10}
+            className="text-input"
+            value={value.touchPoints}
+            onChange={(event) =>
+              onChange({ ...value, touchPoints: Math.max(0, Math.min(10, Number(event.target.value) || 0)) })
+            }
+          />
+        </div>
+      </div>
+
+      <div className="form-grid">
+        <div>
+          <label className="field-label" htmlFor="persona-screen-w">屏幕宽度</label>
+          <input
+            id="persona-screen-w"
+            type="number"
+            min={320}
+            className="text-input"
+            value={value.screenWidth}
+            onChange={(event) => onChange({ ...value, screenWidth: Number(event.target.value) || 320 })}
+          />
+        </div>
+        <div>
+          <label className="field-label" htmlFor="persona-screen-h">屏幕高度</label>
+          <input
+            id="persona-screen-h"
+            type="number"
+            min={240}
+            className="text-input"
+            value={value.screenHeight}
+            onChange={(event) => onChange({ ...value, screenHeight: Number(event.target.value) || 240 })}
+          />
+        </div>
+      </div>
+
+      <div className="form-grid">
+        <div>
+          <label className="field-label" htmlFor="persona-color">颜色深度</label>
+          <select
+            id="persona-color"
+            className="text-input"
+            value={value.colorDepth}
+            onChange={(event) => onChange({ ...value, colorDepth: Number(event.target.value) })}
+          >
+            <option value={16}>16 位</option>
+            <option value={24}>24 位</option>
+            <option value={30}>30 位</option>
+            <option value={48}>48 位</option>
+          </select>
+        </div>
+        <div>
+          <label className="field-label" htmlFor="persona-scale">缩放因子</label>
+          <select
+            id="persona-scale"
+            className="text-input"
+            value={value.deviceScaleFactor}
+            onChange={(event) =>
+              onChange({ ...value, deviceScaleFactor: Number(event.target.value) })
+            }
+          >
+            {SCALE_OPTIONS.map((s) => (
+              <option key={s} value={s}>{s.toFixed(s === 1 ? 0 : 1)}×</option>
+            ))}
+          </select>
+        </div>
+      </div>
+
+      <label className="field-label" htmlFor="persona-webgl-vendor">WebGL Vendor（留空 = 自动派生）</label>
+      <input
+        id="persona-webgl-vendor"
+        className="text-input"
+        value={value.webglVendor}
+        onChange={(event) => onChange({ ...value, webglVendor: event.target.value })}
+        placeholder="例：Google Inc. (NVIDIA)"
+      />
+
+      <label className="field-label" htmlFor="persona-webgl-renderer">WebGL Renderer（留空 = 自动派生）</label>
+      <input
+        id="persona-webgl-renderer"
+        className="text-input"
+        value={value.webglRenderer}
+        onChange={(event) => onChange({ ...value, webglRenderer: event.target.value })}
+        placeholder="例：ANGLE (NVIDIA, NVIDIA GeForce RTX 3060 ...)"
+      />
+
+      <div className="form-toggle-row">
+        <label className="toggle-row">
+          <input
+            type="checkbox"
+            checked={value.spoofCanvas}
+            onChange={(event) => onChange({ ...value, spoofCanvas: event.target.checked })}
+          />
+          <span>
+            声明修改 Canvas
+            <small>JS 层像素扰动，CreepJS 可识别</small>
+          </span>
+        </label>
+        <label className="toggle-row">
+          <input
+            type="checkbox"
+            checked={value.spoofAudio}
+            onChange={(event) => onChange({ ...value, spoofAudio: event.target.checked })}
+          />
+          <span>
+            声明修改 AudioContext
+            <small>采样率稳定化，高强度检测仍可识别</small>
+          </span>
+        </label>
+      </div>
+
+      <FingerprintPreviewPanel
+        preview={preview}
+        error={previewError}
+        loading={previewing}
+        onRequest={requestPreview}
+      />
+    </div>
+  );
+}
+
+// ── v0.2 FingerprintPreviewPanel ────────────────────────────────────────────
+
+function FingerprintPreviewPanel({
+  preview,
+  error,
+  loading,
+  onRequest,
+}: {
+  preview: FingerprintPreview | undefined;
+  error: string;
+  loading: boolean;
+  onRequest(): void;
+}) {
+  return (
+    <div className="fingerprint-preview">
+      <div className="preview-head">
+        <div>
+          <div className="eyebrow">实时指纹预览</div>
+          <small>不启动浏览器，仅根据 seed 派生有效属性</small>
+        </div>
+        <button
+          type="button"
+          className="primary-button"
+          onClick={onRequest}
+          disabled={loading}
+        >
+          {loading ? "生成中…" : "预览"}
+        </button>
+      </div>
+
+      {error && <div className="form-error" role="alert">{error}</div>}
+
+      {preview && (
+        <div className="preview-body">
+          <div className="preview-row">
+            <span className="preview-label">User-Agent</span>
+            <code className="preview-value">{preview.effectiveUserAgent}</code>
+          </div>
+          <div className="preview-row">
+            <span className="preview-label">Platform</span>
+            <code className="preview-value">{preview.effectivePlatform}</code>
+          </div>
+          <div className="preview-row">
+            <span className="preview-label">WebGL Vendor</span>
+            <code className="preview-value">{preview.effectiveWebglVendor}</code>
+          </div>
+          <div className="preview-row">
+            <span className="preview-label">WebGL Renderer</span>
+            <code className="preview-value">{preview.effectiveWebglRenderer}</code>
+          </div>
+          <div className="preview-meta">
+            <span>CPU <strong>{preview.hardwareConcurrency}</strong> 核</span>
+            <span>内存 <strong>{preview.deviceMemoryGb}</strong> GB</span>
+            <span>窗口 <strong>{preview.effectiveWindowWidth}×{preview.effectiveWindowHeight}</strong></span>
+          </div>
+          {preview.declaredOnlyFields.length > 0 && (
+            <div className="preview-warning">
+              <strong>声明修改（像素层不可改）</strong>
+              <ul>
+                {preview.declaredOnlyFields.map((field) => (
+                  <li key={field}>{field}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+          {preview.hostSharedFields.length > 0 && (
+            <div className="preview-warning">
+              <strong>主机共享</strong>
+              <ul>
+                {preview.hostSharedFields.map((field) => (
+                  <li key={field}>{field}</li>
+                ))}
+              </ul>
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 }
@@ -1075,7 +1540,7 @@ function SettingsView({
     setSaving(true);
     try { await api.updateSettings(changes); await onRefresh(); onNotice("设置已保存。"); } catch (cause) { onError(getErrorMessage(cause)); } finally { setSaving(false); }
   };
-  return <section className="view-section"><div className="page-heading"><div><div className="eyebrow">LOCAL CONTROL PLANE</div><h1>设置</h1><p>管理本地运行时、并发资源和安全默认值。</p></div></div><div className="settings-grid"><article className="settings-card"><div className="settings-card-head"><div><h2>会话调度</h2><p>同一环境只允许一个活动会话。</p></div><span className="settings-icon">↯</span></div><label className="field-label" htmlFor="max-concurrent">最大并发环境</label><div className="number-control"><input id="max-concurrent" className="text-input" type="number" min="1" max="10" value={settings.maxConcurrentSessions} disabled={saving} onChange={(e) => void save({ maxConcurrentSessions: Number(e.target.value) })} /><span>个</span></div><label className="switch-row"><input type="checkbox" checked={settings.stopSessionsOnExit} disabled={saving} onChange={(e) => void save({ stopSessionsOnExit: e.target.checked })} /><span className="switch-ui" /><span><strong>退出管理器时停止会话</strong><small>避免遗留浏览器和代理进程。</small></span></label></article><article className="settings-card"><div className="settings-card-head"><div><h2>浏览器运行时</h2><p>只允许经过签名和哈希验证的版本。</p></div><span className="settings-icon">◉</span></div>{runtimes.map((runtime) => <div className="runtime-row" key={runtime.id}><span className="runtime-logo">C</span><div><strong>{runtime.name}</strong><small>{runtime.version} · {runtime.channel}</small></div><span className={`runtime-trust ${runtime.trusted ? "trusted" : "untrusted"}`}>{runtime.trusted ? "已验证" : "待验证"}</span></div>)}<button className="secondary-button full" type="button" onClick={() => onNotice("运行时安装器将在桌面端接入签名与 SHA-256 校验。")}>管理运行时</button></article><article className="settings-card"><div className="settings-card-head"><div><h2>隐私与审计</h2><p>默认不向任何远程服务发送数据。</p></div><span className="settings-icon">⌁</span></div><div className="privacy-row"><span className="privacy-check">✓</span><div><strong>遥测已关闭</strong><small>此设置由产品安全基线锁定。</small></div><span className="locked-label">锁定</span></div><div className="privacy-row"><span className="privacy-check">✓</span><div><strong>日志自动脱敏</strong><small>不记录 Cookie、Token、密码或完整代理 URL。</small></div><span className="locked-label">默认</span></div><button className="text-button" type="button" onClick={() => onNotice("审计日志保存在本机，可在后续版本导出。")}>查看安全说明 →</button></article></div></section>;
+  return <section className="view-section"><div className="page-heading"><div><div className="eyebrow">LOCAL CONTROL PLANE</div><h1>设置</h1><p>管理本地运行时、并发资源和安全默认值。</p></div></div><div className="settings-grid"><article className="settings-card"><div className="settings-card-head"><div><h2>会话调度</h2><p>同一环境只允许一个活动会话。</p></div><span className="settings-icon">↯</span></div><label className="field-label" htmlFor="max-concurrent">最大并发环境</label><div className="number-control"><input id="max-concurrent" className="text-input" type="number" min="1" max="10" value={settings.maxConcurrentSessions} disabled={saving} onChange={(e) => void save({ maxConcurrentSessions: Number(e.target.value) })} /><span>个</span></div><label className="switch-row"><input type="checkbox" checked={settings.stopSessionsOnExit} disabled={saving} onChange={(e) => void save({ stopSessionsOnExit: e.target.checked })} /><span className="switch-ui" /><span><strong>退出管理器时停止会话</strong><small>避免遗留浏览器和代理进程。</small></span></label></article><article className="settings-card"><div className="settings-card-head"><div><h2>浏览器运行时</h2><p>启动时登记文件摘要，每次启动前重新核对。</p></div><span className="settings-icon">◉</span></div>{runtimes.map((runtime) => <div className="runtime-row" key={runtime.id}><span className="runtime-logo">C</span><div><strong>{runtime.name}</strong><small>{runtime.version} · {runtime.channel}</small></div><span className={`runtime-trust ${runtime.trusted ? "trusted" : "untrusted"}`}>{runtime.trusted ? "完整性校验" : "未登记"}</span></div>)}<button className="secondary-button full" type="button" onClick={() => onNotice("当前校验文件路径与 SHA-256；Authenticode 发行者验证尚未接入。")}>管理运行时</button></article><article className="settings-card"><div className="settings-card-head"><div><h2>隐私与审计</h2><p>默认不向任何远程服务发送数据。</p></div><span className="settings-icon">⌁</span></div><div className="privacy-row"><span className="privacy-check">✓</span><div><strong>遥测已关闭</strong><small>此设置由产品安全基线锁定。</small></div><span className="locked-label">锁定</span></div><div className="privacy-row"><span className="privacy-check">✓</span><div><strong>日志自动脱敏</strong><small>不记录 Cookie、Token、密码或完整代理 URL。</small></div><span className="locked-label">默认</span></div><button className="text-button" type="button" onClick={() => onNotice("当前审计记录仅保存在进程内，重启后不会保留。")}>查看安全说明 →</button></article></div></section>;
 }
 
 export default App;

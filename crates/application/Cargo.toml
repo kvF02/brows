@@ -8,3 +8,4 @@ description = "Application use cases and ports for Brows"
 [dependencies]
 brows-domain = { path = "../domain" }
 brows-contracts = { path = "../contracts" }
+serde_json = "1"

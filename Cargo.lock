@@ -254,6 +254,7 @@ version = "0.1.0"
 dependencies = [
  "brows-contracts",
  "brows-domain",
+ "serde_json",
 ]
 
 [[package]]
@@ -279,6 +280,7 @@ dependencies = [
  "brows-contracts",
  "brows-domain",
  "serde",
+ "serde_json",
  "tauri",
  "tauri-build",
  "uuid",

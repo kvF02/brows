@@ -11,6 +11,7 @@ pub const MAX_TAG_CHARS: usize = 64;
 pub const DEFAULT_PROXY_TIMEOUT_MS: u32 = 15_000;
 pub const DEFAULT_MAX_CONCURRENT_SESSIONS: usize = 10;
 pub const MAX_CONCURRENT_SESSIONS: usize = 10;
+pub const MAX_QUEUED_SESSIONS: usize = 1_000;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnvironmentPresetRef {
@@ -177,6 +178,7 @@ impl ProxySpec {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PersonaKind {
     SystemNative,
+    SeedableNoise,
 }
 
 /// The v0.1 persona intentionally preserves host-level browser properties.
@@ -217,19 +219,205 @@ impl SystemNativePersona {
     }
 }
 
+/// Discrete device-memory values, avoiding `f32` in domain types that need `Eq`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum FingerprintPersona {
-    SystemNative(SystemNativePersona),
+pub enum DeviceMemoryGb {
+    Quarter,
+    Half,
+    One,
+    Two,
+    Four,
+    Eight,
 }
 
-impl FingerprintPersona {
-    pub const fn kind(self) -> PersonaKind {
+impl DeviceMemoryGb {
+    pub fn reported_f64(self) -> f64 {
         match self {
-            Self::SystemNative(_) => PersonaKind::SystemNative,
+            Self::Quarter => 0.25,
+            Self::Half => 0.5,
+            Self::One => 1.0,
+            Self::Two => 2.0,
+            Self::Four => 4.0,
+            Self::Eight => 8.0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlatformKind {
+    Windows,
+    MacOs,
+    Linux,
+}
+
+/// Screen configuration for the SeedableNoise persona.
+/// `device_scale_factor_hundredths`: 100 = 1.0×, 150 = 1.5×, 200 = 2.0×. Range 50–400.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenConfig {
+    pub width: u32,
+    pub height: u32,
+    pub color_depth: u8,
+    pub device_scale_factor_hundredths: u16,
+}
+
+impl ScreenConfig {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        if self.width < 320 || self.height < 240 {
+            return Err(DomainError::InconsistentConfiguration(
+                "screen dimensions must be at least 320×240".to_owned(),
+            ));
+        }
+        if !matches!(self.color_depth, 16 | 24 | 30 | 48) {
+            return Err(DomainError::InconsistentConfiguration(
+                "color_depth must be 16, 24, 30, or 48".to_owned(),
+            ));
+        }
+        if !(50..=400).contains(&self.device_scale_factor_hundredths) {
+            return Err(DomainError::InconsistentConfiguration(
+                "device_scale_factor must be between 0.5× and 4.0×".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Manually-specified WebGL UNMASKED_VENDOR/RENDERER strings.
+/// Both empty ⇒ auto-derive from platform via `PersonaFingerprint`.
+/// If either is set both must be non-empty and vendor must be compatible with the platform.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WebGLProfile {
+    pub vendor: String,
+    pub unmasked_renderer: String,
+}
+
+impl WebGLProfile {
+    pub fn auto() -> Self {
+        Self {
+            vendor: String::new(),
+            unmasked_renderer: String::new(),
         }
     }
 
-    pub const fn host_shared_fields(self) -> &'static [&'static str] {
+    pub fn validate(&self, platform: PlatformKind) -> Result<(), DomainError> {
+        if self.vendor.is_empty() != self.unmasked_renderer.is_empty() {
+            return Err(DomainError::InconsistentConfiguration(
+                "webgl vendor and renderer must both be set or both be empty".to_owned(),
+            ));
+        }
+        if self.vendor.is_empty() {
+            return Ok(());
+        }
+        let allowed: &[&str] = match platform {
+            PlatformKind::Windows => &["Google Inc.", "NVIDIA", "Intel", "AMD"],
+            PlatformKind::MacOs => &["Apple Inc.", "Intel Inc.", "AMD"],
+            PlatformKind::Linux => &["Mesa/X.org", "NVIDIA Corporation", "VMware, Inc.", "Intel"],
+        };
+        if !allowed.iter().any(|prefix| self.vendor.contains(prefix)) {
+            return Err(DomainError::InconsistentConfiguration(format!(
+                "webgl vendor '{}' is not consistent with the {:?} platform",
+                self.vendor, platform
+            )));
+        }
+        Ok(())
+    }
+}
+
+/// A deterministic, seed-driven fingerprint persona.
+/// The seed is stable across sessions; same seed → same reported properties.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SeedableNoisePersona {
+    pub seed: String,
+    pub platform: PlatformKind,
+    /// 1..=128
+    pub hardware_concurrency: u8,
+    pub device_memory: DeviceMemoryGb,
+    /// 0..=10
+    pub touch_points: u8,
+    pub screen: ScreenConfig,
+    /// Empty = auto-derive from platform using the PRNG seed.
+    pub webgl: WebGLProfile,
+    /// Spoof canvas read values with a stable PRNG (pixel-level, detectable by CreepJS).
+    pub spoof_canvas: bool,
+    /// Spoof AudioContext output with a stable PRNG (detectable by CreepJS).
+    pub spoof_audio: bool,
+}
+
+impl SeedableNoisePersona {
+    pub fn validate(&self) -> Result<(), DomainError> {
+        if self.seed.trim().is_empty() {
+            return Err(DomainError::InconsistentConfiguration(
+                "SeedableNoise persona requires a non-empty seed".to_owned(),
+            ));
+        }
+        if self.hardware_concurrency == 0 || self.hardware_concurrency > 128 {
+            return Err(DomainError::InconsistentConfiguration(
+                "hardware_concurrency must be between 1 and 128".to_owned(),
+            ));
+        }
+        if self.touch_points > 10 {
+            return Err(DomainError::InconsistentConfiguration(
+                "touch_points must be between 0 and 10".to_owned(),
+            ));
+        }
+        self.screen.validate()?;
+        self.webgl.validate(self.platform)?;
+        Ok(())
+    }
+}
+
+/// Returns the set of language prefixes considered consistent with the given
+/// IANA timezone region prefix (the segment before the first '/').
+fn expected_language_prefixes(region: &str) -> &'static [&'static str] {
+    match region {
+        "Asia" => &["zh", "ja", "ko", "en", "th", "vi", "id", "ms", "hi"],
+        "Europe" => &["en", "de", "fr", "es", "it", "nl", "pl", "ru", "sv", "pt"],
+        "America" => &["en", "es", "pt", "fr"],
+        "Africa" => &["en", "fr", "ar", "sw"],
+        "Oceania" => &["en"],
+        "Atlantic" => &["en", "pt"],
+        _ => &["en"],
+    }
+}
+
+/// Checks that at least one of the supplied `accept_languages` has a language
+/// prefix that is considered consistent with the IANA `timezone`.
+pub(crate) fn check_locale_consistency(
+    timezone: &str,
+    accept_languages: &[String],
+) -> Result<(), DomainError> {
+    let region = timezone.split('/').next().unwrap_or("");
+    let allowed = expected_language_prefixes(region);
+    let matched = accept_languages.iter().any(|lang| {
+        let prefix = lang
+            .split(['-', '_'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase();
+        allowed.contains(&prefix.as_str())
+    });
+    if !matched {
+        return Err(DomainError::InconsistentConfiguration(format!(
+            "timezone {timezone} requires one of the language prefixes {allowed:?}"
+        )));
+    }
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FingerprintPersona {
+    SystemNative(SystemNativePersona),
+    SeedableNoise(SeedableNoisePersona),
+}
+
+impl FingerprintPersona {
+    pub fn kind(&self) -> PersonaKind {
+        match self {
+            Self::SystemNative(_) => PersonaKind::SystemNative,
+            Self::SeedableNoise(_) => PersonaKind::SeedableNoise,
+        }
+    }
+
+    pub fn host_shared_fields(&self) -> &'static [&'static str] {
         match self {
             Self::SystemNative(_) => &[
                 "timezone",
@@ -241,6 +429,8 @@ impl FingerprintPersona {
                 "cpu",
                 "tls_http2",
             ],
+            // SeedableNoise configures all of these; none are unconditionally shared.
+            Self::SeedableNoise(_) => &[],
         }
     }
 }
@@ -339,15 +529,23 @@ impl ProfileSpec {
         }
         self.locale.validate()?;
         self.window.validate()?;
-        match self.persona {
-            FingerprintPersona::SystemNative(persona) => persona.validate()?,
-        }
-        if matches!(self.persona, FingerprintPersona::SystemNative(_))
-            && self.locale.timezone.is_some()
-        {
-            return Err(DomainError::InconsistentConfiguration(
-                "SystemNative persona cannot override the host timezone".to_owned(),
-            ));
+        match &self.persona {
+            FingerprintPersona::SystemNative(persona) => {
+                persona.validate()?;
+                if self.locale.timezone.is_some() {
+                    return Err(DomainError::InconsistentConfiguration(
+                        "SystemNative persona cannot override the host timezone".to_owned(),
+                    ));
+                }
+            }
+            FingerprintPersona::SeedableNoise(persona) => {
+                persona.validate()?;
+                // For SeedableNoise, the profile locale timezone is allowed and
+                // must be consistent with the declared accept_languages.
+                if let Some(ref tz) = self.locale.timezone {
+                    check_locale_consistency(tz, &self.locale.accept_languages)?;
+                }
+            }
         }
         if self.startup_urls.len() > 32 {
             return Err(DomainError::InconsistentConfiguration(
@@ -410,6 +608,17 @@ pub enum LaunchArgument {
         width: u32,
         height: u32,
     },
+    // ── v0.2 SeedableNoise additions ──────────────────────────────────────
+    /// Overrides the browser's User-Agent request header.
+    UserAgentOverride(String),
+    /// Forces the device-pixel-ratio reported to pages (hundredths: 100=1.0×).
+    ForceDeviceScaleFactor(u16),
+    /// Loads an unpacked MV3 extension from this directory at startup.
+    LoadExtension(PathBuf),
+    /// Comma-separated Blink feature flags to disable (e.g. "AutomationControlled").
+    DisableBlinkFeatures(Vec<String>),
+    /// Comma-separated Blink feature flags to enable.
+    EnableBlinkFeatures(Vec<String>),
 }
 
 impl LaunchArgument {
@@ -462,6 +671,32 @@ impl LaunchArgument {
                 Err(DomainError::InvalidLaunchArgument("window size".to_owned()))
             }
             Self::WindowSize { .. } => Ok(()),
+            Self::UserAgentOverride(ua) => {
+                if ua.trim().is_empty() || ua.len() > 512 || ua.contains('\n') {
+                    Err(DomainError::InvalidLaunchArgument("user agent".to_owned()))
+                } else {
+                    Ok(())
+                }
+            }
+            Self::ForceDeviceScaleFactor(f) if !(50..=400).contains(f) => {
+                Err(DomainError::InvalidLaunchArgument(
+                    "device scale factor must be 0.5×–4.0× (50–400 hundredths)".to_owned(),
+                ))
+            }
+            Self::ForceDeviceScaleFactor(_) => Ok(()),
+            Self::LoadExtension(path) => validate_path(path),
+            Self::DisableBlinkFeatures(features) | Self::EnableBlinkFeatures(features) => {
+                if features
+                    .iter()
+                    .any(|f| f.trim().is_empty() || f.contains(',') || f.contains('\n'))
+                {
+                    Err(DomainError::InvalidLaunchArgument(
+                        "blink features".to_owned(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
         }
     }
 }
@@ -495,6 +730,12 @@ pub enum LaunchWarning {
     ProxyNotConfigured,
     UnsupportedCapability(&'static str),
     LocaleMayDifferFromSystem,
+    /// A fingerprint field is declared in the persona but cannot be enforced at
+    /// the pixel or kernel level — only the JS-readable value is overridden.
+    DeclaredFingerprintOnly {
+        field: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -502,6 +743,11 @@ pub struct BrowserPreferences {
     pub accept_languages: Vec<String>,
     pub startup_urls: Vec<String>,
     pub permissions_prompt: bool,
+    // ── v0.2 SeedableNoise additions (all optional; None = browser default) ──
+    pub webgl_enabled: Option<bool>,
+    pub hardware_acceleration: Option<bool>,
+    /// Content-settings notification value: 1 = ask, 2 = block.
+    pub notifications_setting: Option<u8>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
