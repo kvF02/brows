@@ -4,8 +4,11 @@ use brows_adapters_proxy::{StoredProxyRuntime, TcpProxyConnectivityTester};
 use brows_adapters_runtime::{verify_authenticode_publisher, ManagedChromiumRuntime};
 use brows_adapters_secret_windows::WindowsCredentialStore;
 use brows_adapters_sqlite::{
-    SqliteMigrationRecordRepository, SqliteProfileRepository, SqliteProxyRepository,
+    SqliteAuditSink, SqliteMigrationRecordRepository, SqliteProfileRepository,
+    SqliteProxyRepository,
 };
+#[cfg(test)]
+use brows_application::memory::InMemoryAuditSink;
 #[cfg(test)]
 use brows_application::memory::InMemoryProxyRuntime;
 #[cfg(test)]
@@ -15,9 +18,7 @@ use brows_application::memory::{
     InMemoryBrowserRuntime, InMemoryProfileRepository, ManualClock, SequentialIdGenerator,
 };
 use brows_application::{
-    memory::{
-        system_native_preset, FingerprintRuntimeRouter, InMemoryAuditSink, InMemoryPresetCatalog,
-    },
+    memory::{system_native_preset, FingerprintRuntimeRouter, InMemoryPresetCatalog},
     ApplicationResult, BrowserRuntime, Clock, IdGenerator, LaunchPlanCompiler,
     MigrationApplicationService, PortError, PortErrorKind, PortResult, ProfileApplicationService,
     ProxyApplicationService, SessionApplicationService,
@@ -66,7 +67,7 @@ impl AppState {
             credential_store.clone(),
         ));
         let fingerprints = Arc::new(FingerprintRuntimeRouter::new(data_root.join("extensions"))?);
-        let audit = Arc::new(InMemoryAuditSink::default());
+        let audit = Arc::new(SqliteAuditSink::open(&database_path)?);
         let diagnostics = Arc::new(LocalNetworkDiagnosticRunner::new(
             proxies.clone(),
             clock.clone(),

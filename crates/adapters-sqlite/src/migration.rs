@@ -1,7 +1,7 @@
 use brows_application::{PortError, PortErrorKind, PortResult};
 use rusqlite::{Connection, TransactionBehavior};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 4;
+pub const CURRENT_SCHEMA_VERSION: u32 = 5;
 
 const MIGRATION_1: &str = r#"
 CREATE TABLE profiles (
@@ -129,6 +129,19 @@ ALTER TABLE profiles ADD COLUMN persona_spoof_canvas INTEGER;
 ALTER TABLE profiles ADD COLUMN persona_spoof_audio INTEGER;
 "#;
 
+const MIGRATION_5: &str = r#"
+CREATE TABLE audit_events (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    at_ms INTEGER NOT NULL CHECK (at_ms >= 0),
+    action TEXT NOT NULL CHECK (length(action) BETWEEN 1 AND 64),
+    entity_id TEXT NOT NULL CHECK (length(entity_id) BETWEEN 1 AND 128),
+    outcome TEXT NOT NULL CHECK (outcome IN ('succeeded', 'failed'))
+) STRICT;
+
+CREATE INDEX audit_events_time_idx
+    ON audit_events (at_ms DESC, id DESC);
+"#;
+
 pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
     let found: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -160,6 +173,9 @@ pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
             4 => transaction
                 .execute_batch(MIGRATION_4)
                 .map_err(|error| sqlite_error("apply schema migration 4", error))?,
+            5 => transaction
+                .execute_batch(MIGRATION_5)
+                .map_err(|error| sqlite_error("apply schema migration 5", error))?,
             target => {
                 return Err(PortError::new(
                     PortErrorKind::Incompatible,

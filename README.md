@@ -20,6 +20,7 @@ The repository contains the first implementation milestone:
 - versioned, allow-listed UI command and event contracts;
 - application services and ports with in-memory test adapters;
 - SQLite profile persistence, including `SeedableNoise` persona fields;
+- append-only local SQLite audit persistence for Profile and Session actions;
 - a Chromium runtime adapter that confines paths, verifies the Windows
   Authenticode signer against the `Google LLC` allowlist and rechecks SHA-256
   before every launch;
