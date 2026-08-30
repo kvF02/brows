@@ -1,3 +1,4 @@
+use brows_adapters_backup::EncryptedBackupService;
 use brows_adapters_diagnostic::LocalNetworkDiagnosticRunner;
 use brows_adapters_morelogin::MoreLoginProfileDataMigrator;
 use brows_adapters_proxy::{StoredProxyRuntime, TcpProxyConnectivityTester};
@@ -43,6 +44,7 @@ pub(crate) struct AppState {
     pub(crate) migrations: Option<Arc<MigrationApplicationService>>,
     pub(crate) proxy_management: Option<Arc<ProxyApplicationService>>,
     pub(crate) diagnostics: Option<Arc<LocalNetworkDiagnosticRunner>>,
+    pub(crate) backups: Option<Arc<EncryptedBackupService>>,
 }
 
 impl AppState {
@@ -90,6 +92,10 @@ impl AppState {
                 format!("failed to canonicalize profile data directory: {error}"),
             )
         })?;
+        let backup_service = Arc::new(EncryptedBackupService::new(
+            data_root.join("backups"),
+            profile_root.clone(),
+        )?);
         let browsers = Arc::new(ManagedChromiumRuntime::new(&browser_root, &profile_root)?);
         // The system Chrome installation is discovered at runtime. Verify its
         // Authenticode chain and publisher before recording the current digest,
@@ -151,6 +157,7 @@ impl AppState {
             migrations: Some(migration_service),
             proxy_management: Some(proxy_management),
             diagnostics: Some(diagnostics),
+            backups: Some(backup_service),
         })
     }
 
@@ -210,6 +217,7 @@ impl AppState {
             migrations: None,
             proxy_management: None,
             diagnostics: None,
+            backups: None,
         })
     }
 }

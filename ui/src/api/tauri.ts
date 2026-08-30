@@ -131,6 +131,16 @@ interface DiagnosticReportDto {
   externalEndpoints: string[];
 }
 
+interface BackupJobDto {
+  id: string;
+  profileId: string;
+  profileName: string;
+  status: "ready" | "running" | "completed" | "failed";
+  createdAt: string;
+  sizeBytes?: number;
+  note?: string;
+}
+
 const handlers = Object.freeze({
   profileList: "profile_list",
   profileGet: "profile_get",
@@ -157,6 +167,8 @@ const handlers = Object.freeze({
   legacyMigrationList: "legacy_migration_list",
   fingerprintPreview: "fingerprint_preview",
   listRuntimes: "list_runtimes",
+  backupList: "backup_list",
+  backupExport: "backup_export",
 });
 
 const prototypeRuntime: BrowserRuntime = {
@@ -427,14 +439,19 @@ export class TauriApiClient implements ApiClient {
     return this.toDiagnostic(report);
   }
   async listBackups(): Promise<BackupJob[]> {
-    return [];
+    const jobs = await this.call<BackupJobDto[]>(handlers.backupList);
+    return jobs.map((job) => ({ ...job }));
   }
   async exportBackup(
-    _profileId: string,
-    _destinationName: string,
-    _includeProxySecret: boolean,
+    profileId: string,
+    destinationName: string,
+    includeProxySecret: boolean,
+    password: string,
   ): Promise<BackupJob> {
-    return unsupported("加密备份");
+    const job = await this.call<BackupJobDto>(handlers.backupExport, {
+      request: { profileId, destinationName, password, includeProxyCredential: includeProxySecret },
+    });
+    return { ...job };
   }
   async getSettings(): Promise<Settings> {
     return { ...EMPTY_SETTINGS };

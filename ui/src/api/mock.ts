@@ -386,6 +386,7 @@ export class MockApiClient implements ApiClient {
     profileId: string,
     _destinationName: string,
     includeProxySecret: boolean,
+    _password: string,
   ): Promise<BackupJob> {
     const profile = this.findProfile(profileId);
     const job: BackupJob = {

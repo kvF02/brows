@@ -15,6 +15,7 @@ name = "brows-desktop"
 path = "src/main.rs"
 
 [dependencies]
+brows-adapters-backup = { path = "../adapters-backup" }
 brows-adapters-runtime = { path = "../adapters-runtime" }
 brows-adapters-morelogin = { path = "../adapters-morelogin" }
 brows-adapters-diagnostic = { path = "../adapters-diagnostic" }

@@ -1,0 +1,20 @@
+[package]
+name = "brows-adapters-backup"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Streaming encrypted local backup adapter for Brows"
+
+[dependencies]
+argon2 = "0.5.3"
+brows-application = { path = "../application" }
+brows-contracts = { path = "../contracts" }
+brows-domain = { path = "../domain" }
+chacha20poly1305 = { version = "0.10.1", features = ["stream"] }
+getrandom = "0.3.4"
+serde = { workspace = true }
+serde_json = { workspace = true }
+sha2 = "0.10.9"
+tar = "0.4.44"
+walkdir = "2.5.0"
+zeroize = "1.8.2"

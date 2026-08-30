@@ -128,6 +128,16 @@ identifier = "allow-session-list"
 description = "Enables the session_list command without any pre-configured scope."
 commands = { allow = ["session_list"] }
 
+[[permission]]
+identifier = "allow-backup-list"
+description = "Enables the backup_list command without any pre-configured scope."
+commands = { allow = ["backup_list"] }
+
+[[permission]]
+identifier = "allow-backup-export"
+description = "Enables the backup_export command without any pre-configured scope."
+commands = { allow = ["backup_export"] }
+
 # Default permission set: auto-allowed for all capabilities.
 [default]
 description = "Default permissions for the Brows app — all custom commands."
@@ -157,4 +167,6 @@ permissions = [
   "allow-session-stop",
   "allow-session-cancel-queued",
   "allow-session-list",
+  "allow-backup-list",
+  "allow-backup-export",
 ]

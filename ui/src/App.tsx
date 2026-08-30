@@ -56,12 +56,13 @@ const scopeMeta: Record<FingerprintScope, { label: string; className: string }> 
 
 function formatDate(value?: string): string {
   if (!value) return "—";
+  const timestamp = /^\d+$/.test(value) ? Number(value) : value;
   return new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
-  }).format(new Date(value));
+  }).format(new Date(timestamp));
 }
 
 function formatBytes(value: number): string {
@@ -1510,13 +1511,18 @@ function BackupsView({
   onNotice(message: string): void;
 }) {
   const [profileId, setProfileId] = useState(profiles[0]?.id ?? "");
-  const [includeSecret, setIncludeSecret] = useState(false);
+  const [destinationName, setDestinationName] = useState("profile-backup.browsbak");
+  const [password, setPassword] = useState("");
+  const [passwordConfirm, setPasswordConfirm] = useState("");
   useEffect(() => { if (!profiles.some((profile) => profile.id === profileId)) setProfileId(profiles[0]?.id ?? ""); }, [profiles, profileId]);
   const exportBackup = async () => {
     if (!profileId) return;
-    try { await api.exportBackup(profileId, "profile-backup.browsbak", includeSecret); await onRefresh(); onNotice("已创建加密备份任务。正式桌面版本会打开系统保存对话框。"); } catch (cause) { onError(getErrorMessage(cause)); }
+    if (password.length < 12) { onError("恢复口令至少需要 12 个字符"); return; }
+    if (password !== passwordConfirm) { onError("两次输入的恢复口令不一致"); return; }
+    if (!destinationName.toLowerCase().endsWith(".browsbak")) { onError("文件名必须以 .browsbak 结尾"); return; }
+    try { await api.exportBackup(profileId, destinationName, false, password); setPassword(""); setPasswordConfirm(""); await onRefresh(); onNotice("加密备份已创建"); } catch (cause) { onError(getErrorMessage(cause)); }
   };
-  return <section className="view-section"><div className="page-heading"><div><div className="eyebrow">ENCRYPTED ARCHIVES</div><h1>备份与恢复</h1><p>使用恢复口令加密完整 Chromium Profile。导入默认生成新的环境 UUID，不覆盖已有数据。</p></div></div><div className="backup-panel"><div className="backup-panel-head"><div><h2>导出完整环境</h2><p>包含 Cookie、缓存和站点存储；代理密码默认不导出。</p></div><span className="vault-badge">Argon2id · XChaCha20</span></div><div className="form-grid"><div><label className="field-label" htmlFor="backup-profile">选择环境</label><select id="backup-profile" className="text-input" value={profileId} onChange={(e) => setProfileId(e.target.value)}><option value="">请选择</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></div><div className="checkbox-field"><label><input type="checkbox" checked={includeSecret} onChange={(e) => setIncludeSecret(e.target.checked)} /> <span>同时导出代理凭据</span></label><small>需要额外确认；凭据仍由系统保险库保护。</small></div></div><div className="backup-warning"><span aria-hidden="true">i</span> Chromium 的 DPAPI / App-Bound Encryption 可能让登录态无法跨 Windows 设备直接使用。备份恢复配置成功不代表免登录。</div><button className="primary-button" type="button" disabled={!profileId} onClick={() => void exportBackup()}>导出加密备份</button></div><div className="subsection-heading"><div><h2>最近任务</h2><span>本地任务记录</span></div></div>{backups.length === 0 ? <div className="empty-state compact"><div className="empty-icon">↥</div><strong>还没有备份任务</strong><span>完成的归档会显示在这里。</span></div> : <div className="data-table-wrap"><table className="data-table"><thead><tr><th>环境</th><th>状态</th><th>创建时间</th><th>备注</th></tr></thead><tbody>{backups.map((backup) => <tr key={backup.id}><td><strong>{backup.profileName}</strong></td><td><span className={`status-pill ${backup.status === "completed" ? "green" : backup.status === "failed" ? "red" : "blue"}`}>{backup.status === "completed" ? "已完成" : backup.status}</span></td><td>{formatDate(backup.createdAt)}</td><td>{backup.note ?? "—"}</td></tr>)}</tbody></table></div>}</section>;
+  return <section className="view-section"><div className="page-heading"><div><div className="eyebrow">ENCRYPTED ARCHIVES</div><h1>备份与恢复</h1><p>使用恢复口令加密完整 Chromium Profile。当前支持安全导出；恢复导入将在原子安装流程完成后开放。</p></div></div><div className="backup-panel"><div className="backup-panel-head"><div><h2>导出完整环境</h2><p>包含 Cookie、缓存和站点存储；代理密码不会写入归档。</p></div><span className="vault-badge">Argon2id · XChaCha20</span></div><div className="form-grid"><div><label className="field-label" htmlFor="backup-profile">选择环境</label><select id="backup-profile" className="text-input" value={profileId} onChange={(e) => setProfileId(e.target.value)}><option value="">请选择</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></div><div><label className="field-label" htmlFor="backup-name">备份文件名</label><input id="backup-name" className="text-input" value={destinationName} onChange={(e) => setDestinationName(e.target.value)} /></div><div><label className="field-label" htmlFor="backup-password">恢复口令（至少 12 个字符）</label><input id="backup-password" className="text-input" type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} /></div><div><label className="field-label" htmlFor="backup-password-confirm">确认恢复口令</label><input id="backup-password-confirm" className="text-input" type="password" autoComplete="new-password" value={passwordConfirm} onChange={(e) => setPasswordConfirm(e.target.value)} /></div></div><div className="backup-warning"><span aria-hidden="true">i</span> Chromium 的 DPAPI / App-Bound Encryption 可能让登录态无法跨 Windows 设备直接使用。备份恢复配置成功不代表免登录。</div><button className="primary-button" type="button" disabled={!profileId || !password || !passwordConfirm} onClick={() => void exportBackup()}>导出加密备份</button></div><div className="subsection-heading"><div><h2>最近任务</h2><span>本地任务记录</span></div></div>{backups.length === 0 ? <div className="empty-state compact"><div className="empty-icon">↥</div><strong>还没有备份任务</strong><span>完成的归档会显示在这里。</span></div> : <div className="data-table-wrap"><table className="data-table"><thead><tr><th>环境</th><th>状态</th><th>创建时间</th><th>备注</th></tr></thead><tbody>{backups.map((backup) => <tr key={backup.id}><td><strong>{backup.profileName}</strong></td><td><span className={`status-pill ${backup.status === "completed" ? "green" : backup.status === "failed" ? "red" : "blue"}`}>{backup.status === "completed" ? "已完成" : backup.status}</span></td><td>{formatDate(backup.createdAt)}</td><td>{backup.note ?? "—"}</td></tr>)}</tbody></table></div>}</section>;
 }
 
 function SettingsView({

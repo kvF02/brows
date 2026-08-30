@@ -33,6 +33,8 @@
     "allow-session-launch",
     "allow-session-stop",
     "allow-session-cancel-queued",
-    "allow-session-list"
+    "allow-session-list",
+    "allow-backup-list",
+    "allow-backup-export"
   ]
 }

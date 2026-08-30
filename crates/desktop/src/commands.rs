@@ -1,27 +1,115 @@
 use crate::state::AppState;
 use brows_adapters_morelogin::{inspect_export as inspect_morelogin, MoreLoginPreview};
 use brows_application::{
-    persona_fingerprint::PersonaFingerprint, ApplicationResult, DiagnosticRequest,
-    DiagnosticRunner, LegacyProfileDataSummary, MigrationRecord, MigrationRecordStatus,
-    SessionLaunchOutcome,
+    persona_fingerprint::PersonaFingerprint, ApplicationResult, BackupExportSpec, BackupService,
+    DiagnosticRequest, DiagnosticRunner, LegacyProfileDataSummary, MigrationRecord,
+    MigrationRecordStatus, SecretValue, SessionLaunchOutcome,
 };
 use brows_contracts::{
-    BrowserBuildIdDto, BrowserRuntimeDto, BrowserSelectorDto, DiagnosticListRequest,
-    DiagnosticReportDto, DiagnosticRunRequest, ErrorCode, ErrorDto, EventEnvelope,
-    FingerprintPreviewDto, LegacyMigrationExecuteRequest, LegacyMigrationInspectRequest,
-    LegacyMigrationInspectionDto, LegacyMigrationListRequest, LegacyMigrationRecordDto,
-    LegacyMigrationRollbackRequest, LegacyMigrationStatusDto, LocaleDto, PersonaDto, PresetIdDto,
-    ProfileCreateRequest, ProfileDraftDto, ProfileDto, ProfileIdRequest, ProfileListRequest,
-    ProfileRevisionRequest, ProfileUpdateRequest, ProxyConnectivityCheckDto, ProxyDto,
-    ProxyRemoveRequest, ProxySaveRequest, ProxyTestRequest, SessionCancelQueuedRequest, SessionDto,
-    SessionLaunchRequest, SessionStopRequest, WindowDto,
+    BackupExportRequest, BrowserBuildIdDto, BrowserRuntimeDto, BrowserSelectorDto,
+    DiagnosticListRequest, DiagnosticReportDto, DiagnosticRunRequest, ErrorCode, ErrorDto,
+    EventEnvelope, FingerprintPreviewDto, LegacyMigrationExecuteRequest,
+    LegacyMigrationInspectRequest, LegacyMigrationInspectionDto, LegacyMigrationListRequest,
+    LegacyMigrationRecordDto, LegacyMigrationRollbackRequest, LegacyMigrationStatusDto, LocaleDto,
+    PersonaDto, PresetIdDto, ProfileCreateRequest, ProfileDraftDto, ProfileDto, ProfileIdRequest,
+    ProfileListRequest, ProfileRevisionRequest, ProfileUpdateRequest, ProxyConnectivityCheckDto,
+    ProxyDto, ProxyRemoveRequest, ProxySaveRequest, ProxyTestRequest, SessionCancelQueuedRequest,
+    SessionDto, SessionLaunchRequest, SessionStopRequest, WindowDto,
 };
 use brows_domain::ProfileId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, State};
 
 type IpcResult<T> = Result<T, ErrorDto>;
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BackupJobDto {
+    id: String,
+    profile_id: String,
+    profile_name: String,
+    status: &'static str,
+    created_at: String,
+    size_bytes: Option<u64>,
+    note: Option<String>,
+}
+
+fn backup_service(state: &AppState) -> IpcResult<&brows_adapters_backup::EncryptedBackupService> {
+    state.backups.as_deref().ok_or_else(|| ErrorDto {
+        code: ErrorCode::CapabilityUnsupported,
+        message: "加密备份在当前运行模式下不可用".to_owned(),
+        violations: Vec::new(),
+    })
+}
+
+#[tauri::command]
+pub(crate) fn backup_list(state: State<'_, AppState>) -> IpcResult<Vec<BackupJobDto>> {
+    let entries = backup_service(&state)?
+        .list_archives()
+        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
+    Ok(entries
+        .into_iter()
+        .map(|entry| BackupJobDto {
+            id: format!("backup-{}", entry.name),
+            profile_id: String::new(),
+            profile_name: entry.name.clone(),
+            status: "completed",
+            created_at: entry
+                .modified_at_ms
+                .map(|value| value.to_string())
+                .unwrap_or_default(),
+            size_bytes: Some(entry.size_bytes),
+            note: Some("本地加密归档；代理凭据未导出".to_owned()),
+        })
+        .collect())
+}
+
+#[tauri::command]
+pub(crate) fn backup_export(
+    state: State<'_, AppState>,
+    request: BackupExportRequest,
+) -> IpcResult<BackupJobDto> {
+    let profile = ipc(state.profiles.get(ProfileIdRequest {
+        profile_id: request.profile_id.clone(),
+    }))?;
+    let profile_name = profile.name.clone();
+    let profile: brows_domain::ProfileSpec =
+        profile
+            .try_into()
+            .map_err(|error: brows_contracts::ContractError| ErrorDto {
+                code: ErrorCode::ValidationFailed,
+                message: error.reason,
+                violations: Vec::new(),
+            })?;
+    let password = SecretValue::new(request.password.expose().as_bytes().to_vec())
+        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
+    backup_service(&state)?
+        .export(&BackupExportSpec {
+            destination_name: request.destination_name.clone(),
+            profile,
+            password,
+            include_proxy_credential: request.include_proxy_credential,
+        })
+        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
+    let size_bytes = backup_service(&state)?
+        .archive_size(&request.destination_name)
+        .ok();
+    Ok(BackupJobDto {
+        id: format!("backup-{}", request.destination_name),
+        profile_id: request.profile_id.as_str().to_owned(),
+        profile_name,
+        status: "completed",
+        created_at: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis()
+            .to_string(),
+        size_bytes,
+        note: Some("本地加密归档；代理凭据未导出".to_owned()),
+    })
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]

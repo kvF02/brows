@@ -311,6 +311,7 @@ export interface ApiClient {
     profileId: string,
     destinationName: string,
     includeProxySecret: boolean,
+    password: string,
   ): Promise<BackupJob>;
   listRuntimes(): Promise<BrowserRuntime[]>;
   getSettings(): Promise<Settings>;
