@@ -140,6 +140,10 @@ interface BackupJobDto {
   sizeBytes?: number;
   note?: string;
 }
+interface BackupImportResultDto {
+  profile: ProfileDto;
+  note: string;
+}
 
 const handlers = Object.freeze({
   profileList: "profile_list",
@@ -169,6 +173,7 @@ const handlers = Object.freeze({
   listRuntimes: "list_runtimes",
   backupList: "backup_list",
   backupExport: "backup_export",
+  backupImport: "backup_import",
 });
 
 const prototypeRuntime: BrowserRuntime = {
@@ -452,6 +457,13 @@ export class TauriApiClient implements ApiClient {
       request: { profileId, destinationName, password, includeProxyCredential: includeProxySecret },
     });
     return { ...job };
+  }
+  async importBackup(sourceName: string, password: string): Promise<Profile> {
+    const result = await this.call<BackupImportResultDto>(handlers.backupImport, {
+      request: { sourceName, password },
+    });
+    this.dtoCache.set(result.profile.id, result.profile);
+    return this.toProfile(result.profile);
   }
   async getSettings(): Promise<Settings> {
     return { ...EMPTY_SETTINGS };

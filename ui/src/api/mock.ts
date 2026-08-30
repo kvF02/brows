@@ -403,6 +403,10 @@ export class MockApiClient implements ApiClient {
     return { ...job };
   }
 
+  async importBackup(_sourceName: string, _password: string): Promise<Profile> {
+    throw new ApiError("CAPABILITY_UNSUPPORTED", "演示模式不支持恢复导入");
+  }
+
   async listRuntimes(): Promise<BrowserRuntime[]> {
     return runtimes.map((runtime) => ({ ...runtime }));
   }

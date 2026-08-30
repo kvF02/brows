@@ -138,6 +138,11 @@ identifier = "allow-backup-export"
 description = "Enables the backup_export command without any pre-configured scope."
 commands = { allow = ["backup_export"] }
 
+[[permission]]
+identifier = "allow-backup-import"
+description = "Enables the backup_import command without any pre-configured scope."
+commands = { allow = ["backup_import"] }
+
 # Default permission set: auto-allowed for all capabilities.
 [default]
 description = "Default permissions for the Brows app — all custom commands."
@@ -169,4 +174,5 @@ permissions = [
   "allow-session-list",
   "allow-backup-list",
   "allow-backup-export",
+  "allow-backup-import",
 ]

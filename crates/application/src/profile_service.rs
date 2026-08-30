@@ -69,6 +69,19 @@ impl ProfileApplicationService {
         Ok(ProfileDto::from(&profile))
     }
 
+    /// Creates a profile from an authenticated backup manifest. The imported
+    /// profile always receives a fresh identity so restoring can never replace
+    /// an existing profile's persisted record or userdata directory.
+    pub fn create_imported(&self, mut profile: ProfileSpec) -> ApplicationResult<ProfileDto> {
+        profile.id = self.ids.next_profile_id()?;
+        profile.revision = Revision::FIRST;
+        profile.archived = false;
+        self.validate_references(&profile)?;
+        self.profiles.create(profile.clone())?;
+        self.audit_success("profile.import", profile.id.as_str());
+        Ok(ProfileDto::from(&profile))
+    }
+
     pub fn update(&self, request: ProfileUpdateRequest) -> ApplicationResult<ProfileDto> {
         let id: ProfileId = request.profile_id.try_into()?;
         let expected = Revision::new(request.expected_revision)?;

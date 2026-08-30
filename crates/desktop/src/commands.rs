@@ -1,14 +1,14 @@
 use crate::state::AppState;
 use brows_adapters_morelogin::{inspect_export as inspect_morelogin, MoreLoginPreview};
 use brows_application::{
-    persona_fingerprint::PersonaFingerprint, ApplicationResult, BackupExportSpec, BackupService,
-    DiagnosticRequest, DiagnosticRunner, LegacyProfileDataSummary, MigrationRecord,
+    persona_fingerprint::PersonaFingerprint, ApplicationResult, BackupExportSpec, BackupImportSpec,
+    BackupService, DiagnosticRequest, DiagnosticRunner, LegacyProfileDataSummary, MigrationRecord,
     MigrationRecordStatus, SecretValue, SessionLaunchOutcome,
 };
 use brows_contracts::{
-    BackupExportRequest, BrowserBuildIdDto, BrowserRuntimeDto, BrowserSelectorDto,
-    DiagnosticListRequest, DiagnosticReportDto, DiagnosticRunRequest, ErrorCode, ErrorDto,
-    EventEnvelope, FingerprintPreviewDto, LegacyMigrationExecuteRequest,
+    BackupExportRequest, BackupImportRequest, BrowserBuildIdDto, BrowserRuntimeDto,
+    BrowserSelectorDto, DiagnosticListRequest, DiagnosticReportDto, DiagnosticRunRequest,
+    ErrorCode, ErrorDto, EventEnvelope, FingerprintPreviewDto, LegacyMigrationExecuteRequest,
     LegacyMigrationInspectRequest, LegacyMigrationInspectionDto, LegacyMigrationListRequest,
     LegacyMigrationRecordDto, LegacyMigrationRollbackRequest, LegacyMigrationStatusDto, LocaleDto,
     PersonaDto, PresetIdDto, ProfileCreateRequest, ProfileDraftDto, ProfileDto, ProfileIdRequest,
@@ -36,6 +36,13 @@ pub(crate) struct BackupJobDto {
     note: Option<String>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BackupImportResultDto {
+    profile: ProfileDto,
+    note: String,
+}
+
 fn backup_service(state: &AppState) -> IpcResult<&brows_adapters_backup::EncryptedBackupService> {
     state.backups.as_deref().ok_or_else(|| ErrorDto {
         code: ErrorCode::CapabilityUnsupported,
@@ -54,14 +61,14 @@ pub(crate) fn backup_list(state: State<'_, AppState>) -> IpcResult<Vec<BackupJob
         .map(|entry| BackupJobDto {
             id: format!("backup-{}", entry.name),
             profile_id: String::new(),
-            profile_name: entry.name.clone(),
+            profile_name: "加密归档".to_owned(),
             status: "completed",
             created_at: entry
                 .modified_at_ms
                 .map(|value| value.to_string())
                 .unwrap_or_default(),
             size_bytes: Some(entry.size_bytes),
-            note: Some("本地加密归档；代理凭据未导出".to_owned()),
+            note: Some(format!("文件：{}；代理凭据未导出", entry.name)),
         })
         .collect())
 }
@@ -108,6 +115,39 @@ pub(crate) fn backup_export(
             .to_string(),
         size_bytes,
         note: Some("本地加密归档；代理凭据未导出".to_owned()),
+    })
+}
+
+#[tauri::command]
+pub(crate) fn backup_import(
+    state: State<'_, AppState>,
+    request: BackupImportRequest,
+) -> IpcResult<BackupImportResultDto> {
+    let password = SecretValue::new(request.password.expose().as_bytes().to_vec())
+        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
+    let payload = backup_service(&state)?
+        .import(&BackupImportSpec {
+            source_name: request.source_name,
+            password,
+        })
+        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
+    let imported = state
+        .profiles
+        .create_imported(payload.profile)
+        .map_err(|error| error.to_contract())?;
+    if let Err(error) = backup_service(&state)?
+        .install_restored_data(imported.id.as_str(), &payload.restored_data_dir)
+    {
+        backup_service(&state)?.discard_restored_data(&payload.restored_data_dir);
+        let _ = state.profiles.archive(ProfileRevisionRequest {
+            profile_id: imported.id.clone(),
+            expected_revision: imported.revision,
+        });
+        return Err(brows_application::ApplicationError::from(error).to_contract());
+    }
+    Ok(BackupImportResultDto {
+        profile: imported,
+        note: "已恢复为新的环境 UUID，未覆盖现有环境".to_owned(),
     })
 }
 

@@ -123,6 +123,54 @@ impl EncryptedBackupService {
         Ok(entries)
     }
 
+    /// Installs an authenticated import staging directory into a newly
+    /// allocated profile directory. The destination must not already exist;
+    /// callers can therefore never overwrite an existing profile's userdata.
+    pub fn install_restored_data(
+        &self,
+        profile_id: &str,
+        restored_data_dir: &Path,
+    ) -> PortResult<()> {
+        let staging = restored_data_dir
+            .canonicalize()
+            .map_err(|error| io_error("canonicalize restored profile data", error))?;
+        let staging_root = self
+            .backup_root
+            .join("restore-staging")
+            .canonicalize()
+            .map_err(|error| io_error("canonicalize restore staging root", error))?;
+        ensure_within(&staging, &staging_root, "restored profile data")?;
+        if !staging.is_dir() {
+            return Err(invalid("restored profile data is not a directory"));
+        }
+        inspect_source_tree(&staging, &staging_root)?;
+        let target = self.profile_data_path(profile_id);
+        if target.exists() {
+            return Err(PortError::new(
+                PortErrorKind::AlreadyExists,
+                "profile userdata already exists",
+            ));
+        }
+        let parent = target
+            .parent()
+            .ok_or_else(|| invalid("profile userdata target has no parent"))?;
+        fs::create_dir_all(parent)
+            .map_err(|error| io_error("create profile data parent", error))?;
+        fs::rename(&staging, &target)
+            .map_err(|error| io_error("install restored profile data", error))?;
+        let staging_parent = restored_data_dir
+            .parent()
+            .ok_or_else(|| invalid("restored profile data has no staging parent"))?;
+        let _ = fs::remove_dir_all(staging_parent);
+        Ok(())
+    }
+
+    pub fn discard_restored_data(&self, restored_data_dir: &Path) {
+        if let Some(parent) = restored_data_dir.parent() {
+            let _ = fs::remove_dir_all(parent);
+        }
+    }
+
     fn archive_path(&self, name: &str) -> PortResult<PathBuf> {
         validate_archive_name(name)?;
         Ok(self.backup_root.join(name))
@@ -332,7 +380,11 @@ fn extract_archive<R: Read>(
             continue;
         }
 
-        if !path.starts_with("userdata") {
+        let under_userdata = path
+            .components()
+            .next()
+            .is_some_and(|component| component == Component::Normal(OsStr::new("userdata")));
+        if !under_userdata {
             return Err(tampered("backup contains an unexpected top-level entry"));
         }
         file_count = file_count
@@ -780,6 +832,9 @@ fn inspect_source_tree(source: &Path, profile_root: &Path) -> PortResult<()> {
     let mut bytes = 0_u64;
     for entry in WalkDir::new(&source).follow_links(false) {
         let entry = entry.map_err(|error| invalid(format!("inspect profile data: {error}")))?;
+        if entry.path() == source {
+            continue;
+        }
         let metadata = fs::symlink_metadata(entry.path())
             .map_err(|error| io_error("inspect profile data entry", error))?;
         if is_reparse_or_symlink(&metadata) {
@@ -924,4 +979,145 @@ fn tampered(message: impl Into<String>) -> PortError {
 
 fn unavailable(message: impl Into<String>) -> PortError {
     PortError::new(PortErrorKind::Unavailable, message)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use brows_application::{BackupImportSpec, SecretValue};
+    use brows_domain::{
+        BrowserBuildSelector, BrowserChannel, EnvironmentPresetRef, FingerprintPersona,
+        LocaleConfig, ProfileId, ProfileSpec, Revision, SystemNativePersona, WindowConfig,
+    };
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn temp_root(label: &str) -> PathBuf {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "brows-backup-{label}-{}-{nonce}",
+            std::process::id()
+        ))
+    }
+
+    fn profile() -> ProfileSpec {
+        ProfileSpec {
+            id: ProfileId::new("profile-backup-test").unwrap(),
+            name: "Backup Test".to_owned(),
+            tags: vec!["test".to_owned()],
+            environment_preset: EnvironmentPresetRef::new(
+                brows_domain::PresetId::new("system-native").unwrap(),
+                1,
+            )
+            .unwrap(),
+            proxy_id: None,
+            browser: BrowserBuildSelector::Channel(BrowserChannel::Stable),
+            persona: FingerprintPersona::SystemNative(SystemNativePersona::default()),
+            locale: LocaleConfig::default(),
+            window: WindowConfig::default(),
+            startup_urls: Vec::new(),
+            revision: Revision::FIRST,
+            archived: false,
+        }
+    }
+
+    fn service(label: &str) -> (EncryptedBackupService, PathBuf) {
+        let root = temp_root(label);
+        let service =
+            EncryptedBackupService::new(root.join("backups"), root.join("profiles")).unwrap();
+        (service, root)
+    }
+
+    fn password(value: &str) -> SecretValue {
+        SecretValue::new(value.as_bytes().to_vec()).unwrap()
+    }
+
+    #[test]
+    fn encrypted_archive_round_trips_profile_and_userdata() {
+        let (service, root) = service("roundtrip");
+        let profile = profile();
+        let profile_root = root.join("profiles");
+        let digest = Sha256::digest(profile.id.as_str().as_bytes());
+        let userdata = profile_root.join(format!("{digest:x}")).join("userdata");
+        fs::create_dir_all(userdata.join("Default")).unwrap();
+        fs::write(
+            userdata.join("Default").join("Cookies"),
+            b"test-cookie-data",
+        )
+        .unwrap();
+        service
+            .export(&BackupExportSpec {
+                destination_name: "roundtrip.browsbak".to_owned(),
+                profile: profile.clone(),
+                password: password("correct horse battery"),
+                include_proxy_credential: false,
+            })
+            .unwrap();
+        let listing = service.list_archives().unwrap();
+        assert_eq!(listing.len(), 1);
+        assert_eq!(listing[0].name, "roundtrip.browsbak");
+        let restored = service
+            .import(&BackupImportSpec {
+                source_name: "roundtrip.browsbak".to_owned(),
+                password: password("correct horse battery"),
+            })
+            .unwrap();
+        assert_eq!(restored.profile, profile);
+        assert_eq!(
+            fs::read(restored.restored_data_dir.join("Default").join("Cookies")).unwrap(),
+            b"test-cookie-data"
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn wrong_password_and_tampering_are_rejected_without_leaking_staging() {
+        let (service, root) = service("failures");
+        service
+            .export(&BackupExportSpec {
+                destination_name: "failure.browsbak".to_owned(),
+                profile: profile(),
+                password: password("correct horse battery"),
+                include_proxy_credential: false,
+            })
+            .unwrap();
+        let wrong = service.import(&BackupImportSpec {
+            source_name: "failure.browsbak".to_owned(),
+            password: password("wrong horse battery"),
+        });
+        assert_eq!(wrong.unwrap_err().kind, PortErrorKind::WrongPassword);
+        let archive = service.archive_path("failure.browsbak").unwrap();
+        let mut bytes = fs::read(&archive).unwrap();
+        let last = bytes.len() - 1;
+        bytes[last] ^= 0x55;
+        fs::write(&archive, bytes).unwrap();
+        let tampered_result = service.import(&BackupImportSpec {
+            source_name: "failure.browsbak".to_owned(),
+            password: password("correct horse battery"),
+        });
+        assert_eq!(tampered_result.unwrap_err().kind, PortErrorKind::Tampered);
+        let staging = root.join("backups").join("restore-staging");
+        assert!(fs::read_dir(staging).unwrap().next().is_none());
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn archive_names_and_proxy_credentials_are_rejected() {
+        let (service, root) = service("validation");
+        assert!(service.list_archives().is_ok());
+        assert!(service.archive_size("..\\escape.browsbak").is_err());
+        let result = service.export(&BackupExportSpec {
+            destination_name: "credentials.browsbak".to_owned(),
+            profile: profile(),
+            password: password("correct horse battery"),
+            include_proxy_credential: true,
+        });
+        assert_eq!(
+            result.unwrap_err().kind,
+            PortErrorKind::CapabilityUnsupported
+        );
+        let _ = fs::remove_dir_all(root);
+    }
 }

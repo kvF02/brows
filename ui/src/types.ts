@@ -258,9 +258,10 @@ export interface CommandMap {
   "diagnostic.run": { params: { profileId: string }; result: DiagnosticReport };
   "backup.list": { params: Record<string, never>; result: BackupJob[] };
   "backup.export": {
-    params: { profileId: string; destinationName: string; includeProxySecret: boolean };
+    params: { profileId: string; destinationName: string; includeProxySecret: boolean; password: string };
     result: BackupJob;
   };
+  "backup.import": { params: { sourceName: string; password: string }; result: Profile };
   "runtime.list": { params: Record<string, never>; result: BrowserRuntime[] };
   "settings.get": { params: Record<string, never>; result: Settings };
   "settings.update": { params: Partial<Settings>; result: Settings };
@@ -313,6 +314,7 @@ export interface ApiClient {
     includeProxySecret: boolean,
     password: string,
   ): Promise<BackupJob>;
+  importBackup(sourceName: string, password: string): Promise<Profile>;
   listRuntimes(): Promise<BrowserRuntime[]>;
   getSettings(): Promise<Settings>;
   updateSettings(changes: Partial<Settings>): Promise<Settings>;
