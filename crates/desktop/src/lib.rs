@@ -9,10 +9,10 @@ mod supervisor;
 use commands::{
     backup_cancel, backup_cleanup, backup_export, backup_import, backup_list, diagnostic_list,
     diagnostic_run, fingerprint_preview, legacy_migration_execute, legacy_migration_inspect,
-    legacy_migration_list, legacy_migration_rollback, list_runtimes, morelogin_import,
-    morelogin_preview, probe_runtime_fingerprint, profile_archive, profile_clone, profile_create,
-    profile_get, profile_list, profile_restore, profile_update, proxy_list, proxy_remove,
-    proxy_save, proxy_test, runtime_install_cancel, runtime_install_official,
+    legacy_migration_list, legacy_migration_rollback, list_runtimes, measure_runtime_fingerprint,
+    morelogin_import, morelogin_preview, probe_runtime_fingerprint, profile_archive, profile_clone,
+    profile_create, profile_get, profile_list, profile_restore, profile_update, proxy_list,
+    proxy_remove, proxy_save, proxy_test, runtime_install_cancel, runtime_install_official,
     runtime_install_status, session_cancel_queued, session_launch, session_list, session_stop,
     settings_get, settings_update,
 };
@@ -80,6 +80,7 @@ pub fn run() {
             session_list,
             fingerprint_preview,
             probe_runtime_fingerprint,
+            measure_runtime_fingerprint,
             list_runtimes,
             runtime_install_official,
             runtime_install_status,

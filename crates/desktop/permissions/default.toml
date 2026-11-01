@@ -178,10 +178,22 @@ identifier = "allow-runtime-install-cancel"
 description = "Cancel an official browser installation before package publication."
 commands = { allow = ["runtime_install_cancel"] }
 
+[[permission]]
+identifier = "allow-probe-runtime-fingerprint"
+description = "Probe fingerprint extension loading with an owned temporary profile."
+commands = { allow = ["probe_runtime_fingerprint"] }
+
+[[permission]]
+identifier = "allow-measure-runtime-fingerprint"
+description = "Measure two fixed temporary fingerprint profiles without user paths or URLs."
+commands = { allow = ["measure_runtime_fingerprint"] }
+
 # Default permission set: auto-allowed for all capabilities.
 [default]
 description = "Default permissions for the Brows app — all custom commands."
 permissions = [
+  "allow-probe-runtime-fingerprint",
+  "allow-measure-runtime-fingerprint",
   "allow-runtime-install-official",
   "allow-runtime-install-status",
   "allow-runtime-install-cancel",

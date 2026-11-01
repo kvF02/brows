@@ -8,12 +8,12 @@
 | 克隆指纹身份 | 已修复沿用原 seed 的问题。新副本分配新 seed，保留其他配置，不修改原环境；重复读取保持稳定。备份恢复继续保留备份内 seed。 |
 | 扩展产物隔离 | 按环境与完整内容哈希分目录，不覆盖旧产物；自动测试覆盖不同环境、配置变更和损坏检测。完整目录原子发布仍待完善。 |
 | 指纹扩展真实加载 | 现有探针与双层启动门禁已实现。2026-10-06 的签名 Chrome 154 实测返回 Unsupported，已接入官方 Chrome for Testing 安装与自动探针入口；尚未在本次 Linux 环境新增 Windows 实机通过记录。 |
-| 页面 API 行为 | Navigator/Screen/WebGL 声明、Canvas 读取/导出和可选离线 Audio 的自动回归已实现；不等于实际 GPU 或设备替换。 |
+| 页面 API 行为 | 已实现双临时样本真实观测入口，对比配置、主页面 / iframe、HTTP 头、Canvas / 离线 Audio 重复与重启稳定性、Cookie / LocalStorage；Windows 真实运行结果尚待执行。 |
 | 全链路一致性 | UA-CH、worker、真实时区、字体和 TLS/HTTP2 尚未统一。不同 seed 也可能选择相同 GPU 候选。 |
 | 网络隔离 | 每会话代理 Broker 和凭据保护已实现；HTTP/SOCKS5 可用。HTTPS 上游代理、DNS/WebRTC 的完整泄漏实测尚待实现。未绑定代理时可共享出口 IP。 |
 
 因此，独立 Cookie 和登录状态、不同 seed、不同配置值、不同物理设备指纹，是需要分别验收的能力。当前已完成前两类的基础与回归；页面实测和完整设备一致性仍有缺口。不承诺检测站通过率。
 
-已实现固定官方来源的 Chrome for Testing 安装、签名/实际版本校验、多版本保存和包文件完整性检查，详见 [运行时安装与验收](runtime-installation.md)。下一步在 Windows 执行新安装入口的实机探针验收，再在两个新环境执行同一离线观测页，比较首次脚本、iframe/worker、UA/UA-CH、Canvas/Audio 重复读取与重启稳定性，并记录网络出口。受支持的观测通过前，继续拒绝 SeedableNoise 启动，不降低沙箱或运行时信任要求。
+已实现固定官方来源的 Chrome for Testing 安装、签名/实际版本校验、多版本保存和包文件完整性检查，详见 [运行时安装与验收](runtime-installation.md)。双临时样本观测页与报告已接入设置和 Windows 显式验收入口，详见 [双临时环境指纹实测](fingerprint-measurement.md)。下一步在 Windows 运行实机入口并保存报告，再补可见窗口、十环境压力、强杀和网络出口验收。受支持的观测通过前，继续拒绝 SeedableNoise 启动，不降低沙箱或运行时信任要求。
 
 当前环境为 Linux 云工作区。本次验证以 Rust/JavaScript 自动测试和 Windows 目标交叉检查为主，没有新增 Windows 真实浏览器通过记录。覆盖细节见 [指纹设计](fingerprint-design.md)，可靠性进度见 [可靠性里程碑](reliability-milestone.md)。

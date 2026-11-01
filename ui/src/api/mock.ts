@@ -17,6 +17,7 @@ import {
   type ProxyInput,
   type ProxySummary,
   type RuntimeFingerprintProbeResult,
+  type FingerprintMeasurementReport,
   type RuntimeInstallStatus,
   type Settings,
   type SessionSummary,
@@ -130,6 +131,9 @@ export class MockApiClient implements ApiClient {
     throw new ApiError("CAPABILITY_UNSUPPORTED", "官方浏览器安装仅在 Windows 桌面版可用");
   }
   async cancelRuntimeInstall(): Promise<void> { throw new ApiError("NOT_FOUND", "没有正在执行的运行时安装任务"); }
+  async measureRuntimeFingerprint(_runtimeId: string): Promise<FingerprintMeasurementReport> {
+    throw new ApiError("CAPABILITY_UNSUPPORTED", "浏览器预览不能执行真实双环境实测");
+  }
   async probeRuntimeFingerprint(_runtimeId: string): Promise<RuntimeFingerprintProbeResult> {
     throw new ApiError("CAPABILITY_UNSUPPORTED", "网页版为模拟数据，不能实测浏览器指纹扩展支持。请在桌面版设置中执行检测。");
   }

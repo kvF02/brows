@@ -78,7 +78,7 @@ Chromium 参数实施，指纹扩展不自行更改 TURN/ICE 行为。
 也未恢复注入。因此当前系统 Chrome 不能被标记为 SeedableNoise 可用。
 后续扩展探针的 frame/API 覆盖并引入可信且实测支持的内核。不要通过关闭
 Chromium sandbox、长期锁定旧版或信任未知下载源来规避问题。受控 Chromium/Chrome
-for Testing 的支持路线仍需可信发布者、安装来源与更新校验设计。
+for Testing 已有固定来源、签名、版本和完整包校验，支持结果仍需实测。
 
 ## 测试与验收
 
@@ -106,12 +106,14 @@ Unsupported，拒绝 SeedableNoise，现有环境及会话未修改，临时目�
 
 P0：官方 Chrome for Testing 的固定来源安装入口、多版本保存、签名/实际版本和完整
 文件校验已落地，安装后自动执行现有探针。需要在 Windows 运行实际安装与探针验收，
-再完善双环境与可见窗口的观测。当前系统 Chrome 的历史探针未通过，不能据此推断
+双临时环境观测和报告已实现，可见窗口验收待完成。当前系统 Chrome 的历史探针未通过，不能据此推断
 新安装的 Chrome for Testing 结果；没有实机正向记录前不将本阶段视为完整可用。
 操作与手动 CI 入口见 [运行时安装与验收](runtime-installation.md)。
 
-P1：增加 session 内只读观测报告，区分“配置、实测、共享、未覆盖”，覆盖
-UA/UA-CH 请求头、iframe/worker、窗口/屏幕与语言差异；逐步统一 Client Hints。
+P1：已提供两个临时样本的只读报告，区分“配置、实测、共享、未覆盖”，记录
+UA/UA-CH 请求头、iframe/worker、窗口/屏幕、语言、Canvas/Audio、存储与重启结果。
+不接触已有登录会话；详见 [实测设计与验收](fingerprint-measurement.md)。下一步执行
+Windows 验收，逐步统一 Client Hints 与 Worker；不将未覆盖字段的相等值判为通过。
 
 P2：真实时区机制及多 API 一致性。需要评估 page、worker、Intl/Date 与网络信号的
 一致实现，不能仅增加一个 getter 便宣称完整支持。

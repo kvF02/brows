@@ -426,8 +426,15 @@ fn installation_preserves_system_channel_and_refuses_catalog_downgrades() {
 }
 
 #[test]
-#[ignore = "requires Windows; downloads official Chrome for Testing and runs its real isolated fingerprint probe"]
+#[ignore = "requires Windows; downloads official Chrome for Testing and measures two real temporary profiles"]
 fn official_windows_install_and_probe_smoke() {
+    let artifact =
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fingerprint-measurement.json");
+    match fs::remove_file(&artifact) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => panic!("cannot remove earlier measurement report: {error}"),
+    }
     let (installer, root) = fixture("official-smoke");
     let result = installer
         .install_stable()
@@ -447,6 +454,23 @@ fn official_windows_install_and_probe_smoke() {
         FingerprintSupport::Supported,
         "{}",
         repeat.detail
+    );
+    let report = brows_application::FingerprintMeasurement::measure_pair(
+        &crate::LocalFingerprintMeasurement::new(installer.runtime.clone()),
+        &result.build.id,
+    )
+    .expect("real two-profile observation must complete without configuration fallbacks");
+    fs::create_dir_all(artifact.parent().unwrap()).unwrap();
+    fs::write(&artifact, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    assert_eq!(report.samples.len(), 2);
+    assert!(report
+        .samples
+        .iter()
+        .all(|sample| sample.observations.len() == 2));
+    assert!(
+        report.covered_checks_passed,
+        "covered observations failed; see {}",
+        artifact.display()
     );
     eprintln!(
         "Official runtime {} / {}: {}",

@@ -19,6 +19,10 @@ real-browser smoke test. This is not a complete anti-detect implementation;
 no detection-site pass rate is promised. The default `SystemNative` persona
 remains truthful. See the
 current [fingerprint design and acceptance plan](docs/fingerprint-design.md).
+Settings also provides a [two temporary profile measurement](docs/fingerprint-measurement.md)
+after the basic probe passes, comparing actual page/frame values, local request
+headers, Canvas/Audio and storage across a normal restart. Windows execution
+remains a separate acceptance step.
 
 ## Current Status
 
@@ -34,6 +38,8 @@ The repository contains the first implementation milestone:
 - an explicit official Chrome for Testing stable installer with fixed HTTPS
   origins, Windows publisher/version checks, immutable packages, full file hashes,
   restart admission and automatic local fingerprint probing;
+- a local two-profile observation report with synchronized sampling, normal-exit
+  restart checks and explicit uncovered fields, plus a Windows CI JSON artifact;
 - a Chromium runtime adapter that confines paths, verifies the Windows
   Authenticode signer against the `Google LLC` allowlist and rechecks SHA-256
   before every launch;

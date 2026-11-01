@@ -175,6 +175,14 @@ pub trait BrowserRuntime: fmt::Debug + Send + Sync {
     }
 }
 
+/// Runs fixed, isolated samples; no caller-supplied URLs, paths or saved profiles.
+pub trait FingerprintMeasurement: fmt::Debug + Send + Sync {
+    fn measure_pair(
+        &self,
+        build_id: &BrowserBuildId,
+    ) -> PortResult<brows_contracts::FingerprintMeasurementReportDto>;
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FingerprintProbeResult {
     pub build: BrowserBuild,

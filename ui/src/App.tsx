@@ -1,4 +1,5 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { RuntimeMeasurementReport } from "./RuntimeMeasurementReport";
 import { listen } from "@tauri-apps/api/event";
 import { createApiClient } from "./api/client";
 import { isTauriRuntime } from "./api/tauri";
@@ -13,6 +14,7 @@ import {
   type DiagnosticReport,
   type EnvironmentPreset,
   type FingerprintPreview,
+  type FingerprintMeasurementReport,
   type FingerprintScope,
   type LegacyMigrationInspection,
   type LegacyMigrationRecord,
@@ -1744,6 +1746,8 @@ function RuntimeFingerprintRow({ api, runtime, onRefresh, onError, onNotice }: {
   onNotice(message: string): void;
 }) {
   const [probing, setProbing] = useState(false);
+  const [measuring, setMeasuring] = useState(false);
+  const [measurement, setMeasurement] = useState<FingerprintMeasurementReport>();
   const [detail, setDetail] = useState("");
   const [probeError, setProbeError] = useState("");
   const mounted = useRef(true);
@@ -1753,8 +1757,9 @@ function RuntimeFingerprintRow({ api, runtime, onRefresh, onError, onNotice }: {
   }, []);
 
   const probe = async () => {
-    if (probing || !runtime.trusted) return;
+    if (probing || measuring || !runtime.trusted) return;
     setProbing(true);
+    setMeasurement(undefined);
     setDetail("");
     setProbeError("");
     try {
@@ -1776,6 +1781,23 @@ function RuntimeFingerprintRow({ api, runtime, onRefresh, onError, onNotice }: {
     }
   };
 
+  const measure = async () => {
+    if (probing || measuring || !runtime.trusted || runtime.fingerprintSupport !== "supported") return;
+    setMeasuring(true); setMeasurement(undefined); setProbeError(""); setDetail("");
+    try {
+      const result = await api.measureRuntimeFingerprint(runtime.id);
+      if (mounted.current) {
+        setMeasurement(result);
+        onNotice(result.coveredChecksPassed ? "双临时样本覆盖项通过，未覆盖维度请查看报告。" : "部分实测未通过，此运行时的指纹能力已停用。请查看报告。");
+      }
+      await onRefresh();
+    } catch (cause) {
+      const message = getErrorMessage(cause);
+      if (mounted.current) { setProbeError(message); onError(message); }
+      await onRefresh();
+    } finally { if (mounted.current) setMeasuring(false); }
+  };
+
   return (
     <div>
       <div className="runtime-row">
@@ -1783,8 +1805,12 @@ function RuntimeFingerprintRow({ api, runtime, onRefresh, onError, onNotice }: {
         <div><strong>{runtime.name}</strong><small>{runtime.version} · {runtime.channel}</small><small>{fingerprintSupportLabel(runtime)}</small></div>
         <span className={`runtime-trust ${runtime.trusted ? "trusted" : "untrusted"}`}>{runtime.trusted ? "签名已校验" : "未登记"}</span>
       </div>
-      {runtime.trusted && <button className="secondary-button full" type="button" disabled={probing} aria-busy={probing} onClick={() => void probe()}>{probing ? "正在检测指纹加载…" : `检测 ${runtime.name} 指纹支持`}</button>}
+      {runtime.trusted && <button className="secondary-button full" type="button" disabled={probing || measuring} aria-busy={probing} onClick={() => void probe()}>{probing ? "正在检测指纹加载…" : `检测 ${runtime.name} 指纹支持`}</button>}
       {probing && <div className="form-info" role="status">正在启动独立临时浏览器进行本地探针检测，不使用已保存环境或访问外部检测站。</div>}
+      {runtime.trusted && <button className="secondary-button full" type="button" disabled={probing || measuring || runtime.fingerprintSupport !== "supported"} aria-busy={measuring} onClick={() => void measure()}>{measuring ? "正在实测并重启两个临时环境…" : "双临时环境指纹实测"}</button>}
+      <small>先通过指纹加载检测，再检查两个临时样本的实际读数、存储隔离和重启稳定性。约 1 分钟。</small>
+      {measuring && <div className="form-info" role="status">两个全新临时样本同时启动、正常退出后重启；不接触已有登录环境，不访问外部检测站。离开本页后任务仍会完成。</div>}
+      {measurement && <RuntimeMeasurementReport report={measurement} />}
       {detail && <div className="form-info" role="status">{detail}</div>}
       {probeError && <div className="form-error" role="alert">{probeError}</div>}
     </div>

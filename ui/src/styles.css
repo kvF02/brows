@@ -1453,3 +1453,15 @@ select.text-input { cursor: pointer; }
 .preview-warning li {
   color: var(--text);
 }
+
+.measurement-report { margin: 12px 0 24px; overflow-wrap: anywhere; }
+.measurement-report details { margin-top: 12px; }
+.measurement-report summary { cursor: pointer; font-weight: 600; }
+.measurement-table { overflow-x: auto; margin-top: 8px; }
+.measurement-table table { width: 100%; min-width: 650px; table-layout: fixed; border-collapse: collapse; font-size: 12px; }
+.measurement-table th, .measurement-table td { padding: 8px; vertical-align: top; border-bottom: 1px solid var(--border, #dce2eb); text-align: left; }
+.measurement-table th:first-child { width: 95px; }
+.measurement-check { border-bottom: 1px solid var(--border, #dce2eb); padding: 10px 0; font-size: 12px; }
+.measurement-check small { display: block; margin-top: 4px; }
+.measurement-check p { margin: 5px 0; }
+.measurement-report pre { max-height: 360px; overflow: auto; font-size: 11px; white-space: pre-wrap; }

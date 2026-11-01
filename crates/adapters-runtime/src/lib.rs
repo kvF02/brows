@@ -33,6 +33,8 @@ mod official;
 mod version;
 pub use official::{OfficialRuntimeInstaller, RuntimeInstallStatus};
 mod fingerprint_probe;
+mod measurement;
+pub use measurement::LocalFingerprintMeasurement;
 mod process;
 use process::BrowserChild;
 

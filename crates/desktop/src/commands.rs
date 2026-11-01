@@ -506,9 +506,34 @@ pub(crate) async fn runtime_install_official(
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct FingerprintProbeRequest {
     runtime_id: String,
+}
+
+#[tauri::command]
+pub(crate) async fn measure_runtime_fingerprint(
+    state: State<'_, AppState>,
+    request: FingerprintProbeRequest,
+) -> IpcResult<brows_contracts::FingerprintMeasurementReportDto> {
+    let id =
+        brows_domain::BrowserBuildId::new(request.runtime_id).map_err(ErrorDto::from_domain)?;
+    let observer = state
+        .fingerprint_measurement
+        .clone()
+        .ok_or_else(|| ErrorDto {
+            code: ErrorCode::CapabilityUnsupported,
+            message: "双临时环境实测仅在桌面运行时可用".into(),
+            violations: Vec::new(),
+        })?;
+    tauri::async_runtime::spawn_blocking(move || observer.measure_pair(&id))
+        .await
+        .map_err(|_| ErrorDto {
+            code: ErrorCode::Internal,
+            message: "双临时环境实测任务未能完成".into(),
+            violations: Vec::new(),
+        })?
+        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())
 }
 
 #[tauri::command]
@@ -1118,6 +1143,27 @@ pub(crate) async fn session_list(state: State<'_, AppState>) -> IpcResult<Vec<Se
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn fingerprint_probe_and_measurement_accept_only_a_runtime_identity() {
+        assert!(serde_json::from_value::<super::FingerprintProbeRequest>(
+            serde_json::json!({"runtimeId":"cft-current"})
+        )
+        .is_ok());
+        for field in [
+            "url",
+            "executablePath",
+            "profileId",
+            "userDataDir",
+            "persona",
+        ] {
+            let mut request = serde_json::json!({"runtimeId":"cft-current"});
+            request[field] = serde_json::json!("untrusted input");
+            assert!(
+                serde_json::from_value::<super::FingerprintProbeRequest>(request).is_err(),
+                "{field}"
+            );
+        }
+    }
     #[test]
     fn backup_polling_and_cancellation_remain_available_during_blocking_work() {
         use crate::backup_jobs::BackupJobs;

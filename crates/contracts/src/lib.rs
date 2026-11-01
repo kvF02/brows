@@ -1219,6 +1219,148 @@ pub struct FingerprintProbeResultDto {
     pub detail: String,
 }
 
+/// Local-only samples, never observations from a saved or logged-in profile.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FingerprintMeasurementReportDto {
+    pub schema_version: u32,
+    pub runtime_id: String,
+    pub runtime_version: String,
+    pub runtime_sha256: String,
+    pub measured_at_ms: u64,
+    pub mode: String,
+    pub covered_checks_passed: bool,
+    pub samples: Vec<FingerprintSampleDto>,
+    pub checks: Vec<FingerprintMeasurementCheckDto>,
+    pub limitations: Vec<String>,
+    pub external_endpoints: Vec<String>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FingerprintSampleDto {
+    pub label: String,
+    pub configured: FingerprintSampleConfigDto,
+    pub observations: Vec<FingerprintObservationDto>,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FingerprintSampleConfigDto {
+    pub seed: String,
+    pub user_agent: String,
+    pub platform: String,
+    pub languages: Vec<String>,
+    pub concurrency: u32,
+    pub memory: f64,
+    pub screen_width: u32,
+    pub screen_height: u32,
+    pub color_depth: u32,
+    pub window_width: u32,
+    pub window_height: u32,
+    pub webgl_vendor: String,
+    pub webgl_renderer: String,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FingerprintObservationDto {
+    pub round: u32,
+    pub page: FingerprintSignalsDto,
+    pub iframe: Option<FingerprintSignalsDto>,
+    pub worker: Option<FingerprintSignalsDto>,
+    pub audio: Option<FingerprintAudioDto>,
+    pub network: FingerprintHeadersDto,
+    pub storage: FingerprintStorageDto,
+}
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FingerprintSignalsDto {
+    pub user_agent: Option<String>,
+    pub platform: Option<String>,
+    pub language: Option<String>,
+    pub languages: Vec<String>,
+    pub concurrency: Option<u32>,
+    pub memory: Option<f64>,
+    pub memory_type: String,
+    pub touch_points: Option<u32>,
+    pub screen_width: Option<u32>,
+    pub screen_height: Option<u32>,
+    pub color_depth: Option<u32>,
+    pub inner_width: Option<u32>,
+    pub inner_height: Option<u32>,
+    pub outer_width: Option<u32>,
+    pub outer_height: Option<u32>,
+    pub pixel_ratio: Option<f64>,
+    pub webgl_vendor: Option<String>,
+    pub webgl_renderer: Option<String>,
+    pub timezone: Option<String>,
+    pub client_hints: Option<FingerprintClientHintsDto>,
+    pub canvas: Option<FingerprintCanvasDto>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FingerprintClientHintsDto {
+    pub brands: Vec<String>,
+    pub platform: Option<String>,
+    pub mobile: Option<bool>,
+    pub architecture: Option<String>,
+    pub bitness: Option<String>,
+    pub platform_version: Option<String>,
+    pub full_version: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FingerprintCanvasDto {
+    pub read_hash: String,
+    pub repeat_read_hash: String,
+    pub after_export_read_hash: String,
+    pub export_hash: Option<String>,
+    pub repeat_export_hash: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FingerprintAudioDto {
+    pub first_hash: String,
+    pub repeat_hash: String,
+    pub first_event_hash: String,
+    pub repeat_event_hash: String,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct FingerprintHeadersDto {
+    pub user_agent: Option<String>,
+    pub accept_language: Option<String>,
+    pub sec_ch_ua: Option<String>,
+    pub sec_ch_ua_platform: Option<String>,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FingerprintStorageDto {
+    pub local_before: String,
+    pub local_after: String,
+    pub cookie_before: String,
+    pub cookie_after: String,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FingerprintMeasurementStatusDto {
+    Pass,
+    Fail,
+    Observed,
+    NotCovered,
+    NotMeasured,
+}
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FingerprintMeasurementCheckDto {
+    pub key: String,
+    pub label: String,
+    pub scope: DiagnosticScopeDto,
+    pub required: bool,
+    pub status: FingerprintMeasurementStatusDto,
+    pub expected: Option<String>,
+    pub observed: Option<String>,
+    pub explanation: String,
+}
+
 impl From<&domain::BrowserBuild> for BrowserRuntimeDto {
     fn from(value: &domain::BrowserBuild) -> Self {
         Self {

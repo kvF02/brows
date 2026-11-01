@@ -46,3 +46,21 @@ test("browser preview does not claim real installation or probe support", async 
   await assert.rejects(api.installOfficialRuntime(), (error) => error.code === "CAPABILITY_UNSUPPORTED");
   await assert.rejects(api.cancelRuntimeInstall(), (error) => error.code === "NOT_FOUND");
 });
+
+test("dual temporary profile measurement forwards only the runtime ID and preserves observations", async () => {
+  const report = { schemaVersion: 1, runtimeId: "cft-current", mode: "headless", coveredChecksPassed: false,
+    samples: [{ label: "A", configured: { memory: 0.5 }, observations: [{ page: { memory: 8, memoryType: "number" }, worker: null }] }],
+    checks: [{ key: "a.page", status: "fail" }, { key: "a.worker", status: "not_measured" }], limitations: ["visible windows not measured"] };
+  const api = new TauriApiClient({ invoke: async (handler, args) => {
+    assert.equal(handler, "measure_runtime_fingerprint"); assert.deepEqual(plain(args), { request: { runtimeId: "cft-current" } }); return report;
+  } });
+  assert.deepEqual(plain(await api.measureRuntimeFingerprint("cft-current")), report);
+});
+
+test("measurement errors and preview mode never produce a fabricated report", async () => {
+  for (const code of ["CAPABILITY_UNSUPPORTED", "OPERATION_CANCELLED", "RUNTIME_UNTRUSTED", "INTERNAL"]) {
+    const api = new TauriApiClient({ invoke: async () => { throw { code, message: "measurement unavailable" }; } });
+    await assert.rejects(api.measureRuntimeFingerprint("cft-current"), (error) => error.code === code);
+  }
+  await assert.rejects(new MockApiClient().measureRuntimeFingerprint("cft-current"), (error) => error.code === "CAPABILITY_UNSUPPORTED");
+});

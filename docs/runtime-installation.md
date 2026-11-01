@@ -25,7 +25,7 @@
 
 下载和解包先进入 `.install-<随机 ID>`，验证完成后改名发布。取消或失败只清理本次专用暂存；重启重试清理同命名空间，保留链接、未知顶层内容和无法安全判断的布局。已发布包不因探针失败而删除，仍可在设置中重新检测。安装目录最多保留 64 项（包括待检查暂存），达到上限时拒绝新增，需先检查未使用版本。此流程不提供断点续传、旧版本自动删除或无人值守更新。
 
-退出时先停止接收安装和探针任务，取消尚未提交的安装，等待已开始的工作释放资源后再释放数据目录锁。探针使用 Windows kill-on-close Job Object 回收进程树；同一构建只运行一个探针，整个管理器最多同时运行两个探针。会话启动、停止和查询移入阻塞线程池，完整包校验不在 Tauri 主线程执行。证书验证和文件 OS 调用仍需等待系统返回。
+退出时先停止接收安装和探针任务，取消尚未提交的安装，等待已开始的工作释放资源后再释放数据目录锁。探针使用 Windows kill-on-close Job Object 回收进程树；同一构建只运行一个探针任务，整个管理器最多同时运行两个临时浏览器；双样本观测独占两个名额。会话启动、停止和查询移入阻塞线程池，完整包校验不在 Tauri 主线程执行。证书验证和文件 OS 调用仍需等待系统返回。
 
 ## 验证记录与实机入口
 
@@ -37,10 +37,10 @@ Windows 实机执行：
 cargo +1.97.1 test --locked -p brows-adapters-runtime official_windows_install_and_probe_smoke -- --ignored --nocapture
 ```
 
-该显式测试下载当时的官方稳定版到临时目录，检查真实签名与版本，连续执行两次本地指纹探针，并要求 Supported；失败会保留日志中的原因。默认测试不会下载浏览器。
+该显式测试下载当时的官方稳定版到临时目录，检查真实签名与版本，连续执行两次本地指纹探针并要求 Supported，再执行两临时样本的页面 / iframe / HTTP 头 / Canvas / Audio / 存储与重启观测。完整报告写入 `target/fingerprint-measurement.json` 后才断言覆盖项通过；失败会保留已生成报告及日志原因。默认测试不会下载浏览器。
 
-本轮通过 163 项可移植 Rust、21 项桌面和 30 项 JavaScript 自动测试，前端构建、完整 workspace 严格 Clippy 与运行时的 Windows MSVC 目标交叉 Clippy 通过。另有 3 项真实浏览器验收需显式运行，不计为本次实机通过记录。
+本轮通过 177 项可移植 Rust、22 项桌面和 35 项 JavaScript 自动测试，前端构建、完整 workspace 严格 Clippy 与运行时的 Windows MSVC 目标交叉 Clippy 通过。真实浏览器验收及 Windows 专用测试需在相应平台显式执行，不计为本次实机通过记录。
 
-GitHub Actions 的 Development checks 增加手动运行入口：选择 `official_runtime=true` 后，独立 Windows job 执行上述验收。该 job 尚未在本次会话触发，不能将新增 CI 配置视为测试已经通过。
+GitHub Actions 的 Development checks 增加手动运行入口：选择 `official_runtime=true` 后，独立 Windows job 执行上述验收并上传已生成的 JSON 报告。该 job 尚未在本次会话触发，不能将新增 CI 配置视为测试已经通过。
 
-真实加载通过后，仍需对两个环境执行可见窗口、iframe/worker、UA-CH、Canvas/Audio 稳定性与网络出口观测，才能提高独立指纹功能的质量结论。
+双样本观测的具体判定与边界见 [实测说明](fingerprint-measurement.md)。真实加载和 headless 观测通过后，仍需执行可见窗口、十环境压力与网络泄漏验收；Worker、UA-CH 和时区等未覆盖项继续明确列示。

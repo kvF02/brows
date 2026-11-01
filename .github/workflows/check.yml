@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
     inputs:
       official_runtime:
-        description: "Download official Windows Chrome for Testing and verify real extension injection"
+        description: "Install official Windows Chrome for Testing and measure two temporary fingerprint profiles"
         required: false
         default: false
         type: boolean
@@ -63,3 +63,9 @@ jobs:
       # Explicit opt-in: contacts the fixed official catalog and Google storage,
       # installs into an isolated temporary directory, and launches headless Chrome.
       - run: cargo +1.97.1 test --locked -p brows-adapters-runtime official_windows_install_and_probe_smoke -- --ignored --nocapture
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-fingerprint-measurement
+          path: target/fingerprint-measurement.json
+          if-no-files-found: warn

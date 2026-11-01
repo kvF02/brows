@@ -80,6 +80,33 @@ export interface RuntimeFingerprintProbeResult {
   detail: string;
 }
 
+export interface FingerprintSignals {
+  userAgent: string | null; platform: string | null; language: string | null; languages: string[];
+  concurrency: number | null; memory: number | null; memoryType: string; touchPoints: number | null;
+  screenWidth: number | null; screenHeight: number | null; colorDepth: number | null;
+  innerWidth: number | null; innerHeight: number | null; outerWidth: number | null; outerHeight: number | null; pixelRatio: number | null;
+  webglVendor: string | null; webglRenderer: string | null; timezone: string | null;
+  clientHints: { brands: string[]; platform: string | null; mobile: boolean | null; architecture: string | null; bitness: string | null; platformVersion: string | null; fullVersion: string | null } | null;
+  canvas: { readHash: string; repeatReadHash: string; afterExportReadHash: string; exportHash: string | null; repeatExportHash: string | null } | null;
+}
+export interface FingerprintObservation {
+  round: number; page: FingerprintSignals; iframe: FingerprintSignals | null; worker: FingerprintSignals | null;
+  audio: { firstHash: string; repeatHash: string; firstEventHash: string; repeatEventHash: string } | null;
+  network: { userAgent: string | null; acceptLanguage: string | null; secChUa: string | null; secChUaPlatform: string | null };
+  storage: { localBefore: string; localAfter: string; cookieBefore: string; cookieAfter: string };
+}
+export interface FingerprintMeasurementReport {
+  schemaVersion: number; runtimeId: string; runtimeVersion: string; runtimeSha256: string; measuredAtMs: number; mode: string;
+  coveredChecksPassed: boolean;
+  samples: Array<{ label: string; configured: {
+    seed: string; userAgent: string; platform: string; languages: string[]; concurrency: number; memory: number;
+    screenWidth: number; screenHeight: number; colorDepth: number; windowWidth: number; windowHeight: number; webglVendor: string; webglRenderer: string;
+  }; observations: FingerprintObservation[] }>;
+  checks: Array<{ key: string; label: string; scope: "isolated" | "configurable" | "host_shared"; required: boolean;
+    status: "pass" | "fail" | "observed" | "not_covered" | "not_measured"; expected: string | null; observed: string | null; explanation: string }>;
+  limitations: string[]; externalEndpoints: string[];
+}
+
 export interface DiagnosticSummary {
   overall: "not-run" | "pass" | "warning" | "fail";
   checkedAt?: string;
@@ -325,6 +352,7 @@ export interface ApiClient {
   runtimeInstallStatus(): Promise<RuntimeInstallStatus>;
   installOfficialRuntime(): Promise<RuntimeFingerprintProbeResult>;
   cancelRuntimeInstall(): Promise<void>;
+  measureRuntimeFingerprint(runtimeId: string): Promise<FingerprintMeasurementReport>;
   probeRuntimeFingerprint(runtimeId: string): Promise<RuntimeFingerprintProbeResult>;
   /** List registered browser runtimes (auto-detected from the local system). */
   listRuntimes(): Promise<BrowserRuntime[]>;

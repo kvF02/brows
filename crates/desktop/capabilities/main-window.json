@@ -8,6 +8,8 @@
   },
   "windows": ["main"],
   "permissions": [
+    "allow-probe-runtime-fingerprint",
+    "allow-measure-runtime-fingerprint",
     "allow-runtime-install-official",
     "allow-runtime-install-status",
     "allow-runtime-install-cancel",

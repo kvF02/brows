@@ -6,7 +6,6 @@ use brows_application::{PortError, PortErrorKind, PortResult};
 use brows_domain::{BrowserBuild, BrowserBuildId, FingerprintSupport, ProfileId};
 use serde_json::Value;
 use std::{
-    collections::HashSet,
     fs::{self, File, OpenOptions},
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
@@ -28,9 +27,9 @@ const PRE_START: &str = "<pre id=\"brows-fingerprint-probe\">";
 static NEXT_PROBE: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Debug, Default)]
-struct ProbeState {
+pub(super) struct ProbeState {
     stopping: bool,
-    active: HashSet<BrowserBuildId>,
+    active: std::collections::HashMap<BrowserBuildId, usize>,
 }
 
 #[derive(Debug, Default)]
@@ -43,6 +42,21 @@ impl ProbeGate {
         Ok(ProbeLaunchGuard(self.state.lock().map_err(|_| {
             internal("fingerprint probe lock is poisoned")
         })?))
+    }
+    pub fn checkpoint(&self) -> PortResult<()> {
+        if self
+            .state
+            .lock()
+            .map_err(|_| internal("fingerprint probe lock is poisoned"))?
+            .stopping
+        {
+            Err(PortError::new(
+                PortErrorKind::Cancelled,
+                "管理器正在退出，临时指纹检测已停止",
+            ))
+        } else {
+            Ok(())
+        }
     }
     pub fn stop(&self) {
         self.state
@@ -65,7 +79,7 @@ impl ProbeGate {
 pub(super) struct ProbeLaunchGuard<'a>(std::sync::MutexGuard<'a, ProbeState>);
 impl ProbeLaunchGuard<'_> {
     pub fn contains(&self, id: &BrowserBuildId) -> bool {
-        self.0.stopping || self.0.active.contains(id)
+        self.0.stopping || self.0.active.contains_key(id)
     }
 }
 
@@ -76,6 +90,16 @@ pub(super) struct ProbeSlot<'a> {
 }
 impl<'a> ProbeSlot<'a> {
     pub fn acquire(slots: &'a ProbeGate, build_id: &BrowserBuildId) -> PortResult<Self> {
+        Self::weighted(slots, build_id, 1)
+    }
+    pub fn acquire_pair(slots: &'a ProbeGate, build_id: &BrowserBuildId) -> PortResult<Self> {
+        Self::weighted(slots, build_id, 2)
+    }
+    fn weighted(
+        slots: &'a ProbeGate,
+        build_id: &BrowserBuildId,
+        weight: usize,
+    ) -> PortResult<Self> {
         let mut state = slots
             .state
             .lock()
@@ -86,12 +110,14 @@ impl<'a> ProbeSlot<'a> {
                 "管理器正在退出，不再启动指纹探针",
             ));
         }
-        if state.active.len() >= 2 || !state.active.insert(build_id.clone()) {
+        if state.active.values().sum::<usize>() + weight > 2 || state.active.contains_key(build_id)
+        {
             return Err(PortError::new(
                 PortErrorKind::AlreadyExists,
                 "已有指纹探针正在执行，请稍后重试",
             ));
         }
+        state.active.insert(build_id.clone(), weight);
         Ok(Self {
             slots,
             build_id: build_id.clone(),
@@ -426,14 +452,14 @@ fn inspect_dump(output: &[u8], nonce: &str) -> PortResult<Vec<&'static str>> {
 }
 
 #[derive(Debug)]
-struct ProbeDirectory {
+pub(super) struct ProbeDirectory {
     root: PathBuf,
-    path: PathBuf,
+    pub path: PathBuf,
     nonce: String,
 }
 
 impl ProbeDirectory {
-    fn create(root: &Path) -> PortResult<Self> {
+    pub fn create(root: &Path) -> PortResult<Self> {
         if !reject_link(root)?.is_dir() {
             return Err(invalid_data("probe root is not a directory"));
         }
@@ -471,7 +497,7 @@ impl ProbeDirectory {
         Err(internal("cannot allocate unique probe directory"))
     }
 
-    fn cleanup(&self) -> PortResult<()> {
+    pub fn cleanup(&self) -> PortResult<()> {
         if self.path.parent() != Some(self.root.as_path())
             || self.path.file_name().and_then(|name| name.to_str()) != Some(self.nonce.as_str())
             || !self.nonce.starts_with("fingerprint-probe-")

@@ -177,10 +177,10 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Default permissions for the Brows app — all custom commands.\n#### This default permission set includes:\n\n- `allow-runtime-install-official`\n- `allow-runtime-install-status`\n- `allow-runtime-install-cancel`\n- `allow-backup-cancel`\n- `allow-backup-cleanup`\n- `allow-settings-get`\n- `allow-settings-update`\n- `allow-profile-list`\n- `allow-profile-get`\n- `allow-profile-create`\n- `allow-profile-update`\n- `allow-profile-clone`\n- `allow-profile-archive`\n- `allow-profile-restore`\n- `allow-proxy-list`\n- `allow-proxy-save`\n- `allow-proxy-remove`\n- `allow-proxy-test`\n- `allow-diagnostic-run`\n- `allow-diagnostic-list`\n- `allow-legacy-migration-inspect`\n- `allow-legacy-migration-execute`\n- `allow-legacy-migration-rollback`\n- `allow-legacy-migration-list`\n- `allow-morelogin-preview`\n- `allow-morelogin-import`\n- `allow-fingerprint-preview`\n- `allow-list-runtimes`\n- `allow-session-launch`\n- `allow-session-stop`\n- `allow-session-cancel-queued`\n- `allow-session-list`\n- `allow-backup-list`\n- `allow-backup-export`\n- `allow-backup-import`",
+          "description": "Default permissions for the Brows app — all custom commands.\n#### This default permission set includes:\n\n- `allow-probe-runtime-fingerprint`\n- `allow-measure-runtime-fingerprint`\n- `allow-runtime-install-official`\n- `allow-runtime-install-status`\n- `allow-runtime-install-cancel`\n- `allow-backup-cancel`\n- `allow-backup-cleanup`\n- `allow-settings-get`\n- `allow-settings-update`\n- `allow-profile-list`\n- `allow-profile-get`\n- `allow-profile-create`\n- `allow-profile-update`\n- `allow-profile-clone`\n- `allow-profile-archive`\n- `allow-profile-restore`\n- `allow-proxy-list`\n- `allow-proxy-save`\n- `allow-proxy-remove`\n- `allow-proxy-test`\n- `allow-diagnostic-run`\n- `allow-diagnostic-list`\n- `allow-legacy-migration-inspect`\n- `allow-legacy-migration-execute`\n- `allow-legacy-migration-rollback`\n- `allow-legacy-migration-list`\n- `allow-morelogin-preview`\n- `allow-morelogin-import`\n- `allow-fingerprint-preview`\n- `allow-list-runtimes`\n- `allow-session-launch`\n- `allow-session-stop`\n- `allow-session-cancel-queued`\n- `allow-session-list`\n- `allow-backup-list`\n- `allow-backup-export`\n- `allow-backup-import`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for the Brows app — all custom commands.\n#### This default permission set includes:\n\n- `allow-runtime-install-official`\n- `allow-runtime-install-status`\n- `allow-runtime-install-cancel`\n- `allow-backup-cancel`\n- `allow-backup-cleanup`\n- `allow-settings-get`\n- `allow-settings-update`\n- `allow-profile-list`\n- `allow-profile-get`\n- `allow-profile-create`\n- `allow-profile-update`\n- `allow-profile-clone`\n- `allow-profile-archive`\n- `allow-profile-restore`\n- `allow-proxy-list`\n- `allow-proxy-save`\n- `allow-proxy-remove`\n- `allow-proxy-test`\n- `allow-diagnostic-run`\n- `allow-diagnostic-list`\n- `allow-legacy-migration-inspect`\n- `allow-legacy-migration-execute`\n- `allow-legacy-migration-rollback`\n- `allow-legacy-migration-list`\n- `allow-morelogin-preview`\n- `allow-morelogin-import`\n- `allow-fingerprint-preview`\n- `allow-list-runtimes`\n- `allow-session-launch`\n- `allow-session-stop`\n- `allow-session-cancel-queued`\n- `allow-session-list`\n- `allow-backup-list`\n- `allow-backup-export`\n- `allow-backup-import`"
+          "markdownDescription": "Default permissions for the Brows app — all custom commands.\n#### This default permission set includes:\n\n- `allow-probe-runtime-fingerprint`\n- `allow-measure-runtime-fingerprint`\n- `allow-runtime-install-official`\n- `allow-runtime-install-status`\n- `allow-runtime-install-cancel`\n- `allow-backup-cancel`\n- `allow-backup-cleanup`\n- `allow-settings-get`\n- `allow-settings-update`\n- `allow-profile-list`\n- `allow-profile-get`\n- `allow-profile-create`\n- `allow-profile-update`\n- `allow-profile-clone`\n- `allow-profile-archive`\n- `allow-profile-restore`\n- `allow-proxy-list`\n- `allow-proxy-save`\n- `allow-proxy-remove`\n- `allow-proxy-test`\n- `allow-diagnostic-run`\n- `allow-diagnostic-list`\n- `allow-legacy-migration-inspect`\n- `allow-legacy-migration-execute`\n- `allow-legacy-migration-rollback`\n- `allow-legacy-migration-list`\n- `allow-morelogin-preview`\n- `allow-morelogin-import`\n- `allow-fingerprint-preview`\n- `allow-list-runtimes`\n- `allow-session-launch`\n- `allow-session-stop`\n- `allow-session-cancel-queued`\n- `allow-session-list`\n- `allow-backup-list`\n- `allow-backup-export`\n- `allow-backup-import`"
         },
         {
           "description": "Request cancellation before a backup operation commits.",
@@ -261,6 +261,12 @@
           "markdownDescription": "Enables the list_runtimes command without any pre-configured scope."
         },
         {
+          "description": "Measure two fixed temporary fingerprint profiles without user paths or URLs.",
+          "type": "string",
+          "const": "allow-measure-runtime-fingerprint",
+          "markdownDescription": "Measure two fixed temporary fingerprint profiles without user paths or URLs."
+        },
+        {
           "description": "Enables the morelogin_import command without any pre-configured scope.",
           "type": "string",
           "const": "allow-morelogin-import",
@@ -271,6 +277,12 @@
           "type": "string",
           "const": "allow-morelogin-preview",
           "markdownDescription": "Enables the morelogin_preview command without any pre-configured scope."
+        },
+        {
+          "description": "Probe fingerprint extension loading with an owned temporary profile.",
+          "type": "string",
+          "const": "allow-probe-runtime-fingerprint",
+          "markdownDescription": "Probe fingerprint extension loading with an owned temporary profile."
         },
         {
           "description": "Enables the profile_archive command without any pre-configured scope.",
