@@ -43,7 +43,7 @@ impl MigrationApplicationService {
         let _operation = self.lock_operations()?;
         validate_source_id(&source_profile_id)?;
         self.profiles.get(&profile_id)?;
-        self.ensure_stopped(&profile_id)?;
+        let _reservation = self.sessions.reserve_stopped_profile(&profile_id)?;
         Ok(self.migrator.inspect(&profile_id, &source_profile_id)?)
     }
 
@@ -55,7 +55,7 @@ impl MigrationApplicationService {
         let _operation = self.lock_operations()?;
         validate_source_id(&source_profile_id)?;
         self.profiles.get(&profile_id)?;
-        self.ensure_stopped(&profile_id)?;
+        let _reservation = self.sessions.reserve_stopped_profile(&profile_id)?;
         let inspection = self.migrator.inspect(&profile_id, &source_profile_id)?;
         if inspection.source_may_be_running {
             return Err(ApplicationError::new(
@@ -94,7 +94,7 @@ impl MigrationApplicationService {
                 "only completed migrations can be rolled back",
             ));
         }
-        self.ensure_stopped(&record.profile_id)?;
+        let _reservation = self.sessions.reserve_stopped_profile(&record.profile_id)?;
         let backup_key = record.backup_key.as_deref().ok_or_else(|| {
             ApplicationError::new(ErrorCode::InvalidProfileState, "migration has no backup")
         })?;
@@ -110,16 +110,6 @@ impl MigrationApplicationService {
             ));
         }
         Ok(self.records.list(limit)?)
-    }
-
-    fn ensure_stopped(&self, profile_id: &ProfileId) -> ApplicationResult<()> {
-        if self.sessions.has_active_profile(profile_id)? {
-            return Err(ApplicationError::new(
-                ErrorCode::ProfileLocked,
-                "stop the Brows profile before migration",
-            ));
-        }
-        Ok(())
     }
 
     fn lock_operations(&self) -> ApplicationResult<MutexGuard<'_, ()>> {

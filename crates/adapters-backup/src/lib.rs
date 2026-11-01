@@ -289,6 +289,19 @@ impl EncryptedBackupService {
     }
 }
 
+impl brows_application::RestorableBackupService for EncryptedBackupService {
+    fn install_restored_data(
+        &self,
+        id: &brows_domain::ProfileId,
+        staging: &Path,
+    ) -> PortResult<()> {
+        EncryptedBackupService::install_restored_data(self, id.as_str(), staging)
+    }
+    fn discard_restored_data(&self, staging: &Path) {
+        EncryptedBackupService::discard_restored_data(self, staging);
+    }
+}
+
 impl BackupService for EncryptedBackupService {
     fn inspect(&self, source_name: &str) -> PortResult<BackupInspection> {
         let mut input = File::open(self.archive_path(source_name)?)

@@ -9,8 +9,10 @@
 //! `delete` is idempotent. No credential material is formatted into errors or
 //! `Debug` output.
 
+#[cfg(any(windows, test))]
 use brows_domain::SecretRef;
 
+#[cfg(any(windows, test))]
 const TARGET_PREFIX: &str = "Brows/v1/";
 
 #[cfg(not(windows))]
@@ -28,6 +30,7 @@ pub use windows::WindowsCredentialStore;
 /// Credential target matching is case-insensitive on Windows. Full bytewise
 /// encoding avoids collisions between references that differ only by case,
 /// and prevents path separators or punctuation from gaining semantics.
+#[cfg(any(windows, test))]
 fn credential_target(reference: &SecretRef) -> String {
     const HEX: &[u8; 16] = b"0123456789ABCDEF";
 

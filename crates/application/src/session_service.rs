@@ -31,6 +31,8 @@ pub enum SessionLaunchOutcome {
 #[derive(Debug)]
 struct SessionRegistry {
     scheduler: SessionScheduler,
+    reservations: BTreeMap<SessionId, crate::ProfileReservation>,
+    shutting_down: bool,
     sessions: BTreeMap<SessionId, Session>,
     processes: BTreeMap<SessionId, BrowserProcess>,
     proxy_leases: BTreeMap<SessionId, ProxyLease>,
@@ -50,6 +52,7 @@ pub struct SessionApplicationService {
     clock: Arc<dyn Clock>,
     ids: Arc<dyn IdGenerator>,
     operations: Mutex<()>,
+    profile_operations: Arc<crate::ProfileOperations>,
     registry: Mutex<SessionRegistry>,
 }
 
@@ -57,6 +60,7 @@ impl SessionApplicationService {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         profiles: Arc<dyn ProfileRepository>,
+        profile_operations: Arc<crate::ProfileOperations>,
         compiler: Arc<LaunchPlanCompiler>,
         browsers: Arc<dyn BrowserRuntime>,
         proxies: Arc<dyn ProxyRuntime>,
@@ -67,6 +71,7 @@ impl SessionApplicationService {
     ) -> ApplicationResult<Self> {
         Ok(Self {
             profiles,
+            profile_operations,
             compiler,
             browsers,
             proxies,
@@ -76,6 +81,8 @@ impl SessionApplicationService {
             operations: Mutex::new(()),
             registry: Mutex::new(SessionRegistry {
                 scheduler: SessionScheduler::new(max_concurrent_sessions)?,
+                reservations: BTreeMap::new(),
+                shutting_down: false,
                 sessions: BTreeMap::new(),
                 processes: BTreeMap::new(),
                 proxy_leases: BTreeMap::new(),
@@ -86,6 +93,25 @@ impl SessionApplicationService {
     pub fn launch(&self, request: SessionLaunchRequest) -> ApplicationResult<SessionLaunchOutcome> {
         let _operation = self.lock_operations()?;
         let profile_id = request.profile_id.try_into()?;
+        {
+            let registry = self.lock_registry()?;
+            if registry.shutting_down {
+                return Err(ApplicationError::new(
+                    ErrorCode::InvalidProfileState,
+                    "管理器正在退出",
+                ));
+            }
+            if registry.sessions.values().any(|s| {
+                s.profile_id == profile_id
+                    && (s.state.is_active() || s.state == SessionState::Queued)
+            }) {
+                return Err(ApplicationError::new(
+                    ErrorCode::AlreadyExists,
+                    "profile already scheduled",
+                ));
+            }
+        }
+        let reservation = self.profile_operations.reserve(&profile_id)?;
         let profile = self.profiles.get(&profile_id)?;
         if profile.archived {
             return Err(ApplicationError::new(
@@ -110,6 +136,9 @@ impl SessionApplicationService {
                 EnqueueOutcome::Queued { .. } => session.transition(SessionState::Queued, now)?,
             }
             registry.sessions.insert(session_id.clone(), session);
+            registry
+                .reservations
+                .insert(session_id.clone(), reservation);
             outcome
         };
 
@@ -148,12 +177,16 @@ impl SessionApplicationService {
 
     pub fn stop(&self, request: SessionStopRequest) -> ApplicationResult<SessionDto> {
         let _operation = self.lock_operations()?;
-        let session_id: SessionId = request.session_id.try_into()?;
+        self.stop_locked(request.session_id.try_into()?)
+    }
+
+    fn stop_locked(&self, session_id: SessionId) -> ApplicationResult<SessionDto> {
         let snapshot = self.session(&session_id)?;
         if snapshot.state == SessionState::Queued {
             let session = {
                 let mut registry = self.lock_registry()?;
                 registry.scheduler.cancel_queued(&session_id)?;
+                registry.reservations.remove(&session_id);
                 let session = registry.sessions.get_mut(&session_id).ok_or_else(|| {
                     ApplicationError::new(ErrorCode::NotFound, "session not found")
                 })?;
@@ -199,6 +232,7 @@ impl SessionApplicationService {
             let mut registry = self.lock_registry()?;
             let lease = registry.proxy_leases.remove(&session_id);
             registry.processes.remove(&session_id);
+            registry.reservations.remove(&session_id);
             let proxy_error = lease
                 .as_ref()
                 .and_then(|lease| self.proxies.release_session(lease).err())
@@ -256,37 +290,115 @@ impl SessionApplicationService {
         message: impl Into<String>,
     ) -> ApplicationResult<SessionDto> {
         let _operation = self.lock_operations()?;
-        let message = message.into();
-        let (session, promoted, lease) =
-            {
-                let mut registry = self.lock_registry()?;
-                let current = registry.sessions.get(session_id).ok_or_else(|| {
-                    ApplicationError::new(ErrorCode::NotFound, "session not found")
-                })?;
-                if !current.state.is_active() {
-                    return Err(ApplicationError::new(
-                        ErrorCode::InvalidProfileState,
-                        "session is not active",
-                    ));
+        self.finish_exit(session_id, false, message.into())
+    }
+
+    fn finish_exit(
+        &self,
+        session_id: &SessionId,
+        success: bool,
+        message: String,
+    ) -> ApplicationResult<SessionDto> {
+        // Reap the exited process (and its owned tree) before releasing data or capacity.
+        if let Err(error) = self.browsers.stop(session_id) {
+            if error.kind != crate::PortErrorKind::NotFound {
+                return Err(error.into());
+            }
+        }
+        let (session, promoted, lease) = {
+            let mut registry = self.lock_registry()?;
+            registry.processes.remove(session_id);
+            let lease = registry.proxy_leases.remove(session_id);
+            let session = registry
+                .sessions
+                .get_mut(session_id)
+                .ok_or_else(|| ApplicationError::new(ErrorCode::NotFound, "session not found"))?;
+            if success {
+                if session.state != SessionState::Stopping {
+                    session.transition(SessionState::Stopping, self.clock.now_ms())?;
                 }
-                let lease = registry.proxy_leases.remove(session_id);
-                registry.processes.remove(session_id);
-                let session = registry.sessions.get_mut(session_id).ok_or_else(|| {
-                    ApplicationError::new(ErrorCode::NotFound, "session not found")
-                })?;
+                session.transition(SessionState::Stopped, self.clock.now_ms())?;
+            } else {
                 session.fail("BROWSER_EXITED", message, self.clock.now_ms())?;
-                let session = session.clone();
-                let promoted = registry.scheduler.release(session_id)?;
-                (session, promoted, lease)
-            };
+            }
+            let session = session.clone();
+            registry.reservations.remove(session_id);
+            let promoted = registry.scheduler.release(session_id)?;
+            (session, promoted, lease)
+        };
         if let Some(lease) = lease {
             let _ = self.proxies.release_session(&lease);
         }
-        self.audit("session.exit", session.id.as_str(), AuditOutcome::Failed);
+        self.audit(
+            "session.exit",
+            session.id.as_str(),
+            if success {
+                AuditOutcome::Succeeded
+            } else {
+                AuditOutcome::Failed
+            },
+        );
         if let Some(ticket) = promoted {
             let _ = self.start_one(&ticket.session_id);
         }
         Ok(SessionDto::from(&session))
+    }
+
+    /// Poll every owned process, including ones manually closed by the user.
+    /// A failed query retains ownership and capacity for a later retry.
+    pub fn reconcile_exits(&self) -> ApplicationResult<bool> {
+        let _operation = self.lock_operations()?;
+        let ids = {
+            let registry = self.lock_registry()?;
+            if registry.shutting_down {
+                return Ok(false);
+            }
+            registry.processes.keys().cloned().collect::<Vec<_>>()
+        };
+        let mut changed = false;
+        for id in ids {
+            if let Ok(Some(exit)) = self.browsers.poll_exit(&id) {
+                changed |= self
+                    .finish_exit(&id, exit.success, "浏览器进程已退出".into())
+                    .is_ok();
+            }
+        }
+        Ok(changed)
+    }
+
+    pub fn reserve_stopped_profile(
+        &self,
+        id: &brows_domain::ProfileId,
+    ) -> ApplicationResult<crate::ProfileReservation> {
+        self.profile_operations.reserve(id)
+    }
+
+    /// Stop accepting launches before cancelling the queue, so shutdown cannot promote work.
+    pub fn shutdown(&self) -> ApplicationResult<()> {
+        let _operation = self.lock_operations()?;
+        self.lock_registry()?.shutting_down = true;
+        let sessions = self.list()?;
+        let mut first_error = None;
+        for queued in [true, false] {
+            for session in &sessions {
+                let should_stop = if queued {
+                    session.state == brows_contracts::SessionStateDto::Queued
+                } else {
+                    matches!(
+                        session.state,
+                        brows_contracts::SessionStateDto::Running
+                            | brows_contracts::SessionStateDto::Starting
+                            | brows_contracts::SessionStateDto::Stopping
+                    )
+                };
+                if should_stop {
+                    if let Err(error) = self.stop_locked(session.id.clone().try_into()?) {
+                        first_error.get_or_insert(error);
+                    }
+                }
+            }
+        }
+        first_error.map_or(Ok(()), Err)
     }
 
     pub fn queue_position(&self, session_id: &SessionId) -> ApplicationResult<Option<usize>> {
@@ -352,6 +464,7 @@ impl SessionApplicationService {
                         error.message(),
                         self.clock.now_ms(),
                     )?;
+                    registry.reservations.remove(session_id);
                     registry.scheduler.release(session_id)?
                 };
                 self.audit("session.launch", session_id.as_str(), AuditOutcome::Failed);

@@ -38,6 +38,8 @@ use std::{
 /// assembled once and remain hidden behind the application's ports.
 #[derive(Debug)]
 pub(crate) struct AppState {
+    pub(crate) runtime_issue: Option<String>,
+    pub(crate) backup_operations: Option<Arc<brows_application::BackupApplicationService>>,
     pub(crate) browsers: Arc<dyn BrowserRuntime>,
     pub(crate) profiles: Arc<ProfileApplicationService>,
     pub(crate) sessions: Arc<SessionApplicationService>,
@@ -45,11 +47,20 @@ pub(crate) struct AppState {
     pub(crate) proxy_management: Option<Arc<ProxyApplicationService>>,
     pub(crate) diagnostics: Option<Arc<LocalNetworkDiagnosticRunner>>,
     pub(crate) backups: Option<Arc<EncryptedBackupService>>,
+    // Declared last: release exclusive data-root ownership after all adapters.
+    _instance_lock: Option<std::fs::File>,
 }
 
 impl AppState {
     /// Production composition root for the phase-one desktop application.
     pub(crate) fn production(data_root: PathBuf) -> ApplicationResult<Self> {
+        Self::production_with_runtime(data_root, discover_chrome_root())
+    }
+
+    fn production_with_runtime(
+        data_root: PathBuf,
+        chrome: ApplicationResult<PathBuf>,
+    ) -> ApplicationResult<Self> {
         std::fs::create_dir_all(&data_root).map_err(|error| {
             brows_application::ApplicationError::new(
                 brows_contracts::ErrorCode::Internal,
@@ -57,6 +68,24 @@ impl AppState {
             )
         })?;
 
+        let instance_lock = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(false)
+            .open(data_root.join("manager.lock"))
+            .map_err(|_| {
+                brows_application::ApplicationError::new(
+                    brows_contracts::ErrorCode::Internal,
+                    "无法打开管理器数据锁",
+                )
+            })?;
+        instance_lock.try_lock().map_err(|_| {
+            brows_application::ApplicationError::new(
+                brows_contracts::ErrorCode::ProfileLocked,
+                "此数据目录已由另一管理器实例使用，或无法取得独占锁",
+            )
+        })?;
         let clock = Arc::new(SystemClock);
         let database_path = data_root.join("profiles.sqlite3");
         let profiles = Arc::new(SqliteProfileRepository::open(&database_path)?);
@@ -78,7 +107,10 @@ impl AppState {
 
         presets.insert(system_native_preset())?;
 
-        let browser_root = discover_chrome_root()?;
+        let (browser_root, mut runtime_issue) = match chrome {
+            Ok(root) => (root, None),
+            Err(_) => (data_root.join("runtimes"), Some("未找到 Google Chrome。请安装官方 Chrome，然后重新启动管理器。已有环境仍可查看和备份。".to_owned())),
+        };
         let profile_root = data_root.join("profiles");
         std::fs::create_dir_all(&profile_root).map_err(|error| {
             brows_application::ApplicationError::new(
@@ -101,11 +133,18 @@ impl AppState {
         // Authenticode chain and publisher before recording the current digest,
         // then re-check that digest before every launch. This tolerates an
         // update between app runs while failing closed on changes during a run.
-        let mut chrome_build = discovered_chrome_build(&browser_root)?;
-        chrome_build.publisher =
-            verify_authenticode_publisher(&chrome_build.executable_path, &["Google LLC"])
-                .map_err(brows_application::ApplicationError::from)?;
-        browsers.register_build_with_current_digest(chrome_build, true)?;
+        if runtime_issue.is_none() {
+            let admission = (|| -> ApplicationResult<()> {
+                let mut chrome_build = discovered_chrome_build(&browser_root)?;
+                chrome_build.publisher =
+                    verify_authenticode_publisher(&chrome_build.executable_path, &["Google LLC"])?;
+                browsers.register_build_with_current_digest(chrome_build, true)?;
+                Ok(())
+            })();
+            if admission.is_err() {
+                runtime_issue = Some("Chrome 未通过运行时验证。请修复官方安装，然后重新启动管理器；浏览器启动已禁用。".to_owned());
+            }
+        }
 
         let compiler = Arc::new(LaunchPlanCompiler::new(
             presets.clone(),
@@ -114,8 +153,10 @@ impl AppState {
             fingerprints,
             profile_root.clone(),
         )?);
+        let profile_operations = Arc::new(brows_application::ProfileOperations::default());
         let profile_service = Arc::new(ProfileApplicationService::new(
             profiles.clone(),
+            profile_operations.clone(),
             presets,
             browsers.clone(),
             proxies.clone(),
@@ -125,6 +166,7 @@ impl AppState {
         ));
         let session_service = Arc::new(SessionApplicationService::new(
             profiles.clone(),
+            profile_operations.clone(),
             compiler,
             browsers.clone(),
             proxies,
@@ -137,7 +179,11 @@ impl AppState {
             profiles.clone(),
             session_service.clone(),
             Arc::new(MoreLoginProfileDataMigrator::new(
-                default_morelogin_cache_root(),
+                if cfg!(windows) {
+                    default_morelogin_cache_root()
+                } else {
+                    data_root.join("morelogin-cache")
+                },
                 profile_root,
             )?),
             migration_records,
@@ -150,7 +196,14 @@ impl AppState {
             ids,
         ));
 
+        let backup_operations = Some(Arc::new(brows_application::BackupApplicationService::new(
+            profile_service.clone(),
+            session_service.clone(),
+            backup_service.clone(),
+        )));
         Ok(Self {
+            runtime_issue,
+            backup_operations,
             browsers: browsers.clone(),
             profiles: profile_service,
             sessions: session_service,
@@ -158,6 +211,7 @@ impl AppState {
             proxy_management: Some(proxy_management),
             diagnostics: Some(diagnostics),
             backups: Some(backup_service),
+            _instance_lock: Some(instance_lock),
         })
     }
 
@@ -190,8 +244,10 @@ impl AppState {
             fingerprints,
             data_root.join("profiles"),
         )?);
+        let profile_operations = Arc::new(brows_application::ProfileOperations::default());
         let profile_service = Arc::new(ProfileApplicationService::new(
             profiles.clone(),
+            profile_operations.clone(),
             presets,
             browsers.clone(),
             proxies.clone(),
@@ -201,6 +257,7 @@ impl AppState {
         ));
         let session_service = Arc::new(SessionApplicationService::new(
             profiles,
+            profile_operations,
             compiler,
             browsers.clone(),
             proxies,
@@ -211,6 +268,8 @@ impl AppState {
         )?);
 
         Ok(Self {
+            runtime_issue: None,
+            backup_operations: None,
             browsers: browsers.clone(),
             profiles: profile_service,
             sessions: session_service,
@@ -218,6 +277,7 @@ impl AppState {
             proxy_management: None,
             diagnostics: None,
             backups: None,
+            _instance_lock: None,
         })
     }
 }
@@ -680,5 +740,61 @@ mod tests {
         assert_eq!(persisted.len(), 2);
         drop(reopened);
         let _ = std::fs::remove_dir_all(data_root);
+    }
+
+    #[test]
+    fn missing_or_rejected_chrome_keeps_the_management_services_available() {
+        for missing in [true, false] {
+            let root =
+                std::env::temp_dir().join(format!("brows-recovery-{}", uuid::Uuid::new_v4()));
+            let chrome = if missing {
+                Err(brows_application::ApplicationError::new(
+                    brows_contracts::ErrorCode::CapabilityUnsupported,
+                    "missing",
+                ))
+            } else {
+                let chrome_root = root.join("invalid-chrome");
+                std::fs::create_dir_all(&chrome_root).unwrap();
+                std::fs::write(chrome_root.join("chrome.exe"), b"not an executable").unwrap();
+                Ok(chrome_root)
+            };
+            let state = AppState::production_with_runtime(root.clone(), chrome).unwrap();
+            assert!(state.runtime_issue.is_some());
+            assert!(state.browsers.list_builds().unwrap().is_empty());
+            assert!(state
+                .profiles
+                .list(brows_contracts::ProfileListRequest {
+                    page: 1,
+                    page_size: 20,
+                    search: None,
+                    include_archived: true,
+                })
+                .unwrap()
+                .is_empty());
+            assert!(state.backup_operations.is_some());
+            assert!(
+                AppState::production_with_runtime(
+                    root.clone(),
+                    Err(brows_application::ApplicationError::new(
+                        brows_contracts::ErrorCode::CapabilityUnsupported,
+                        "missing"
+                    ))
+                )
+                .is_err(),
+                "a second manager must not share profile ownership"
+            );
+            state.sessions.shutdown().unwrap();
+            drop(state);
+            let reopened = AppState::production_with_runtime(
+                root.clone(),
+                Err(brows_application::ApplicationError::new(
+                    brows_contracts::ErrorCode::CapabilityUnsupported,
+                    "missing",
+                )),
+            )
+            .unwrap();
+            drop(reopened);
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }

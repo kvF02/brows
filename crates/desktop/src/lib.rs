@@ -3,8 +3,8 @@
 
 mod commands;
 mod state;
+mod supervisor;
 
-use brows_contracts::SessionStateDto;
 use commands::{
     backup_export, backup_import, backup_list, diagnostic_list, diagnostic_run,
     fingerprint_preview, legacy_migration_execute, legacy_migration_inspect, legacy_migration_list,
@@ -25,7 +25,10 @@ pub fn run() {
             let data_root = app.path().app_local_data_dir()?;
             let state = AppState::production(data_root)
                 .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?;
+            let supervisor =
+                supervisor::SessionSupervisor::start(app.handle().clone(), state.sessions.clone())?;
             app.manage(state);
+            app.manage(supervisor);
 
             let window = WebviewWindowBuilder::new(app, "main", main_window_url())
                 .title("Brows")
@@ -81,37 +84,14 @@ pub fn run() {
         .expect("Brows desktop runtime failed to build")
         .run(|app, event| {
             if let RunEvent::ExitRequested { .. } = event {
+                app.state::<supervisor::SessionSupervisor>().stop();
                 cleanup_sessions(app.state::<AppState>().inner());
             }
         })
 }
 
 fn cleanup_sessions(state: &AppState) {
-    let sessions = match state.sessions.list() {
-        Ok(sessions) => sessions,
-        Err(_) => return,
-    };
-    // Cancel queued work first.  Stopping an active session promotes the oldest
-    // queued ticket synchronously; cancelling the snapshot's queued tickets
-    // up front prevents a new browser from being launched during shutdown.
-    for session in sessions
-        .iter()
-        .filter(|session| session.state == SessionStateDto::Queued)
-    {
-        let _ = state.sessions.stop(brows_contracts::SessionStopRequest {
-            session_id: session.id.clone(),
-        });
-    }
-    for session in sessions {
-        if matches!(
-            session.state,
-            SessionStateDto::Starting | SessionStateDto::Running | SessionStateDto::Stopping
-        ) {
-            let _ = state.sessions.stop(brows_contracts::SessionStopRequest {
-                session_id: session.id,
-            });
-        }
-    }
+    let _ = state.sessions.shutdown();
 }
 
 fn main_window_url() -> WebviewUrl {

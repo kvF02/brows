@@ -22,13 +22,15 @@ use std::{
     fs::{self, File},
     io::{BufReader, Read},
     path::{Component, Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{Mutex, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 mod authenticode;
 mod fingerprint_probe;
+mod process;
+use process::BrowserChild;
 
 pub use authenticode::verify_authenticode_publisher;
 
@@ -46,7 +48,7 @@ pub struct ManagedChromiumRuntime {
     runtime_root: PathBuf,
     profile_root: PathBuf,
     builds: RwLock<BuildRegistry>,
-    processes: Mutex<HashMap<SessionId, Child>>,
+    processes: Mutex<HashMap<SessionId, BrowserChild>>,
     probing: Mutex<HashSet<BrowserBuildId>>,
 }
 
@@ -419,18 +421,19 @@ impl BrowserRuntime for ManagedChromiumRuntime {
             ));
         }
 
-        let child = Command::new(&build.executable_path)
-            .args(arguments)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| {
-                PortError::new(
-                    PortErrorKind::Unavailable,
-                    format!("failed to launch browser process: {error}"),
-                )
-            })?;
+        let child = BrowserChild::spawn(
+            Command::new(&build.executable_path)
+                .args(arguments)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null()),
+        )
+        .map_err(|error| {
+            PortError::new(
+                PortErrorKind::Unavailable,
+                format!("failed to launch browser process: {error}"),
+            )
+        })?;
         let process_id = child.id();
         processes.insert(plan.session_id.clone(), child);
         Ok(BrowserProcess {
@@ -448,23 +451,32 @@ impl BrowserRuntime for ManagedChromiumRuntime {
         let child = processes
             .get_mut(session_id)
             .ok_or_else(|| PortError::not_found("browser process"))?;
-        if child
-            .try_wait()
-            .map_err(|error| internal(format!("failed to query browser process: {error}")))?
-            .is_none()
-        {
-            child.kill().map_err(|error| {
-                PortError::new(
-                    PortErrorKind::Unavailable,
-                    format!("failed to stop browser process: {error}"),
-                )
-            })?;
-        }
         child
-            .wait()
-            .map_err(|error| internal(format!("failed to reap browser process: {error}")))?;
+            .stop()
+            .map_err(|error| internal(format!("failed to stop browser process tree: {error}")))?;
         processes.remove(session_id);
         Ok(())
+    }
+
+    fn poll_exit(
+        &self,
+        session_id: &SessionId,
+    ) -> PortResult<Option<brows_application::BrowserExit>> {
+        let mut processes = self
+            .processes
+            .lock()
+            .map_err(|_| internal("browser process registry lock is poisoned"))?;
+        let child = processes
+            .get_mut(session_id)
+            .ok_or_else(|| PortError::not_found("browser process"))?;
+        child
+            .try_wait()
+            .map(|status| {
+                status.map(|status| brows_application::BrowserExit {
+                    success: status.success(),
+                })
+            })
+            .map_err(|error| internal(format!("failed to query browser process: {error}")))
     }
 
     fn is_running(&self, session_id: &SessionId) -> PortResult<bool> {
@@ -480,10 +492,7 @@ impl BrowserRuntime for ManagedChromiumRuntime {
             .map_err(|error| internal(format!("failed to query browser process: {error}")))?
         {
             None => Ok(true),
-            Some(_) => {
-                processes.remove(session_id);
-                Ok(false)
-            }
+            Some(_) => Ok(false),
         }
     }
 }
@@ -492,8 +501,7 @@ impl Drop for ManagedChromiumRuntime {
     fn drop(&mut self) {
         if let Ok(processes) = self.processes.get_mut() {
             for child in processes.values_mut() {
-                let _ = child.kill();
-                let _ = child.wait();
+                let _ = child.stop();
             }
             processes.clear();
         }

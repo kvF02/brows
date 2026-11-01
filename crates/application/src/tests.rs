@@ -17,8 +17,8 @@ struct Harness {
     proxies: Arc<InMemoryProxyRuntime>,
     audit: Arc<InMemoryAuditSink>,
     clock: Arc<ManualClock>,
-    profile_service: ProfileApplicationService,
-    session_service: SessionApplicationService,
+    profile_service: Arc<ProfileApplicationService>,
+    session_service: Arc<SessionApplicationService>,
     compiler: Arc<LaunchPlanCompiler>,
 }
 
@@ -44,8 +44,10 @@ impl Harness {
             )
             .unwrap(),
         );
+        let profile_operations = Arc::new(crate::ProfileOperations::default());
         let profile_service = ProfileApplicationService::new(
             profiles.clone(),
+            profile_operations.clone(),
             presets.clone(),
             browsers.clone(),
             proxies.clone(),
@@ -55,6 +57,7 @@ impl Harness {
         );
         let session_service = SessionApplicationService::new(
             profiles.clone(),
+            profile_operations.clone(),
             compiler.clone(),
             browsers.clone(),
             proxies.clone(),
@@ -70,8 +73,8 @@ impl Harness {
             proxies,
             audit,
             clock,
-            profile_service,
-            session_service,
+            profile_service: Arc::new(profile_service),
+            session_service: Arc::new(session_service),
             compiler,
         }
     }
@@ -548,4 +551,309 @@ fn all_ports_are_object_safe() {
     assert_audit(&InMemoryAuditSink::default());
     assert_clock(clock.as_ref());
     assert_ids(&SequentialIdGenerator::default());
+}
+
+#[test]
+fn supervisor_reaps_clean_and_crashed_sessions_and_promotes_fifo() {
+    for success in [true, false] {
+        let h = Harness::new(1);
+        let first = h.create_profile("First");
+        let second = h.create_profile("Second");
+        h.session_service
+            .launch(SessionLaunchRequest {
+                profile_id: first.id.clone(),
+            })
+            .unwrap();
+        h.session_service
+            .launch(SessionLaunchRequest {
+                profile_id: second.id.clone(),
+            })
+            .unwrap();
+        let first_session = h
+            .session_service
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.profile_id == first.id)
+            .unwrap();
+        h.browsers
+            .simulate_exit(&first_session.id.clone().try_into().unwrap(), success)
+            .unwrap();
+        assert!(h.session_service.reconcile_exits().unwrap());
+        let sessions = h.session_service.list().unwrap();
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|s| s.profile_id == first.id)
+                .unwrap()
+                .state,
+            if success {
+                SessionStateDto::Stopped
+            } else {
+                SessionStateDto::Failed
+            }
+        );
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|s| s.profile_id == second.id)
+                .unwrap()
+                .state,
+            SessionStateDto::Running
+        );
+        assert_eq!(h.browsers.running_plans().unwrap().len(), 1);
+        assert!(!h.session_service.reconcile_exits().unwrap());
+        // The exited profile's reservation has been released.
+        h.profile_service
+            .archive(ProfileRevisionRequest {
+                profile_id: first.id,
+                expected_revision: first.revision,
+            })
+            .unwrap();
+    }
+}
+
+#[test]
+fn shutdown_cancels_queue_without_launching_it_and_rejects_new_launches() {
+    let h = Harness::new(1);
+    for n in 0..4 {
+        let p = h.create_profile(&format!("Profile {n}"));
+        h.session_service
+            .launch(SessionLaunchRequest { profile_id: p.id })
+            .unwrap();
+    }
+    h.session_service.shutdown().unwrap();
+    assert!(h
+        .session_service
+        .list()
+        .unwrap()
+        .iter()
+        .all(|s| s.state == SessionStateDto::Stopped));
+    assert!(h.browsers.running_plans().unwrap().is_empty());
+    assert_eq!(
+        h.audit
+            .events()
+            .unwrap()
+            .iter()
+            .filter(|e| e.action == "session.launch")
+            .count(),
+        1
+    );
+    let p = h.create_profile("After shutdown");
+    assert!(h
+        .session_service
+        .launch(SessionLaunchRequest { profile_id: p.id })
+        .is_err());
+    h.session_service.shutdown().unwrap();
+}
+
+#[test]
+fn running_queued_and_data_operations_exclude_profile_mutations() {
+    let h = Harness::new(1);
+    let p = h.create_profile("Reserved");
+    let id = p.id.clone().try_into().unwrap();
+    let reservation = h.session_service.reserve_stopped_profile(&id).unwrap();
+    assert_eq!(
+        h.session_service
+            .launch(SessionLaunchRequest {
+                profile_id: p.id.clone()
+            })
+            .unwrap_err()
+            .code(),
+        &ErrorCode::ProfileLocked
+    );
+    assert_eq!(
+        h.profile_service
+            .archive(ProfileRevisionRequest {
+                profile_id: p.id.clone(),
+                expected_revision: p.revision
+            })
+            .unwrap_err()
+            .code(),
+        &ErrorCode::ProfileLocked
+    );
+    drop(reservation);
+    h.session_service
+        .launch(SessionLaunchRequest { profile_id: p.id })
+        .unwrap();
+    let queued = h.create_profile("Queued");
+    h.session_service
+        .launch(SessionLaunchRequest {
+            profile_id: queued.id.clone(),
+        })
+        .unwrap();
+    assert_eq!(
+        h.profile_service
+            .archive(ProfileRevisionRequest {
+                profile_id: queued.id.clone(),
+                expected_revision: queued.revision
+            })
+            .unwrap_err()
+            .code(),
+        &ErrorCode::ProfileLocked
+    );
+    assert_eq!(
+        h.profile_service
+            .update(ProfileUpdateRequest {
+                profile_id: queued.id,
+                expected_revision: queued.revision,
+                profile: draft("Changed", None)
+            })
+            .unwrap_err()
+            .code(),
+        &ErrorCode::ProfileLocked
+    );
+}
+
+#[derive(Debug)]
+struct TestArchives {
+    profile: brows_domain::ProfileSpec,
+    exported: std::sync::atomic::AtomicUsize,
+    discarded: std::sync::atomic::AtomicUsize,
+    fail_install: bool,
+    export_gate: Option<(
+        std::sync::mpsc::Sender<()>,
+        std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
+    )>,
+}
+
+impl BackupService for TestArchives {
+    fn inspect(&self, _: &str) -> PortResult<BackupInspection> {
+        unreachable!()
+    }
+    fn export(&self, _: &BackupExportSpec) -> PortResult<()> {
+        self.exported
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        if let Some((started, resume)) = &self.export_gate {
+            started.send(()).unwrap();
+            resume
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+        }
+        Ok(())
+    }
+    fn import(&self, _: &BackupImportSpec) -> PortResult<BackupImportPayload> {
+        Ok(BackupImportPayload {
+            profile: self.profile.clone(),
+            restored_data_dir: PathBuf::from("test-staging/userdata"),
+        })
+    }
+}
+
+impl RestorableBackupService for TestArchives {
+    fn install_restored_data(&self, _: &ProfileId, _: &std::path::Path) -> PortResult<()> {
+        if self.fail_install {
+            Err(PortError::new(
+                PortErrorKind::Unavailable,
+                "simulated disk failure",
+            ))
+        } else {
+            Ok(())
+        }
+    }
+    fn discard_restored_data(&self, _: &std::path::Path) {
+        self.discarded
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+#[test]
+fn backup_holds_profile_reservation_for_the_entire_export() {
+    let h = Harness::new(1);
+    let profile = h.create_profile("Backup");
+    let (started, wait) = std::sync::mpsc::channel();
+    let (resume, receiver) = std::sync::mpsc::channel();
+    let archives = Arc::new(TestArchives {
+        profile: profile.clone().try_into().unwrap(),
+        exported: 0.into(),
+        discarded: 0.into(),
+        fail_install: false,
+        export_gate: Some((started, std::sync::Mutex::new(receiver))),
+    });
+    let service = BackupApplicationService::new(
+        h.profile_service.clone(),
+        h.session_service.clone(),
+        archives.clone(),
+    );
+    let id = profile.id.clone().try_into().unwrap();
+    let worker = std::thread::spawn(move || {
+        service.export(
+            id,
+            "backup.browsbak".into(),
+            SecretValue::new(b"long-test-password".to_vec()).unwrap(),
+            false,
+        )
+    });
+    wait.recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    assert_eq!(
+        h.session_service
+            .launch(SessionLaunchRequest {
+                profile_id: profile.id.clone()
+            })
+            .unwrap_err()
+            .code(),
+        &ErrorCode::ProfileLocked
+    );
+    resume.send(()).unwrap();
+    worker.join().unwrap().unwrap();
+    h.session_service
+        .launch(SessionLaunchRequest {
+            profile_id: profile.id.clone(),
+        })
+        .unwrap();
+    let service = BackupApplicationService::new(
+        h.profile_service.clone(),
+        h.session_service.clone(),
+        archives.clone(),
+    );
+    assert_eq!(
+        service
+            .export(
+                profile.id.try_into().unwrap(),
+                "second.browsbak".into(),
+                SecretValue::new(b"long-test-password".to_vec()).unwrap(),
+                false
+            )
+            .unwrap_err()
+            .code(),
+        &ErrorCode::ProfileLocked
+    );
+    assert_eq!(
+        archives.exported.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+}
+
+#[test]
+fn failed_restore_install_is_archived_and_staging_is_always_discarded() {
+    let h = Harness::new(1);
+    let profile = h.create_profile("Restore source");
+    let archives = Arc::new(TestArchives {
+        profile: profile.try_into().unwrap(),
+        exported: 0.into(),
+        discarded: 0.into(),
+        fail_install: true,
+        export_gate: None,
+    });
+    let service = BackupApplicationService::new(
+        h.profile_service.clone(),
+        h.session_service.clone(),
+        archives.clone(),
+    );
+    assert!(service
+        .import(BackupImportSpec {
+            source_name: "test.browsbak".into(),
+            password: SecretValue::new(b"long-test-password".to_vec()).unwrap()
+        })
+        .is_err());
+    assert_eq!(
+        archives.discarded.load(std::sync::atomic::Ordering::SeqCst),
+        1
+    );
+    let profiles = h.profiles.profiles().unwrap();
+    assert_eq!(profiles.len(), 2);
+    assert_eq!(profiles.iter().filter(|p| p.archived).count(), 1);
 }

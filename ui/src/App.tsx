@@ -1719,7 +1719,7 @@ function SettingsView({
         </article>
         <article className="settings-card">
           <div className="settings-card-head"><div><h2>浏览器运行时</h2><p>签名可信 ≠ 指纹支持；指纹加载检测通过 ≠ 完整 anti-detect。</p></div><span className="settings-icon">◉</span></div>
-          {runtimes.length === 0 && <div className="form-info">没有可信浏览器运行时，请先安装受支持的浏览器并刷新。</div>}
+          {runtimes.length === 0 && <div className="form-info">没有可信浏览器运行时。请安装或修复官方 Google Chrome，然后重新启动管理器；已有环境仍可查看和备份。</div>}
           {runtimes.map((runtime) => <RuntimeFingerprintRow key={`${runtime.id}:${runtime.version}`} api={api} runtime={runtime} onRefresh={onRefresh} onError={onError} onNotice={onNotice} />)}
           <div className="form-info">检测会创建独立临时环境，仅验证本地扩展注入。SeedableNoise 启动前必须通过；系统原生不受此限制。</div>
           <button className="text-button" type="button" onClick={() => onNotice("启动时验证 Windows Authenticode 信任链与 Google LLC 发行者，并在每次浏览器启动前重新核对 SHA-256。")}>查看运行时信任说明 →</button>

@@ -139,6 +139,11 @@ pub struct BrowserProcess {
     pub started_at_ms: u64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct BrowserExit {
+    pub success: bool,
+}
+
 pub trait BrowserRuntime: fmt::Debug + Send + Sync {
     /// Explicit, isolated, local-only probe. Never tests in a user's profile.
     fn probe_fingerprint_support(
@@ -160,6 +165,10 @@ pub trait BrowserRuntime: fmt::Debug + Send + Sync {
     fn launch(&self, plan: &ResolvedLaunchPlan) -> PortResult<BrowserProcess>;
     fn stop(&self, session_id: &SessionId) -> PortResult<()>;
     fn is_running(&self, session_id: &SessionId) -> PortResult<bool>;
+    /// Preserve process ownership until stop() reaps it.
+    fn poll_exit(&self, session_id: &SessionId) -> PortResult<Option<BrowserExit>> {
+        Ok((!self.is_running(session_id)?).then_some(BrowserExit { success: false }))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -261,6 +270,12 @@ pub trait BackupService: fmt::Debug + Send + Sync {
     fn inspect(&self, source_name: &str) -> PortResult<BackupInspection>;
     fn export(&self, spec: &BackupExportSpec) -> PortResult<()>;
     fn import(&self, spec: &BackupImportSpec) -> PortResult<BackupImportPayload>;
+}
+
+/// Filesystem installation is kept behind an adapter alongside archive extraction.
+pub trait RestorableBackupService: BackupService {
+    fn install_restored_data(&self, id: &ProfileId, staging: &std::path::Path) -> PortResult<()>;
+    fn discard_restored_data(&self, staging: &std::path::Path);
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

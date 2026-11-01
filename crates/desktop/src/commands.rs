@@ -1,8 +1,8 @@
 use crate::state::AppState;
 use brows_adapters_morelogin::{inspect_export as inspect_morelogin, MoreLoginPreview};
 use brows_application::{
-    persona_fingerprint::PersonaFingerprint, ApplicationResult, BackupExportSpec, BackupImportSpec,
-    BackupService, DiagnosticRequest, DiagnosticRunner, LegacyProfileDataSummary, MigrationRecord,
+    persona_fingerprint::PersonaFingerprint, ApplicationResult, BackupImportSpec,
+    DiagnosticRequest, DiagnosticRunner, LegacyProfileDataSummary, MigrationRecord,
     MigrationRecordStatus, SecretValue, SessionLaunchOutcome,
 };
 use brows_contracts::{
@@ -78,28 +78,20 @@ pub(crate) fn backup_export(
     state: State<'_, AppState>,
     request: BackupExportRequest,
 ) -> IpcResult<BackupJobDto> {
-    let profile = ipc(state.profiles.get(ProfileIdRequest {
-        profile_id: request.profile_id.clone(),
-    }))?;
-    let profile_name = profile.name.clone();
-    let profile: brows_domain::ProfileSpec =
-        profile
-            .try_into()
-            .map_err(|error: brows_contracts::ContractError| ErrorDto {
-                code: ErrorCode::ValidationFailed,
-                message: error.reason,
-                violations: Vec::new(),
-            })?;
+    let operations = state.backup_operations.as_ref().ok_or_else(|| ErrorDto {
+        code: ErrorCode::CapabilityUnsupported,
+        message: "备份不可用".into(),
+        violations: Vec::new(),
+    })?;
     let password = SecretValue::new(request.password.expose().as_bytes().to_vec())
         .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
-    backup_service(&state)?
-        .export(&BackupExportSpec {
-            destination_name: request.destination_name.clone(),
-            profile,
-            password,
-            include_proxy_credential: request.include_proxy_credential,
-        })
-        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
+    let profile = ipc(operations.export(
+        profile_id(&request.profile_id)?,
+        request.destination_name.clone(),
+        password,
+        request.include_proxy_credential,
+    ))?;
+    let profile_name = profile.name;
     let size_bytes = backup_service(&state)?
         .archive_size(&request.destination_name)
         .ok();
@@ -125,26 +117,15 @@ pub(crate) fn backup_import(
 ) -> IpcResult<BackupImportResultDto> {
     let password = SecretValue::new(request.password.expose().as_bytes().to_vec())
         .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
-    let payload = backup_service(&state)?
-        .import(&BackupImportSpec {
-            source_name: request.source_name,
-            password,
-        })
-        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
-    let imported = state
-        .profiles
-        .create_imported(payload.profile)
-        .map_err(|error| error.to_contract())?;
-    if let Err(error) = backup_service(&state)?
-        .install_restored_data(imported.id.as_str(), &payload.restored_data_dir)
-    {
-        backup_service(&state)?.discard_restored_data(&payload.restored_data_dir);
-        let _ = state.profiles.archive(ProfileRevisionRequest {
-            profile_id: imported.id.clone(),
-            expected_revision: imported.revision,
-        });
-        return Err(brows_application::ApplicationError::from(error).to_contract());
-    }
+    let operations = state.backup_operations.as_ref().ok_or_else(|| ErrorDto {
+        code: ErrorCode::CapabilityUnsupported,
+        message: "备份不可用".into(),
+        violations: Vec::new(),
+    })?;
+    let imported = ipc(operations.import(BackupImportSpec {
+        source_name: request.source_name,
+        password,
+    }))?;
     Ok(BackupImportResultDto {
         profile: imported,
         note: "已恢复为新的环境 UUID，未覆盖现有环境".to_owned(),
@@ -163,6 +144,13 @@ pub(crate) struct FingerprintPreviewRequest {
 
 #[tauri::command]
 pub(crate) fn list_runtimes(state: State<'_, AppState>) -> IpcResult<Vec<BrowserRuntimeDto>> {
+    if let Some(message) = &state.runtime_issue {
+        return Err(ErrorDto {
+            code: ErrorCode::CapabilityUnsupported,
+            message: message.clone(),
+            violations: Vec::new(),
+        });
+    }
     let builds = state
         .browsers
         .list_builds()
@@ -713,18 +701,6 @@ pub(crate) fn profile_archive(
     state: State<'_, AppState>,
     request: ProfileRevisionRequest,
 ) -> IpcResult<ProfileDto> {
-    let id = profile_id(&request.profile_id)?;
-    if state
-        .sessions
-        .has_active_profile(&id)
-        .map_err(|error| error.to_contract())?
-    {
-        return Err(ErrorDto {
-            code: ErrorCode::ProfileLocked,
-            message: "stop the profile session before archiving".to_owned(),
-            violations: Vec::new(),
-        });
-    }
     ipc(state.profiles.archive(request))
 }
 

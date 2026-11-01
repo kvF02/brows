@@ -11,6 +11,7 @@ use std::sync::Arc;
 
 #[derive(Debug)]
 pub struct ProfileApplicationService {
+    operations: Arc<crate::ProfileOperations>,
     profiles: Arc<dyn ProfileRepository>,
     presets: Arc<dyn PresetCatalog>,
     browsers: Arc<dyn BrowserRuntime>,
@@ -24,6 +25,7 @@ impl ProfileApplicationService {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         profiles: Arc<dyn ProfileRepository>,
+        operations: Arc<crate::ProfileOperations>,
         presets: Arc<dyn PresetCatalog>,
         browsers: Arc<dyn BrowserRuntime>,
         proxies: Arc<dyn ProxyRuntime>,
@@ -32,6 +34,7 @@ impl ProfileApplicationService {
         ids: Arc<dyn IdGenerator>,
     ) -> Self {
         Self {
+            operations,
             profiles,
             presets,
             browsers,
@@ -72,12 +75,29 @@ impl ProfileApplicationService {
     /// Creates a profile from an authenticated backup manifest. The imported
     /// profile always receives a fresh identity so restoring can never replace
     /// an existing profile's persisted record or userdata directory.
-    pub fn create_imported(&self, mut profile: ProfileSpec) -> ApplicationResult<ProfileDto> {
+    pub fn create_imported(&self, profile: ProfileSpec) -> ApplicationResult<ProfileDto> {
+        self.create_imported_with(profile, |_| Ok(()))
+    }
+
+    /// Retain the new identity's reservation until restored data is installed.
+    pub fn create_imported_with(
+        &self,
+        mut profile: ProfileSpec,
+        install: impl FnOnce(&ProfileId) -> ApplicationResult<()>,
+    ) -> ApplicationResult<ProfileDto> {
         profile.id = self.ids.next_profile_id()?;
         profile.revision = Revision::FIRST;
-        profile.archived = false;
+        // Persist as non-launchable first. If the manager dies during restore,
+        // the unfinished record remains archived rather than exposing partial data.
+        profile.archived = true;
+        let _reservation = self.operations.reserve(&profile.id)?;
         self.validate_references(&profile)?;
         self.profiles.create(profile.clone())?;
+        install(&profile.id)?;
+        let expected = profile.revision;
+        profile.archived = false;
+        profile.bump_revision();
+        self.profiles.update(profile.clone(), expected)?;
         self.audit_success("profile.import", profile.id.as_str());
         Ok(ProfileDto::from(&profile))
     }
@@ -85,6 +105,7 @@ impl ProfileApplicationService {
     pub fn update(&self, request: ProfileUpdateRequest) -> ApplicationResult<ProfileDto> {
         let id: ProfileId = request.profile_id.try_into()?;
         let expected = Revision::new(request.expected_revision)?;
+        let _reservation = self.operations.reserve(&id)?;
         let current = self.profiles.get(&id)?;
         if current.revision != expected {
             return Err(ApplicationError::new(
@@ -134,6 +155,7 @@ impl ProfileApplicationService {
         archived: bool,
     ) -> ApplicationResult<ProfileDto> {
         let id: ProfileId = request.profile_id.try_into()?;
+        let _reservation = self.operations.reserve(&id)?;
         let mut profile = self.profiles.get(&id)?;
         let expected = Revision::new(request.expected_revision)?;
         if profile.revision != expected {

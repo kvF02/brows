@@ -200,6 +200,7 @@ pub struct InMemoryBrowserRuntime {
     running: Mutex<BTreeMap<SessionId, (BrowserProcess, ResolvedLaunchPlan)>>,
     next_process_id: AtomicU32,
     fail_next_launch: AtomicBool,
+    exits: Mutex<BTreeMap<SessionId, crate::BrowserExit>>,
     clock: Arc<dyn Clock>,
 }
 
@@ -210,6 +211,7 @@ impl InMemoryBrowserRuntime {
             running: Mutex::new(BTreeMap::new()),
             next_process_id: AtomicU32::new(10_000),
             fail_next_launch: AtomicBool::new(false),
+            exits: Mutex::new(BTreeMap::new()),
             clock,
         }
     }
@@ -227,6 +229,15 @@ impl InMemoryBrowserRuntime {
 
     pub fn fail_next_launch(&self) {
         self.fail_next_launch.store(true, Ordering::SeqCst);
+    }
+
+    /// Simulate OS-observed termination while retaining a handle for cleanup.
+    pub fn simulate_exit(&self, id: &SessionId, success: bool) -> PortResult<()> {
+        self.exits
+            .lock()
+            .map_err(|_| unavailable("browser runtime"))?
+            .insert(id.clone(), crate::BrowserExit { success });
+        Ok(())
     }
 
     pub fn running_plans(&self) -> PortResult<Vec<ResolvedLaunchPlan>> {
@@ -303,6 +314,15 @@ impl BrowserRuntime for InMemoryBrowserRuntime {
             .remove(session_id)
             .map(|_| ())
             .ok_or_else(|| PortError::not_found("running browser session"))
+    }
+
+    fn poll_exit(&self, session_id: &SessionId) -> PortResult<Option<crate::BrowserExit>> {
+        Ok(self
+            .exits
+            .lock()
+            .map_err(|_| unavailable("browser runtime"))?
+            .get(session_id)
+            .copied())
     }
 
     fn is_running(&self, session_id: &SessionId) -> PortResult<bool> {
