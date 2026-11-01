@@ -29,8 +29,20 @@ function Get-SourceCommit {
     return $value.Trim()
 }
 function Assert-CleanSource {
-    $changes = & git status --porcelain --untracked-files=normal
-    if ($LASTEXITCODE -ne 0 -or $changes) { throw 'Commit source changes before producing a traceable Alpha package.' }
+    param([switch]$AfterBuild)
+    $changes = @(& git diff --name-only HEAD)
+    if ($LASTEXITCODE -ne 0) { throw 'Cannot inspect source changes.' }
+    $untracked = @(& git ls-files --others --exclude-standard)
+    if ($LASTEXITCODE -ne 0 -or $untracked.Count) { throw 'Commit source changes before producing a traceable Alpha package.' }
+    $generated = @()
+    if ($AfterBuild) {
+        # Tauri regenerates these documentation schemas for the actual target.
+        # They are not runtime permission inputs. Preserve them on disk; never
+        # ignore changes to source capabilities, ACL definitions or other files.
+        $generated = @('crates/desktop/gen/schemas/desktop-schema.json', 'crates/desktop/gen/schemas/windows-schema.json')
+    }
+    $unexpected = @($changes | Where-Object { $generated -notcontains $_ })
+    if ($unexpected.Count) { throw 'Commit source changes before producing a traceable Alpha package.' }
 }
 try {
     Set-Location $repoRoot
@@ -51,7 +63,7 @@ try {
     Invoke-Checked -Program 'cargo' -Arguments @('+1.97.1', 'test', '--locked', '--workspace', '--target', 'x86_64-pc-windows-msvc')
     Invoke-Checked -Program 'cargo' -Arguments @('+1.97.1', 'clippy', '--locked', '--workspace', '--all-targets', '--target', 'x86_64-pc-windows-msvc', '--', '-D', 'warnings')
     Invoke-Checked -Program 'cargo' -Arguments @('+1.97.1', 'build', '--locked', '--release', '-p', 'brows-desktop', '--features', 'custom-protocol', '--target', 'x86_64-pc-windows-msvc')
-    Assert-CleanSource
+    Assert-CleanSource -AfterBuild
     if ((Get-SourceCommit) -ne $commit) { throw 'Source revision changed during the build.' }
 
     $executable = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release/brows-desktop.exe'

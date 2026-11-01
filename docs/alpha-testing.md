@@ -55,7 +55,7 @@ powershell -NoProfile -File .\tools\build-alpha.ps1
 
 GitHub Actions 可手动运行 **Windows Alpha test build**，默认勾选官方运行时验收，也可取消勾选只构建测试包。推送 `alpha/**` 分支会构建测试包，并在独立 job 下载官方 CFT、验证签名和执行 headless 双样本验收。新 workflow 尚未在默认分支注册时，推送包含该文件的 `alpha/**` 分支可启动首次构建。
 
-`package` job 与真实指纹 `fingerprint` job 独立。下载包成功只证明构建及其自动回归通过；需要查看另一 job 的结果和已生成的 JSON，不能把打包成功当成指纹已通过。`runtime-acceptance.json` 记录安装/基础探针结果；签名等准入失败时仍有负向报告，`fingerprint-measurement.json` 只在真正完成采集后生成，不能把准入报告当成页面实测。artifact 保留 14 天，下载需要仓库访问权限。
+`package` job 成功后，独立的 `startup` job 在全新 Windows runner 下载同一个测试包，检查主窗口标题和正常关闭，并保存 `startup.json`；它不代表页面内容、多开或登录态测试已经通过。`package` job 与真实指纹 `fingerprint` job 独立。下载包成功只证明构建及其自动回归通过；需要查看另一 job 的结果和已生成的 JSON，不能把打包成功当成指纹已通过。`runtime-acceptance.json` 记录安装/基础探针结果；签名等准入失败时仍有负向报告，`fingerprint-measurement.json` 只在真正完成采集后生成，不能把准入报告当成页面实测。artifact 保留 14 天，下载需要仓库访问权限。
 
 运行状态以对应 commit 的 Actions 记录和 `build-info.json` 为准。首次 Windows 构建耗时取决于依赖下载、编译与 Actions 排队；说明文件本身不证明构建或真机验收已经执行。
 

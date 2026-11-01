@@ -20,6 +20,8 @@ jobs:
     timeout-minutes: 60
     env:
       CARGO_BUILD_JOBS: 4
+    outputs:
+      artifact_name: ${{ steps.package.outputs.artifact_name }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -78,6 +80,47 @@ jobs:
           "[Download test build]($env:ALPHA_ARTIFACT_URL)" >> $env:GITHUB_STEP_SUMMARY
           "The archive contains the executable, Chinese test notes, source revision and SHA-256 checksums. Alpha uses its own data namespace." >> $env:GITHUB_STEP_SUMMARY
           "This package does not certify real fingerprint support. Check the separate fingerprint job and the runtime probe on the test PC." >> $env:GITHUB_STEP_SUMMARY
+
+  startup:
+    needs: package
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: ${{ needs.package.outputs.artifact_name }}
+          path: target/downloaded-alpha
+      - name: Ensure the documented WebView2 runtime prerequisite
+        shell: pwsh
+        run: |
+          $roots = @("${env:ProgramFiles(x86)}/Microsoft/EdgeWebView/Application", "$env:LOCALAPPDATA/Microsoft/EdgeWebView/Application")
+          $installed = $false
+          foreach ($root in $roots) {
+            if (Test-Path -LiteralPath $root) {
+              foreach ($version in Get-ChildItem -LiteralPath $root -Directory) {
+                if (Test-Path -LiteralPath (Join-Path $version.FullName 'msedgewebview2.exe')) { $installed = $true }
+              }
+            }
+          }
+          if (-not $installed) {
+            $installer = Join-Path $env:RUNNER_TEMP 'BrowsAlpha-WebView2Setup.exe'
+            Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' -OutFile $installer
+            $signature = Get-AuthenticodeSignature -LiteralPath $installer
+            if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.GetNameInfo('SimpleName', $false) -ne 'Microsoft Corporation') { throw 'WebView2 installer signature was not verified.' }
+            $process = Start-Process -FilePath $installer -ArgumentList '/silent', '/install' -Wait -PassThru
+            if ($process.ExitCode -notin @(0, 3010)) { throw "WebView2 installation failed: $($process.ExitCode)" }
+          }
+      - name: Launch packaged Alpha and close its main window
+        shell: pwsh
+        run: ./tools/smoke-alpha.ps1 -Executable ./target/downloaded-alpha/Brows-Alpha.exe
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-alpha-startup-report
+          path: target/alpha-startup/
+          if-no-files-found: warn
+          retention-days: 14
 
   fingerprint:
     if: github.event_name == 'push' || inputs.official_runtime
