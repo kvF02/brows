@@ -28,6 +28,8 @@ use std::{
 };
 
 mod authenticode;
+mod command_path;
+use command_path::argument as chromium_path_argument;
 mod bundle;
 mod official;
 mod system;
@@ -323,10 +325,7 @@ impl ManagedChromiumRuntime {
             // Keep canonical paths for confinement/integrity, but use an
             // equivalent ordinary Windows path at the Chromium CLI boundary.
             // IndexedDB's backing store does not accept verbatim drive paths.
-            OsString::from(format!(
-                "--user-data-dir={}",
-                dunce::simplified(user_data_dir).display()
-            )),
+            chromium_path_argument("--user-data-dir=", user_data_dir),
             OsString::from("--no-first-run"),
             OsString::from("--no-default-browser-check"),
         ];
@@ -391,10 +390,7 @@ impl ManagedChromiumRuntime {
                     argument
                         .validate()
                         .map_err(|error| invalid_data(error.to_string()))?;
-                    rendered.push(OsString::from(format!(
-                        "--load-extension={}",
-                        dunce::simplified(path).display()
-                    )));
+                    rendered.push(chromium_path_argument("--load-extension=", path));
                 }
                 LaunchArgument::DisableBlinkFeatures(features) => {
                     rendered.push(OsString::from(format!(

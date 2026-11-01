@@ -1,7 +1,7 @@
 //! Bounded local observation of the production MAIN-world hook template.
 //! No debug port, sandbox bypass, persisted user profile or external website.
 
-use super::{internal, invalid_data, is_reparse_point, now_ms};
+use super::{chromium_path_argument, internal, invalid_data, is_reparse_point, now_ms};
 use brows_application::{PortError, PortErrorKind, PortResult};
 use brows_domain::{BrowserBuild, BrowserBuildId, FingerprintSupport, ProfileId};
 use serde_json::Value;
@@ -176,14 +176,8 @@ pub(super) fn run(build: &BrowserBuild, profile_root: &Path) -> PortResult<Obser
             "--no-proxy-server",
             "--lang=en-US",
         ]);
-        command.arg(format!(
-            "--user-data-dir={}",
-            dunce::simplified(&user_data).display()
-        ));
-        command.arg(format!(
-            "--load-extension={}",
-            dunce::simplified(&extension).display()
-        ));
+        command.arg(chromium_path_argument("--user-data-dir=", &user_data));
+        command.arg(chromium_path_argument("--load-extension=", &extension));
         command.arg(format!("http://{}/{}", server.address, directory.nonce));
         command
             .stdin(Stdio::null())
