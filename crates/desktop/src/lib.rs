@@ -21,10 +21,17 @@ use tauri::{Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder};
 
 const TAURI_RUNTIME_MARKER_SCRIPT: &str = "window.__BROWS_IS_TAURI__ = true;";
 
+fn startup_trace(stage: &'static str) {
+    if std::env::var_os("BROWS_STARTUP_DIAGNOSTICS").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        eprintln!("[brows-startup] {stage}");
+    }
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .setup(|app| {
+            startup_trace("setup-started");
             let data_root = app.path().app_local_data_dir()?;
             let state = AppState::production(data_root)
                 .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?;
@@ -32,6 +39,7 @@ pub fn run() {
                 supervisor::SessionSupervisor::start(app.handle().clone(), state.sessions.clone())?;
             app.manage(state);
             app.manage(supervisor);
+            startup_trace("services-ready");
 
             let window = WebviewWindowBuilder::new(app, "main", main_window_url())
                 .title(app.config().product_name.as_deref().unwrap_or("Brows"))
@@ -47,8 +55,10 @@ pub fn run() {
             #[cfg(all(windows, feature = "webview-diagnostics"))]
             let window = window.additional_browser_args("--remote-debugging-port=9223");
             let window = window.build()?;
+            startup_trace("window-built");
             window.show()?;
             window.set_focus()?;
+            startup_trace("ready");
 
             Ok(())
         })
@@ -94,10 +104,26 @@ pub fn run() {
         .build(tauri::generate_context!())
         .expect("Brows desktop runtime failed to build")
         .run(|app, event| {
+            match &event {
+                RunEvent::WindowEvent {
+                    event: tauri::WindowEvent::CloseRequested { .. },
+                    ..
+                } => startup_trace("close-requested"),
+                RunEvent::WindowEvent {
+                    event: tauri::WindowEvent::Destroyed,
+                    ..
+                } => startup_trace("window-destroyed"),
+                RunEvent::Exit => startup_trace("exit"),
+                _ => {}
+            }
             if let RunEvent::ExitRequested { .. } = event {
+                startup_trace("exit-requested");
                 stop_accepting_background_work(app.state::<AppState>().inner());
+                startup_trace("admission-stopped");
                 app.state::<supervisor::SessionSupervisor>().stop();
+                startup_trace("supervisor-stopped");
                 shutdown_services(app.state::<AppState>().inner());
+                startup_trace("services-stopped");
             }
         })
 }
