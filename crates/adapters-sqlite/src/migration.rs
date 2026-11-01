@@ -1,7 +1,7 @@
 use brows_application::{PortError, PortErrorKind, PortResult};
 use rusqlite::{Connection, TransactionBehavior};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 6;
+pub const CURRENT_SCHEMA_VERSION: u32 = 7;
 
 const MIGRATION_1: &str = r#"
 CREATE TABLE profiles (
@@ -150,6 +150,23 @@ CREATE TABLE manager_settings (
 INSERT INTO manager_settings (id, max_concurrent_sessions) VALUES (1, 10);
 "#;
 
+const MIGRATION_7: &str = r#"
+CREATE TABLE restore_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'interrupted')),
+    profile_id TEXT,
+    started_at_ms INTEGER NOT NULL CHECK (started_at_ms >= 0),
+    completed_at_ms INTEGER CHECK (completed_at_ms IS NULL OR completed_at_ms >= started_at_ms),
+    cleanup_pending INTEGER NOT NULL CHECK (cleanup_pending IN (0, 1)),
+    failure_code TEXT CHECK (failure_code IN ('wrong_password', 'tampered', 'incompatible', 'unavailable', 'interrupted')),
+    CHECK ((status = 'running' AND completed_at_ms IS NULL AND failure_code IS NULL AND cleanup_pending = 1)
+        OR (status = 'completed' AND completed_at_ms IS NOT NULL AND failure_code IS NULL AND profile_id IS NOT NULL)
+        OR (status = 'failed' AND completed_at_ms IS NOT NULL AND failure_code IS NOT NULL AND failure_code != 'interrupted')
+        OR (status = 'interrupted' AND completed_at_ms IS NOT NULL AND failure_code IS NOT NULL AND failure_code = 'interrupted'))
+) STRICT;
+CREATE INDEX restore_tasks_pending_idx ON restore_tasks (status, cleanup_pending, id);
+"#;
+
 pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
     let found: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -187,6 +204,9 @@ pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
             6 => transaction
                 .execute_batch(MIGRATION_6)
                 .map_err(|error| sqlite_error("apply schema migration 6", error))?,
+            7 => transaction
+                .execute_batch(MIGRATION_7)
+                .map_err(|error| sqlite_error("apply schema migration 7", error))?,
             target => {
                 return Err(PortError::new(
                     PortErrorKind::Incompatible,

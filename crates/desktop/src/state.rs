@@ -6,7 +6,7 @@ use brows_adapters_runtime::{verify_authenticode_publisher, ManagedChromiumRunti
 use brows_adapters_secret_windows::WindowsCredentialStore;
 use brows_adapters_sqlite::{
     SqliteAuditSink, SqliteMigrationRecordRepository, SqliteProfileRepository,
-    SqliteProxyRepository, SqliteSettingsRepository,
+    SqliteProxyRepository, SqliteRestoreTaskRepository, SqliteSettingsRepository,
 };
 #[cfg(test)]
 use brows_application::memory::InMemoryAuditSink;
@@ -95,6 +95,7 @@ impl AppState {
         let profiles = Arc::new(SqliteProfileRepository::open(&database_path)?);
         let migration_records = Arc::new(SqliteMigrationRecordRepository::open(&database_path)?);
         let proxy_records = Arc::new(SqliteProxyRepository::open(&database_path)?);
+        let restore_tasks = Arc::new(SqliteRestoreTaskRepository::open(&database_path)?);
         let presets = Arc::new(InMemoryPresetCatalog::default());
         let credential_store = Arc::new(WindowsCredentialStore::new());
         let proxies = Arc::new(StoredProxyRuntime::new(
@@ -195,7 +196,7 @@ impl AppState {
                 profile_root,
             )?),
             migration_records,
-            clock,
+            clock.clone(),
         ));
         let proxy_management = Arc::new(ProxyApplicationService::new(
             proxy_records,
@@ -208,7 +209,13 @@ impl AppState {
             profile_service.clone(),
             session_service.clone(),
             backup_service.clone(),
+            restore_tasks,
+            clock,
         )));
+        // The data-root file lock is held and no UI/supervisor can start work yet.
+        if let Some(backups) = &backup_operations {
+            let _ = backups.recover_incomplete();
+        }
         Ok(Self {
             runtime_issue,
             backup_operations,
@@ -852,5 +859,108 @@ mod tests {
             .unwrap();
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn startup_recovers_each_restore_boundary_without_activating_interrupted_profiles() {
+        use brows_application::{ProfileRepository, RestoreTaskRepository, RestoreTaskStatus};
+        for phase in 0..5 {
+            let root = std::env::temp_dir()
+                .join(format!("brows-restore-restart-{}", uuid::Uuid::new_v4()));
+            let missing = || {
+                Err(brows_application::ApplicationError::new(
+                    brows_contracts::ErrorCode::CapabilityUnsupported,
+                    "missing",
+                ))
+            };
+            drop(AppState::production_with_runtime(root.clone(), missing()).unwrap());
+            let database = root.join("profiles.sqlite3");
+            let profiles = SqliteProfileRepository::open(&database).unwrap();
+            let original = draft("Existing")
+                .into_domain(
+                    ProfileId::new("existing").unwrap(),
+                    brows_domain::Revision::FIRST,
+                    false,
+                )
+                .unwrap();
+            profiles.create(original.clone()).unwrap();
+            let restored = draft("Restored")
+                .into_domain(
+                    ProfileId::new("fresh-restored").unwrap(),
+                    brows_domain::Revision::FIRST,
+                    true,
+                )
+                .unwrap();
+            let tasks = SqliteRestoreTaskRepository::open(&database).unwrap();
+            let task = tasks.begin(1_000).unwrap();
+            if phase >= 1 {
+                tasks.bind_profile(task.id, &restored.id).unwrap();
+            }
+            if phase >= 2 {
+                profiles.create(restored.clone()).unwrap();
+            }
+            let stage = root
+                .join("backups/restore-staging")
+                .join(format!("task-{:016x}", task.id));
+            std::fs::create_dir_all(stage.join("userdata/Default")).unwrap();
+            std::fs::write(stage.join("userdata/Default/state"), b"restored state").unwrap();
+            let sentinel = root.join("profiles/existing-data");
+            std::fs::create_dir_all(&sentinel).unwrap();
+            std::fs::write(sentinel.join("state"), b"existing state").unwrap();
+            if phase >= 3 {
+                EncryptedBackupService::new(root.join("backups"), root.join("profiles"))
+                    .unwrap()
+                    .install_restored_data(restored.id.as_str(), &stage.join("userdata"))
+                    .unwrap();
+            }
+            if phase == 4 {
+                tasks.complete(task.id, &restored, 1_001).unwrap();
+            }
+            drop(tasks);
+            drop(profiles);
+
+            for _ in 0..2 {
+                let state = AppState::production_with_runtime(root.clone(), missing()).unwrap();
+                let operations = state.backup_operations.as_ref().unwrap();
+                let records = operations.restore_tasks().unwrap();
+                assert_eq!(records.len(), 1);
+                assert_eq!(
+                    records[0].status,
+                    if phase == 4 {
+                        RestoreTaskStatus::Completed
+                    } else {
+                        RestoreTaskStatus::Interrupted
+                    }
+                );
+                assert!(!records[0].cleanup_pending);
+                assert!(!operations.cleanup_pending());
+                assert!(!stage.exists());
+                let profile_repository = SqliteProfileRepository::open(&database).unwrap();
+                assert_eq!(profile_repository.get(&original.id).unwrap(), original);
+                if phase >= 2 {
+                    assert_eq!(
+                        profile_repository.get(&restored.id).unwrap().archived,
+                        phase != 4
+                    );
+                }
+                if phase >= 3 {
+                    let installed = std::fs::read_dir(root.join("profiles"))
+                        .unwrap()
+                        .map(Result::unwrap)
+                        .find(|entry| entry.file_name().to_string_lossy().len() == 64)
+                        .unwrap();
+                    assert_eq!(
+                        std::fs::read(installed.path().join("userdata/Default/state")).unwrap(),
+                        b"restored state"
+                    );
+                }
+                assert_eq!(
+                    std::fs::read(sentinel.join("state")).unwrap(),
+                    b"existing state"
+                );
+                drop(profile_repository);
+                drop(state);
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 }

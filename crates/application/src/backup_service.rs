@@ -1,10 +1,14 @@
 use crate::{
-    ApplicationResult, BackupExportSpec, BackupImportSpec, ProfileApplicationService,
-    RestorableBackupService, SecretValue, SessionApplicationService,
+    ApplicationError, ApplicationResult, BackupExportSpec, BackupImportSpec, Clock,
+    ProfileApplicationService, RestorableBackupService, RestoreFailure, RestoreTask,
+    RestoreTaskRepository, RestoreTaskStatus, SecretValue, SessionApplicationService,
 };
 use brows_contracts::{ProfileDto, ProfileIdRequest};
 use brows_domain::ProfileId;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 
 /// Coordinates profile ownership with archive I/O. Transport handlers only map DTOs.
 #[derive(Debug)]
@@ -12,6 +16,10 @@ pub struct BackupApplicationService {
     profiles: Arc<ProfileApplicationService>,
     sessions: Arc<SessionApplicationService>,
     archives: Arc<dyn RestorableBackupService>,
+    tasks: Arc<dyn RestoreTaskRepository>,
+    clock: Arc<dyn Clock>,
+    restore_operation: Mutex<()>,
+    cleanup_warning: AtomicBool,
 }
 
 impl BackupApplicationService {
@@ -19,11 +27,17 @@ impl BackupApplicationService {
         profiles: Arc<ProfileApplicationService>,
         sessions: Arc<SessionApplicationService>,
         archives: Arc<dyn RestorableBackupService>,
+        tasks: Arc<dyn RestoreTaskRepository>,
+        clock: Arc<dyn Clock>,
     ) -> Self {
         Self {
             profiles,
             sessions,
             archives,
+            tasks,
+            clock,
+            restore_operation: Mutex::new(()),
+            cleanup_warning: AtomicBool::new(false),
         }
     }
 
@@ -48,27 +62,86 @@ impl BackupApplicationService {
     }
 
     pub fn import(&self, spec: BackupImportSpec) -> ApplicationResult<ProfileDto> {
-        let payload = self.archives.import(&spec)?;
-        // Cleanup also runs when profile validation or persistence fails.
-        let _staging = RestoreStaging {
-            archives: self.archives.as_ref(),
-            path: &payload.restored_data_dir,
-        };
-        self.profiles.create_imported_with(payload.profile, |id| {
-            Ok(self
-                .archives
-                .install_restored_data(id, &payload.restored_data_dir)?)
-        })
+        let _operation = self
+            .restore_operation
+            .lock()
+            .map_err(|_| ApplicationError::poisoned("restore"))?;
+        let task = self.tasks.begin(self.clock.now_ms())?;
+        let result = (|| -> ApplicationResult<ProfileDto> {
+            let payload = self.archives.import_for_task(&spec, task.id)?;
+            self.profiles.create_imported_journaled(
+                payload.profile,
+                |id| Ok(self.tasks.bind_profile(task.id, id)?),
+                |profile| {
+                    self.archives
+                        .install_restored_data(&profile.id, &payload.restored_data_dir)?;
+                    Ok(self.tasks.complete(task.id, profile, self.clock.now_ms())?)
+                },
+            )
+        })();
+        if let Err(error) = &result {
+            let failure = match error.code() {
+                brows_contracts::ErrorCode::BackupWrongPassword => RestoreFailure::WrongPassword,
+                brows_contracts::ErrorCode::BackupTampered => RestoreFailure::Tampered,
+                brows_contracts::ErrorCode::BackupIncompatible
+                | brows_contracts::ErrorCode::ValidationFailed
+                | brows_contracts::ErrorCode::RuntimeUntrusted
+                | brows_contracts::ErrorCode::NotFound => RestoreFailure::Incompatible,
+                _ => RestoreFailure::Unavailable,
+            };
+            // A journal failure leaves a pending record for restart recovery.
+            let _ = self
+                .tasks
+                .fail(task.id, false, failure, self.clock.now_ms());
+        }
+        if self
+            .archives
+            .cleanup_task(task.id)
+            .and_then(|()| self.tasks.cleanup_finished(task.id))
+            .is_err()
+        {
+            self.cleanup_warning.store(true, Ordering::Release);
+        }
+        result
     }
-}
 
-struct RestoreStaging<'a> {
-    archives: &'a dyn RestorableBackupService,
-    path: &'a std::path::Path,
-}
+    pub fn cleanup_pending(&self) -> bool {
+        self.cleanup_warning.load(Ordering::Acquire)
+    }
 
-impl Drop for RestoreStaging<'_> {
-    fn drop(&mut self) {
-        self.archives.discard_restored_data(self.path);
+    pub fn restore_tasks(&self) -> ApplicationResult<Vec<RestoreTask>> {
+        Ok(self.tasks.list(100)?)
+    }
+
+    /// Called at startup while the manager's data-root lock is held, or for a
+    /// retry under this same restore mutex. Never resumes without a password.
+    pub fn recover_incomplete(&self) -> ApplicationResult<bool> {
+        let _operation = self
+            .restore_operation
+            .lock()
+            .map_err(|_| ApplicationError::poisoned("restore"))?;
+        let result = (|| -> ApplicationResult<bool> {
+            let mut pending_cleanup = false;
+            for task in self.tasks.pending()? {
+                if task.status == RestoreTaskStatus::Running {
+                    self.tasks.fail(
+                        task.id,
+                        true,
+                        RestoreFailure::Interrupted,
+                        self.clock.now_ms(),
+                    )?;
+                }
+                if self.archives.cleanup_task(task.id).is_ok() {
+                    self.tasks.cleanup_finished(task.id)?;
+                } else {
+                    pending_cleanup = true;
+                }
+            }
+            pending_cleanup |= self.archives.cleanup_stale_staging()?;
+            Ok(pending_cleanup)
+        })();
+        self.cleanup_warning
+            .store(!matches!(result, Ok(false)), Ordering::Release);
+        result
     }
 }

@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
+    "test:backups": "node --experimental-vm-modules --test ui/tests/backup-api.test.mjs",
     "test:settings": "node --experimental-vm-modules --test ui/tests/settings-api.test.mjs",
     "test:fingerprint": "node --test tools/fingerprint-hook.test.mjs && node --experimental-vm-modules --test ui/tests/fingerprint-api.test.mjs",
     "ui:dev": "npm --prefix ui run dev",

@@ -1550,3 +1550,6 @@ impl crate::SettingsRepository for InMemorySettingsRepository {
         Ok(())
     }
 }
+
+mod restore_tasks;
+pub use restore_tasks::InMemoryRestoreTaskRepository;

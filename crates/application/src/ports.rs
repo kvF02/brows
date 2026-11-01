@@ -276,6 +276,85 @@ pub trait BackupService: fmt::Debug + Send + Sync {
 pub trait RestorableBackupService: BackupService {
     fn install_restored_data(&self, id: &ProfileId, staging: &std::path::Path) -> PortResult<()>;
     fn discard_restored_data(&self, staging: &std::path::Path);
+    fn import_for_task(
+        &self,
+        spec: &BackupImportSpec,
+        task_id: u64,
+    ) -> PortResult<BackupImportPayload>;
+    fn cleanup_task(&self, task_id: u64) -> PortResult<()>;
+    /// Startup/retry only, under exclusive restore ownership. Returns true if
+    /// any staging entry could not be safely removed.
+    fn cleanup_stale_staging(&self) -> PortResult<bool>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreTaskStatus {
+    Running,
+    Completed,
+    Failed,
+    Interrupted,
+}
+
+impl RestoreTaskStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Completed => "completed",
+            Self::Failed => "failed",
+            Self::Interrupted => "interrupted",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestoreFailure {
+    WrongPassword,
+    Tampered,
+    Incompatible,
+    Unavailable,
+    Interrupted,
+}
+
+impl RestoreFailure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::WrongPassword => "wrong_password",
+            Self::Tampered => "tampered",
+            Self::Incompatible => "incompatible",
+            Self::Unavailable => "unavailable",
+            Self::Interrupted => "interrupted",
+        }
+    }
+}
+
+/// Contains no password, archive content, source path or free-form error text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RestoreTask {
+    pub id: u64,
+    pub status: RestoreTaskStatus,
+    pub profile_id: Option<ProfileId>,
+    pub started_at_ms: u64,
+    pub completed_at_ms: Option<u64>,
+    pub cleanup_pending: bool,
+    pub failure: Option<RestoreFailure>,
+}
+
+pub trait RestoreTaskRepository: fmt::Debug + Send + Sync {
+    fn begin(&self, at_ms: u64) -> PortResult<RestoreTask>;
+    /// Bind the fresh identity before creating any profile record or installing data.
+    fn bind_profile(&self, id: u64, profile: &ProfileId) -> PortResult<()>;
+    /// Atomically activate the matching archived revision and complete its task.
+    fn complete(&self, id: u64, profile: &ProfileSpec, at_ms: u64) -> PortResult<()>;
+    fn fail(
+        &self,
+        id: u64,
+        interrupted: bool,
+        failure: RestoreFailure,
+        at_ms: u64,
+    ) -> PortResult<()>;
+    fn cleanup_finished(&self, id: u64) -> PortResult<()>;
+    fn list(&self, limit: usize) -> PortResult<Vec<RestoreTask>>;
+    fn pending(&self) -> PortResult<Vec<RestoreTask>>;
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]

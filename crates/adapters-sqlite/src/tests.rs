@@ -1,6 +1,7 @@
 use super::*;
 use brows_application::SettingsRepository;
 use brows_application::{PortErrorKind, ProfileQuery, ProfileRepository, ProxyRepository};
+use brows_application::{RestoreFailure, RestoreTaskRepository, RestoreTaskStatus};
 use brows_domain::{
     BrowserBuildId, BrowserBuildSelector, BrowserChannel, DeviceMemoryGb, DnsMode,
     EnvironmentPresetRef, FingerprintPersona, LocaleConfig, PlatformKind, PresetId, ProfileId,
@@ -17,6 +18,128 @@ use std::{
 };
 
 static NEXT_DATABASE: AtomicU64 = AtomicU64::new(1);
+
+#[test]
+fn restore_commit_activates_profile_and_completes_task_in_one_transaction() {
+    let database = TemporaryDatabase::new("restore-commit");
+    let profiles = SqliteProfileRepository::open(database.path()).unwrap();
+    let tasks = SqliteRestoreTaskRepository::open(database.path()).unwrap();
+    let task = tasks.begin(1_000).unwrap();
+    let mut restored = profile("new-restored-profile", "Restored");
+    restored.archived = true;
+    tasks.bind_profile(task.id, &restored.id).unwrap();
+    profiles.create(restored.clone()).unwrap();
+    assert!(tasks.cleanup_finished(task.id).is_err());
+
+    let mut stale = restored.clone();
+    stale.bump_revision();
+    assert!(tasks.complete(task.id, &stale, 1_001).is_err());
+    assert_eq!(
+        tasks.list(10).unwrap()[0].status,
+        RestoreTaskStatus::Running
+    );
+    assert_eq!(profiles.get(&restored.id).unwrap(), restored);
+
+    // Even if wall time moves backwards, the durable outcome remains valid.
+    tasks.complete(task.id, &restored, 999).unwrap();
+    assert!(!profiles.get(&restored.id).unwrap().archived);
+    assert_eq!(
+        profiles.get(&restored.id).unwrap().revision,
+        restored.revision.next()
+    );
+    assert_eq!(
+        tasks.list(10).unwrap()[0].status,
+        RestoreTaskStatus::Completed
+    );
+    assert_eq!(tasks.list(10).unwrap()[0].completed_at_ms, Some(1_000));
+    assert!(tasks
+        .fail(task.id, true, RestoreFailure::Interrupted, 1_010)
+        .is_err());
+    assert!(tasks.complete(task.id, &restored, 1_010).is_err());
+    tasks.cleanup_finished(task.id).unwrap();
+    assert!(tasks.pending().unwrap().is_empty());
+    drop(tasks);
+    assert_eq!(
+        SqliteRestoreTaskRepository::open(database.path())
+            .unwrap()
+            .list(10)
+            .unwrap()[0]
+            .status,
+        RestoreTaskStatus::Completed
+    );
+}
+
+#[test]
+fn restore_journal_survives_restart_and_only_valid_transitions_are_accepted() {
+    let database = TemporaryDatabase::new("restore-interrupted");
+    let tasks = SqliteRestoreTaskRepository::open(database.path()).unwrap();
+    let first = tasks.begin(10).unwrap();
+    let second = tasks.begin(11).unwrap();
+    tasks
+        .bind_profile(second.id, &ProfileId::new("not-created-yet").unwrap())
+        .unwrap();
+    assert!(tasks
+        .bind_profile(second.id, &ProfileId::new("different").unwrap())
+        .is_err());
+    drop(tasks);
+    let tasks = SqliteRestoreTaskRepository::open(database.path()).unwrap();
+    assert_eq!(tasks.pending().unwrap().len(), 2);
+    tasks
+        .fail(first.id, true, RestoreFailure::Interrupted, 12)
+        .unwrap();
+    tasks
+        .fail(second.id, false, RestoreFailure::WrongPassword, 13)
+        .unwrap();
+    tasks.cleanup_finished(first.id).unwrap();
+    assert_eq!(tasks.pending().unwrap().len(), 1);
+    assert_eq!(
+        tasks.list(10).unwrap()[0].failure,
+        Some(RestoreFailure::WrongPassword)
+    );
+    assert!(tasks
+        .fail(first.id, false, RestoreFailure::Unavailable, 14)
+        .is_err());
+    assert!(tasks
+        .bind_profile(first.id, &ProfileId::new("too-late").unwrap())
+        .is_err());
+}
+
+#[test]
+fn restore_schema_upgrade_preserves_v6_settings_and_profiles() {
+    let database = TemporaryDatabase::new("restore-upgrade");
+    let profiles = SqliteProfileRepository::open(database.path()).unwrap();
+    let original = profile("existing", "Existing");
+    profiles.create(original.clone()).unwrap();
+    let settings = SqliteSettingsRepository::open(database.path()).unwrap();
+    settings
+        .save(&brows_domain::ManagerSettings {
+            max_concurrent_sessions: 2,
+        })
+        .unwrap();
+    drop(settings);
+    drop(profiles);
+    Connection::open(database.path())
+        .unwrap()
+        .execute_batch("DROP TABLE restore_tasks; PRAGMA user_version = 6;")
+        .unwrap();
+    let tasks = SqliteRestoreTaskRepository::open(database.path()).unwrap();
+    assert!(tasks.list(10).unwrap().is_empty());
+    assert_eq!(
+        SqliteProfileRepository::open(database.path())
+            .unwrap()
+            .get(&original.id)
+            .unwrap(),
+        original
+    );
+    assert_eq!(
+        SqliteSettingsRepository::open(database.path())
+            .unwrap()
+            .load()
+            .unwrap()
+            .max_concurrent_sessions,
+        2
+    );
+}
 
 #[test]
 fn manager_settings_persist_and_invalid_writes_do_not_replace_them() {
@@ -50,7 +173,9 @@ fn settings_migration_upgrades_v5_without_modifying_existing_profiles() {
     {
         let connection = Connection::open(database.path()).unwrap();
         connection
-            .execute_batch("DROP TABLE manager_settings; PRAGMA user_version = 5;")
+            .execute_batch(
+                "DROP TABLE restore_tasks; DROP TABLE manager_settings; PRAGMA user_version = 5;",
+            )
             .unwrap();
     }
     let settings = SqliteSettingsRepository::open(database.path()).unwrap();

@@ -28,6 +28,8 @@ use tar::{Archive, Builder, Header};
 use walkdir::WalkDir;
 use zeroize::Zeroizing;
 
+mod recovery;
+
 const MAGIC: &[u8; 8] = b"BROWSBAK";
 const PAYLOAD_VERSION: u16 = 1;
 const ARGON_MEMORY_KIB: u32 = 64 * 1024;
@@ -131,43 +133,53 @@ impl EncryptedBackupService {
         profile_id: &str,
         restored_data_dir: &Path,
     ) -> PortResult<()> {
-        let staging = restored_data_dir
-            .canonicalize()
-            .map_err(|error| io_error("canonicalize restored profile data", error))?;
-        let staging_root = self
-            .backup_root
-            .join("restore-staging")
-            .canonicalize()
-            .map_err(|error| io_error("canonicalize restore staging root", error))?;
-        ensure_within(&staging, &staging_root, "restored profile data")?;
-        if !staging.is_dir() {
-            return Err(invalid("restored profile data is not a directory"));
-        }
-        inspect_source_tree(&staging, &staging_root)?;
+        let staging = self.validate_staging_data(restored_data_dir)?;
         let target = self.profile_data_path(profile_id);
-        if target.exists() {
-            return Err(PortError::new(
-                PortErrorKind::AlreadyExists,
-                "profile userdata already exists",
-            ));
+        match fs::symlink_metadata(&target) {
+            Ok(_) => {
+                return Err(PortError::new(
+                    PortErrorKind::AlreadyExists,
+                    "profile userdata already exists",
+                ))
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(io_error("inspect profile userdata", error)),
         }
         let parent = target
             .parent()
             .ok_or_else(|| invalid("profile userdata target has no parent"))?;
         fs::create_dir_all(parent)
             .map_err(|error| io_error("create profile data parent", error))?;
+        let metadata =
+            fs::symlink_metadata(parent).map_err(|e| io_error("inspect profile data parent", e))?;
+        if is_reparse_or_symlink(&metadata) {
+            return Err(invalid("profile data parent is a link"));
+        }
+        ensure_within(
+            &parent
+                .canonicalize()
+                .map_err(|e| io_error("resolve profile data parent", e))?,
+            &self.profile_root,
+            "profile data parent",
+        )?;
         fs::rename(&staging, &target)
             .map_err(|error| io_error("install restored profile data", error))?;
-        let staging_parent = restored_data_dir
-            .parent()
-            .ok_or_else(|| invalid("restored profile data has no staging parent"))?;
-        let _ = fs::remove_dir_all(staging_parent);
         Ok(())
     }
 
     pub fn discard_restored_data(&self, restored_data_dir: &Path) {
+        if restored_data_dir.file_name() != Some(OsStr::new("userdata")) {
+            return;
+        }
+        let Ok(Some(root)) = self.staging_root(false) else {
+            return;
+        };
         if let Some(parent) = restored_data_dir.parent() {
-            let _ = fs::remove_dir_all(parent);
+            if parent.parent() == Some(root.as_path()) {
+                if let Some(key) = parent.file_name().and_then(OsStr::to_str) {
+                    let _ = self.remove_staging_named(key);
+                }
+            }
         }
     }
 
@@ -258,7 +270,11 @@ impl EncryptedBackupService {
         result
     }
 
-    fn import_archive(&self, spec: &BackupImportSpec) -> PortResult<BackupImportPayload> {
+    fn import_archive(
+        &self,
+        spec: &BackupImportSpec,
+        task_id: Option<u64>,
+    ) -> PortResult<BackupImportPayload> {
         validate_password(spec.password.expose())?;
         let source = self.archive_path(&spec.source_name)?;
         let mut input = File::open(&source).map_err(|error| io_error("open backup", error))?;
@@ -266,11 +282,13 @@ impl EncryptedBackupService {
         let encrypted = EncryptedReader::new(input, &key, &nonce, header);
         let mut archive = Archive::new(encrypted);
 
-        let staging_parent = create_and_canonicalize(
-            self.backup_root.join("restore-staging"),
-            "backup restore staging root",
-        )?;
-        let staging = unique_staging_directory(&staging_parent)?;
+        let staging_parent = self
+            .staging_root(true)?
+            .ok_or_else(|| invalid("staging root missing"))?;
+        let staging = match task_id {
+            Some(id) => self.task_staging(id)?,
+            None => unique_staging_directory(&staging_parent)?,
+        };
         let result = extract_archive(&mut archive, &staging).and_then(|profile| {
             let mut encrypted = archive.into_inner();
             encrypted.finish_authentication()?;
@@ -283,13 +301,29 @@ impl EncryptedBackupService {
             })
         });
         if result.is_err() {
-            let _ = fs::remove_dir_all(&staging);
+            if let Some(key) = staging.file_name().and_then(OsStr::to_str) {
+                let _ = self.remove_staging_named(key);
+            }
         }
         result
     }
 }
 
 impl brows_application::RestorableBackupService for EncryptedBackupService {
+    fn import_for_task(
+        &self,
+        spec: &BackupImportSpec,
+        task_id: u64,
+    ) -> PortResult<BackupImportPayload> {
+        self.import_archive(spec, Some(task_id))
+    }
+    fn cleanup_task(&self, task_id: u64) -> PortResult<()> {
+        self.cleanup_task_staging(task_id)
+    }
+    fn cleanup_stale_staging(&self) -> PortResult<bool> {
+        self.sweep_staging()
+    }
+
     fn install_restored_data(
         &self,
         id: &brows_domain::ProfileId,
@@ -319,7 +353,7 @@ impl BackupService for EncryptedBackupService {
     }
 
     fn import(&self, spec: &BackupImportSpec) -> PortResult<BackupImportPayload> {
-        self.import_archive(spec)
+        self.import_archive(spec, None)
     }
 }
 
@@ -1036,7 +1070,7 @@ mod tests {
         }
     }
 
-    fn service(label: &str) -> (EncryptedBackupService, PathBuf) {
+    pub(super) fn service(label: &str) -> (EncryptedBackupService, PathBuf) {
         let root = temp_root(label);
         let service =
             EncryptedBackupService::new(root.join("backups"), root.join("profiles")).unwrap();
@@ -1131,6 +1165,62 @@ mod tests {
             result.unwrap_err().kind,
             PortErrorKind::CapabilityUnsupported
         );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn task_scoped_restore_authenticates_and_never_changes_the_source_profile() {
+        use brows_application::RestorableBackupService;
+        let (service, root) = service("task-scoped");
+        let source = profile();
+        let original = service.profile_data_path(source.id.as_str());
+        fs::create_dir_all(original.join("Default")).unwrap();
+        fs::write(original.join("Default/state"), b"source state").unwrap();
+        service
+            .export(&BackupExportSpec {
+                destination_name: "task.browsbak".into(),
+                profile: source,
+                password: password("correct horse battery"),
+                include_proxy_credential: false,
+            })
+            .unwrap();
+        let payload = service
+            .import_for_task(
+                &BackupImportSpec {
+                    source_name: "task.browsbak".into(),
+                    password: password("correct horse battery"),
+                },
+                17,
+            )
+            .unwrap();
+        assert_eq!(
+            payload
+                .restored_data_dir
+                .parent()
+                .unwrap()
+                .file_name()
+                .unwrap(),
+            "task-0000000000000011"
+        );
+        service
+            .install_restored_data("new-restored-profile", &payload.restored_data_dir)
+            .unwrap();
+        assert_eq!(
+            fs::read(
+                service
+                    .profile_data_path("new-restored-profile")
+                    .join("Default/state")
+            )
+            .unwrap(),
+            b"source state"
+        );
+        service.cleanup_task(17).unwrap();
+        assert_eq!(
+            fs::read(original.join("Default/state")).unwrap(),
+            b"source state"
+        );
+        assert!(service.archive_path("task.browsbak").unwrap().exists());
+        assert!(!service.cleanup_stale_staging().unwrap());
         let _ = fs::remove_dir_all(root);
     }
 }

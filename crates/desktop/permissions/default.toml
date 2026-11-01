@@ -153,10 +153,16 @@ identifier = "allow-settings-update"
 description = "Update supported manager preferences."
 commands = { allow = ["settings_update"] }
 
+[[permission]]
+identifier = "allow-backup-cleanup"
+description = "Retry cleanup of interrupted restore staging."
+commands = { allow = ["backup_cleanup"] }
+
 # Default permission set: auto-allowed for all capabilities.
 [default]
 description = "Default permissions for the Brows app — all custom commands."
 permissions = [
+  "allow-backup-cleanup",
   "allow-settings-get",
   "allow-settings-update",
   "allow-profile-list",

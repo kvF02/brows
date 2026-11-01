@@ -949,6 +949,7 @@ struct TestArchives {
     exported: std::sync::atomic::AtomicUsize,
     discarded: std::sync::atomic::AtomicUsize,
     fail_install: bool,
+    cleanup_blocked: std::sync::atomic::AtomicBool,
     export_gate: Option<(
         std::sync::mpsc::Sender<()>,
         std::sync::Mutex<std::sync::mpsc::Receiver<()>>,
@@ -981,6 +982,28 @@ impl BackupService for TestArchives {
 }
 
 impl RestorableBackupService for TestArchives {
+    fn import_for_task(&self, spec: &BackupImportSpec, _: u64) -> PortResult<BackupImportPayload> {
+        self.import(spec)
+    }
+    fn cleanup_task(&self, _: u64) -> PortResult<()> {
+        if self
+            .cleanup_blocked
+            .load(std::sync::atomic::Ordering::SeqCst)
+        {
+            return Err(PortError::new(
+                PortErrorKind::Unavailable,
+                "simulated cleanup failure",
+            ));
+        }
+        self.discard_restored_data(std::path::Path::new("test-staging/userdata"));
+        Ok(())
+    }
+    fn cleanup_stale_staging(&self) -> PortResult<bool> {
+        Ok(self
+            .cleanup_blocked
+            .load(std::sync::atomic::Ordering::SeqCst))
+    }
+
     fn install_restored_data(&self, _: &ProfileId, _: &std::path::Path) -> PortResult<()> {
         if self.fail_install {
             Err(PortError::new(
@@ -1008,12 +1031,15 @@ fn backup_holds_profile_reservation_for_the_entire_export() {
         exported: 0.into(),
         discarded: 0.into(),
         fail_install: false,
+        cleanup_blocked: false.into(),
         export_gate: Some((started, std::sync::Mutex::new(receiver))),
     });
     let service = BackupApplicationService::new(
         h.profile_service.clone(),
         h.session_service.clone(),
         archives.clone(),
+        Arc::new(InMemoryRestoreTaskRepository::new(h.profiles.clone())),
+        h.clock.clone(),
     );
     let id = profile.id.clone().try_into().unwrap();
     let worker = std::thread::spawn(move || {
@@ -1046,6 +1072,8 @@ fn backup_holds_profile_reservation_for_the_entire_export() {
         h.profile_service.clone(),
         h.session_service.clone(),
         archives.clone(),
+        Arc::new(InMemoryRestoreTaskRepository::new(h.profiles.clone())),
+        h.clock.clone(),
     );
     assert_eq!(
         service
@@ -1074,12 +1102,15 @@ fn failed_restore_install_is_archived_and_staging_is_always_discarded() {
         exported: 0.into(),
         discarded: 0.into(),
         fail_install: true,
+        cleanup_blocked: false.into(),
         export_gate: None,
     });
     let service = BackupApplicationService::new(
         h.profile_service.clone(),
         h.session_service.clone(),
         archives.clone(),
+        Arc::new(InMemoryRestoreTaskRepository::new(h.profiles.clone())),
+        h.clock.clone(),
     );
     assert!(service
         .import(BackupImportSpec {
@@ -1094,4 +1125,111 @@ fn failed_restore_install_is_archived_and_staging_is_always_discarded() {
     let profiles = h.profiles.profiles().unwrap();
     assert_eq!(profiles.len(), 2);
     assert_eq!(profiles.iter().filter(|p| p.archived).count(), 1);
+}
+
+#[test]
+fn restore_task_outcomes_survive_cleanup_failures_and_retries() {
+    let h = Harness::new(1);
+    let profile = h.create_profile("Restore source");
+    let archives = Arc::new(TestArchives {
+        profile: profile.try_into().unwrap(),
+        exported: 0.into(),
+        discarded: 0.into(),
+        fail_install: false,
+        cleanup_blocked: true.into(),
+        export_gate: None,
+    });
+    let tasks = Arc::new(InMemoryRestoreTaskRepository::new(h.profiles.clone()));
+    let service = BackupApplicationService::new(
+        h.profile_service.clone(),
+        h.session_service.clone(),
+        archives.clone(),
+        tasks.clone(),
+        h.clock.clone(),
+    );
+    let result = service
+        .import(BackupImportSpec {
+            source_name: "test.browsbak".into(),
+            password: SecretValue::new(b"long-test-password".to_vec()).unwrap(),
+        })
+        .unwrap();
+    assert!(!result.archived);
+    let record = tasks.list(10).unwrap().remove(0);
+    assert_eq!(record.status, RestoreTaskStatus::Completed);
+    assert_eq!(
+        record.profile_id.as_ref().unwrap().as_str(),
+        result.id.as_str()
+    );
+    assert!(record.cleanup_pending);
+    assert!(service.cleanup_pending());
+    assert!(service.recover_incomplete().unwrap());
+    archives
+        .cleanup_blocked
+        .store(false, std::sync::atomic::Ordering::SeqCst);
+    assert!(!service.recover_incomplete().unwrap());
+    assert!(!service.cleanup_pending());
+    assert!(tasks.pending().unwrap().is_empty());
+    assert_eq!(
+        tasks.list(10).unwrap()[0].status,
+        RestoreTaskStatus::Completed
+    );
+    assert_eq!(
+        h.profile_service
+            .get(ProfileIdRequest {
+                profile_id: result.id
+            })
+            .unwrap()
+            .revision,
+        result.revision
+    );
+}
+
+#[test]
+fn recovery_interrupts_unfinished_tasks_and_never_activates_their_profiles() {
+    let h = Harness::new(1);
+    let profile = h.create_profile("Source");
+    let archives = Arc::new(TestArchives {
+        profile: profile.clone().try_into().unwrap(),
+        exported: 0.into(),
+        discarded: 0.into(),
+        fail_install: false,
+        cleanup_blocked: false.into(),
+        export_gate: None,
+    });
+    let tasks = Arc::new(InMemoryRestoreTaskRepository::new(h.profiles.clone()));
+    let record = tasks.begin(100).unwrap();
+    tasks
+        .bind_profile(record.id, &profile.id.clone().try_into().unwrap())
+        .unwrap();
+    h.profile_service
+        .archive(ProfileRevisionRequest {
+            profile_id: profile.id.clone(),
+            expected_revision: profile.revision,
+        })
+        .unwrap();
+    let service = BackupApplicationService::new(
+        h.profile_service.clone(),
+        h.session_service.clone(),
+        archives,
+        tasks.clone(),
+        h.clock.clone(),
+    );
+    assert!(!service.recover_incomplete().unwrap());
+    assert_eq!(
+        tasks.list(10).unwrap()[0].status,
+        RestoreTaskStatus::Interrupted
+    );
+    assert!(
+        h.profile_service
+            .get(ProfileIdRequest {
+                profile_id: profile.id
+            })
+            .unwrap()
+            .archived
+    );
+    assert!(!service.recover_incomplete().unwrap());
+    assert_eq!(
+        tasks.list(10).unwrap()[0].failure,
+        Some(RestoreFailure::Interrupted)
+    );
 }

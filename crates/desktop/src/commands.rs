@@ -69,7 +69,7 @@ pub(crate) fn backup_list(state: State<'_, AppState>) -> IpcResult<Vec<BackupJob
     let entries = backup_service(&state)?
         .list_archives()
         .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
-    Ok(entries
+    let mut jobs = entries
         .into_iter()
         .map(|entry| BackupJobDto {
             id: format!("backup-{}", entry.name),
@@ -83,7 +83,79 @@ pub(crate) fn backup_list(state: State<'_, AppState>) -> IpcResult<Vec<BackupJob
             size_bytes: Some(entry.size_bytes),
             note: Some(format!("文件：{}；代理凭据未导出", entry.name)),
         })
-        .collect())
+        .collect::<Vec<_>>();
+    if let Some(operations) = &state.backup_operations {
+        for task in ipc(operations.restore_tasks())? {
+            let outcome = match task.failure {
+                Some(brows_application::RestoreFailure::WrongPassword) => "口令错误",
+                Some(brows_application::RestoreFailure::Tampered) => "归档校验失败",
+                Some(brows_application::RestoreFailure::Incompatible) => "配置或运行时不兼容",
+                Some(brows_application::RestoreFailure::Unavailable) => "恢复未完成",
+                Some(brows_application::RestoreFailure::Interrupted) => {
+                    "上次恢复被中断，未自动启用环境"
+                }
+                None => {
+                    if task.status == brows_application::RestoreTaskStatus::Completed {
+                        "已恢复为新环境"
+                    } else {
+                        "正在恢复"
+                    }
+                }
+            };
+            jobs.push(BackupJobDto {
+                id: format!("restore-{}", task.id),
+                profile_id: task
+                    .profile_id
+                    .map(|id| id.into_string())
+                    .unwrap_or_default(),
+                profile_name: format!("恢复任务 #{}", task.id),
+                status: task.status.as_str(),
+                created_at: task.started_at_ms.to_string(),
+                size_bytes: None,
+                note: Some(format!(
+                    "{outcome}{}",
+                    if task.cleanup_pending
+                        && task.status != brows_application::RestoreTaskStatus::Running
+                    {
+                        "；暂存清理未完成"
+                    } else {
+                        ""
+                    }
+                )),
+            });
+        }
+        jobs.sort_by(|a, b| {
+            b.created_at
+                .parse::<u64>()
+                .unwrap_or(0)
+                .cmp(&a.created_at.parse::<u64>().unwrap_or(0))
+                .then_with(|| a.id.cmp(&b.id))
+        });
+        if operations.cleanup_pending() {
+            jobs.insert(0, BackupJobDto { id: "restore-cleanup".into(), profile_id: String::new(), profile_name: "暂存清理".into(),
+                status: "interrupted", created_at: String::new(), size_bytes: None,
+                note: Some("部分暂存目录或任务记录尚待处理，已保留。可重试清理；已有环境数据不会删除。".into()) });
+        }
+    }
+    Ok(jobs)
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BackupCleanupResultDto {
+    cleanup_pending: bool,
+}
+
+#[tauri::command]
+pub(crate) fn backup_cleanup(state: State<'_, AppState>) -> IpcResult<BackupCleanupResultDto> {
+    let operations = state.backup_operations.as_ref().ok_or_else(|| ErrorDto {
+        code: ErrorCode::CapabilityUnsupported,
+        message: "备份不可用".into(),
+        violations: Vec::new(),
+    })?;
+    Ok(BackupCleanupResultDto {
+        cleanup_pending: ipc(operations.recover_incomplete())?,
+    })
 }
 
 #[tauri::command]

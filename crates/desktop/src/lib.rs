@@ -6,7 +6,7 @@ mod state;
 mod supervisor;
 
 use commands::{
-    backup_export, backup_import, backup_list, diagnostic_list, diagnostic_run,
+    backup_cleanup, backup_export, backup_import, backup_list, diagnostic_list, diagnostic_run,
     fingerprint_preview, legacy_migration_execute, legacy_migration_inspect, legacy_migration_list,
     legacy_migration_rollback, list_runtimes, morelogin_import, morelogin_preview,
     probe_runtime_fingerprint, profile_archive, profile_clone, profile_create, profile_get,
@@ -80,6 +80,7 @@ pub fn run() {
             probe_runtime_fingerprint,
             list_runtimes,
             backup_list,
+            backup_cleanup,
             backup_export,
             backup_import,
         ])

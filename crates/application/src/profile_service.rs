@@ -72,7 +72,8 @@ impl ProfileApplicationService {
         Ok(ProfileDto::from(&profile))
     }
 
-    /// Creates a profile from an authenticated backup manifest. The imported
+    /// Creates profile metadata from an authenticated manifest. Production
+    /// backup restores use BackupApplicationService for durable journaling. The imported
     /// profile always receives a fresh identity so restoring can never replace
     /// an existing profile's persisted record or userdata directory.
     pub fn create_imported(&self, profile: ProfileSpec) -> ApplicationResult<ProfileDto> {
@@ -82,22 +83,38 @@ impl ProfileApplicationService {
     /// Retain the new identity's reservation until restored data is installed.
     pub fn create_imported_with(
         &self,
-        mut profile: ProfileSpec,
+        profile: ProfileSpec,
         install: impl FnOnce(&ProfileId) -> ApplicationResult<()>,
+    ) -> ApplicationResult<ProfileDto> {
+        self.create_imported_journaled(
+            profile,
+            |_| Ok(()),
+            |archived| {
+                install(&archived.id)?;
+                let mut active = archived.clone();
+                active.archived = false;
+                active.bump_revision();
+                Ok(self.profiles.update(active, archived.revision)?)
+            },
+        )
+    }
+
+    pub(crate) fn create_imported_journaled(
+        &self,
+        mut profile: ProfileSpec,
+        bind: impl FnOnce(&ProfileId) -> ApplicationResult<()>,
+        install_and_commit: impl FnOnce(&ProfileSpec) -> ApplicationResult<()>,
     ) -> ApplicationResult<ProfileDto> {
         profile.id = self.ids.next_profile_id()?;
         profile.revision = Revision::FIRST;
-        // Persist as non-launchable first. If the manager dies during restore,
-        // the unfinished record remains archived rather than exposing partial data.
         profile.archived = true;
         let _reservation = self.operations.reserve(&profile.id)?;
         self.validate_references(&profile)?;
+        bind(&profile.id)?;
         self.profiles.create(profile.clone())?;
-        install(&profile.id)?;
-        let expected = profile.revision;
+        install_and_commit(&profile)?;
         profile.archived = false;
         profile.bump_revision();
-        self.profiles.update(profile.clone(), expected)?;
         self.audit_success("profile.import", profile.id.as_str());
         Ok(ProfileDto::from(&profile))
     }

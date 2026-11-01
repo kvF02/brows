@@ -394,6 +394,10 @@ export class MockApiClient implements ApiClient {
     return this.backups.map((backup) => ({ ...backup }));
   }
 
+  async cleanupBackupStaging(): Promise<{ cleanupPending: boolean }> {
+    return { cleanupPending: false };
+  }
+
   async exportBackup(
     profileId: string,
     _destinationName: string,
