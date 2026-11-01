@@ -131,6 +131,21 @@ jobs:
           path: target/native-browser-acceptance.json
           if-no-files-found: warn
           retention-days: 14
+      - name: Observe system Chrome fingerprint capability without assuming support
+        if: always() && !cancelled()
+        shell: pwsh
+        run: |
+          $env:TAURI_CONFIG = Get-Content ./crates/desktop/tauri.alpha.conf.json -Raw
+          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target/alpha-build'
+          cargo +1.97.1 test --locked -p brows-desktop --target x86_64-pc-windows-msvc fingerprint_runtime_real_probe_smoke_test -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-system-chrome-fingerprint-probe
+          path: target/system-chrome-fingerprint-probe.json
+          if-no-files-found: warn
+          retention-days: 14
 
   startup:
     needs: package

@@ -560,7 +560,27 @@ mod tests {
             build.capabilities.fingerprint_support,
             brows_domain::FingerprintSupport::Unverified
         );
-        let result = state.browsers.probe_fingerprint_support(&build.id).unwrap();
+        let observation = state.browsers.probe_fingerprint_support(&build.id);
+        let outcome = match &observation {
+            Ok(result) => serde_json::json!({
+                "fingerprintSupport":format!("{:?}",result.build.capabilities.fingerprint_support),
+                "fingerprintSupported":result.build.capabilities.fingerprint_support == brows_domain::FingerprintSupport::Supported,
+                "detail":result.detail,
+            }),
+            Err(error) => {
+                serde_json::json!({"errorKind":format!("{:?}",error.kind),"error":error.message})
+            }
+        };
+        std::fs::write(
+            target.join("system-chrome-fingerprint-probe.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "schemaVersion":1,"commit":std::env::var("GITHUB_SHA").ok(),
+                "scope":"isolated_headless_system_chrome_capability_probe",
+                "runtime":{"version":build.version,"sha256":build.sha256,"publisher":build.publisher},
+                "outcome":outcome,"fullPairMeasurementPerformed":false,
+            })).unwrap(),
+        ).unwrap();
+        let result = observation.unwrap();
         assert_ne!(
             result.build.capabilities.fingerprint_support,
             brows_domain::FingerprintSupport::Unverified

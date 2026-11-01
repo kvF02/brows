@@ -43,7 +43,20 @@ impl BrowserChild {
     }
     pub(crate) fn stop(&mut self) -> io::Result<()> {
         #[cfg(windows)]
-        self.job.terminate()?;
+        {
+            // A normal browser close flushes Cookie/LocalStorage writes that
+            // have not reached disk yet. Only address windows of this live,
+            // owned process. Headless workers have none and cancel immediately.
+            if self.child.try_wait()?.is_none() && windows::request_close(self.child.id()) {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+                while self.child.try_wait()?.is_none() && std::time::Instant::now() < deadline {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+            // Keep kill-on-close crash containment and bounded forced cleanup,
+            // including descendants left after a successful root-process exit.
+            self.job.terminate()?;
+        }
         if self.child.try_wait()?.is_none() {
             self.child.kill()?;
         }
@@ -68,7 +81,7 @@ mod windows {
         process::Child,
     };
     use windows_sys::Win32::{
-        Foundation::{HANDLE, INVALID_HANDLE_VALUE},
+        Foundation::{HANDLE, HWND, INVALID_HANDLE_VALUE, LPARAM},
         System::{
             Diagnostics::ToolHelp::{
                 CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
@@ -81,7 +94,53 @@ mod windows {
             },
             Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME},
         },
+        UI::WindowsAndMessaging::{
+            EnumWindows, GetWindowThreadProcessId, IsWindowVisible, PostMessageW, WM_CLOSE,
+        },
     };
+
+    struct CloseRequest {
+        process_id: u32,
+        posted: bool,
+    }
+
+    unsafe extern "system" fn close_owned_window(
+        window: HWND,
+        parameter: LPARAM,
+    ) -> windows_sys::core::BOOL {
+        // SAFETY: EnumWindows calls synchronously while request_close keeps this
+        // exclusive stack pointer alive. The callback does not retain it.
+        let request = unsafe { &mut *(parameter as *mut CloseRequest) };
+        let mut owner = 0;
+        // SAFETY: Win32 validates the enumerated handle. Posting is asynchronous
+        // so an unresponsive window cannot block the manager's shutdown thread.
+        unsafe {
+            GetWindowThreadProcessId(window, &mut owner);
+            if owner == request.process_id
+                && IsWindowVisible(window) != 0
+                && PostMessageW(window, WM_CLOSE, 0, 0) != 0
+            {
+                request.posted = true;
+            }
+        }
+        1
+    }
+
+    pub(super) fn request_close(process_id: u32) -> bool {
+        let mut request = CloseRequest {
+            process_id,
+            posted: false,
+        };
+        // SAFETY: the callback and pointer have the required ABI/lifetime. The
+        // caller holds a live Child handle, preventing process-ID reuse here.
+        unsafe {
+            EnumWindows(
+                Some(close_owned_window),
+                &mut request as *mut CloseRequest as LPARAM,
+            );
+        }
+        request.posted
+    }
 
     #[derive(Debug)]
     pub(super) struct BrowserJob(OwnedHandle);
@@ -193,6 +252,106 @@ mod tests {
     fn tree_grandchild() {
         if std::env::var_os("BROWS_TREE_TEST_MARKER").is_some() {
             std::thread::sleep(Duration::from_secs(30));
+        }
+    }
+
+    #[test]
+    #[ignore = "subprocess helper with a real Win32 window"]
+    fn shutdown_window_child() {
+        let Some(marker) = std::env::var_os("BROWS_WINDOW_TEST_MARKER") else {
+            return;
+        };
+        let marker = std::path::PathBuf::from(marker);
+        let ignore_close = std::env::var_os("BROWS_WINDOW_TEST_IGNORE_CLOSE").is_some();
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            CreateWindowExW, DispatchMessageW, GetMessageW, IsWindow, TranslateMessage,
+            CW_USEDEFAULT, WM_CLOSE, WS_OVERLAPPEDWINDOW, WS_VISIBLE,
+        };
+        let class: Vec<_> = "STATIC\0".encode_utf16().collect();
+        let title: Vec<_> = "Brows shutdown fixture\0".encode_utf16().collect();
+        // SAFETY: the predefined STATIC class needs no registration. Strings
+        // remain alive during creation; messages and the window stay on this
+        // fixture thread. The owned test process contains no user windows.
+        unsafe {
+            let window = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                title.as_ptr(),
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                300,
+                150,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                std::ptr::null(),
+            );
+            assert!(!window.is_null());
+            std::fs::write(&marker, b"ready").unwrap();
+            let mut message = std::mem::zeroed();
+            while IsWindow(window) != 0 && GetMessageW(&mut message, std::ptr::null_mut(), 0, 0) > 0
+            {
+                if message.hwnd == window && message.message == WM_CLOSE {
+                    std::fs::write(marker.with_extension("requested"), b"received").unwrap();
+                    if ignore_close {
+                        continue;
+                    }
+                    std::fs::write(marker.with_extension("saved"), b"flushed before exit").unwrap();
+                }
+                TranslateMessage(&message);
+                DispatchMessageW(&message);
+            }
+        }
+    }
+
+    #[test]
+    fn normal_stop_allows_window_cleanup_and_unresponsive_windows_are_bounded() {
+        for ignore in [false, true] {
+            let marker = std::env::temp_dir().join(format!(
+                "brows-window-{}-{}-{ignore}.ready",
+                std::process::id(),
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_nanos()
+            ));
+            let mut command = Command::new(std::env::current_exe().unwrap());
+            command
+                .args([
+                    "--ignored",
+                    "--exact",
+                    "process::tests::shutdown_window_child",
+                ])
+                .env("BROWS_WINDOW_TEST_MARKER", &marker);
+            if ignore {
+                command.env("BROWS_WINDOW_TEST_IGNORE_CLOSE", "1");
+            }
+            let mut child = BrowserChild::spawn(&mut command).unwrap();
+            let deadline = Instant::now() + Duration::from_secs(10);
+            while !marker.exists() && Instant::now() < deadline {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            assert!(marker.exists(), "native window fixture not ready");
+            let started = Instant::now();
+            child.stop().unwrap();
+            assert!(started.elapsed() < Duration::from_secs(5));
+            assert!(
+                marker.with_extension("requested").exists(),
+                "normal close was not requested"
+            );
+            assert_eq!(marker.with_extension("saved").exists(), !ignore);
+            assert_eq!(child.try_wait().unwrap().unwrap().success(), !ignore);
+            drop(child);
+            for path in [
+                marker.clone(),
+                marker.with_extension("requested"),
+                marker.with_extension("saved"),
+            ] {
+                if path.exists() {
+                    std::fs::remove_file(path).unwrap();
+                }
+            }
         }
     }
 

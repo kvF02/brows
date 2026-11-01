@@ -59,6 +59,8 @@ GitHub Actions 可手动运行 **Windows Alpha test build**，默认勾选官方
 
 独立的 `native-browser` job 执行 `system_native_windows_acceptance`：通过生产服务打开已签名的系统 Chrome，让 A/B 环境在同一 localhost 网站分别写入 Cookie、LocalStorage 和 IndexedDB，验证重复启动拦截、并发上限和第三个环境排队补位，再关闭管理服务、重启后读取原有状态。结果保存在 `windows-native-browser-acceptance` artifact；失败也保留已完成步骤和真实页面读数。测试只创建临时环境，不读取已有登录数据。它未覆盖前端点击、十环境压力或指纹独立，相关结果不能从存储隔离测试推断。
 
+同一 job 还对系统 Chrome 执行独立的 headless 指纹能力探针，保存 `windows-system-chrome-fingerprint-probe` 报告。此步骤验证探针执行和状态记录；`fingerprintSupported: false` 仍表示该浏览器不支持当前指纹入口，步骤本身成功不代表指纹验收通过。双环境完整观测需先通过能力探针。
+
 运行状态以对应 commit 的 Actions 记录和 `build-info.json` 为准。首次 Windows 构建耗时取决于依赖下载、编译与 Actions 排队；说明文件本身不证明构建或真机验收已经执行。
 
 已知限制：当前官方 CFT `156.0.8078.80` 缺少 Authenticode 签名，Windows 验收拒绝它，未执行双样本采集。系统 Chrome 的历史扩展探针也曾返回 Unsupported，因此本轮 Alpha 可测试原生多开，但不能宣称指纹独立已经可用。

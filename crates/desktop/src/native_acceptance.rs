@@ -144,7 +144,12 @@ fn storage_logs(root: &Path, directory: &Path, depth: usize, logs: &mut Vec<Valu
         }
         if metadata.is_dir() {
             storage_logs(root, &entry.path(), depth - 1, logs);
-        } else if matches!(entry.file_name().to_str(), Some("LOG" | "LOG.old"))
+        } else if entry.path().components().any(|c| {
+            matches!(
+                c.as_os_str().to_str(),
+                Some("IndexedDB" | "Local Storage" | "Session Storage")
+            )
+        }) && matches!(entry.file_name().to_str(), Some("LOG" | "LOG.old"))
             && metadata.len() <= 65536
             && logs.len() < 12
         {
