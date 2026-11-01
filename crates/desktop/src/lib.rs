@@ -34,7 +34,7 @@ pub fn run() {
             app.manage(supervisor);
 
             let window = WebviewWindowBuilder::new(app, "main", main_window_url())
-                .title("Brows")
+                .title(app.config().product_name.as_deref().unwrap_or("Brows"))
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(1040.0, 680.0)
                 .on_navigation(is_allowed_navigation)
@@ -151,6 +151,19 @@ fn is_allowed_navigation(url: &Url) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn alpha_build_uses_its_own_data_namespace_without_overriding_security_settings() {
+        let alpha: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.alpha.conf.json")).unwrap();
+        let stable: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        assert_ne!(alpha["identifier"], stable["identifier"]);
+        assert_eq!(alpha["identifier"], "local-brows-desktop-alpha");
+        assert_eq!(alpha["productName"], "Brows Alpha");
+        assert_eq!(alpha.as_object().unwrap().len(), 3);
+        assert!(alpha["app"].is_null());
+    }
 
     #[test]
     fn navigation_allows_only_packaged_assets_and_exact_dev_origin() {

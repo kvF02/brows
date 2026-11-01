@@ -1,0 +1,77 @@
+name: Windows Alpha test build
+
+on:
+  workflow_dispatch:
+    inputs:
+      official_runtime:
+        description: "Also download official Chrome for Testing and run real headless fingerprint acceptance"
+        required: false
+        default: true
+        type: boolean
+  push:
+    branches: ["alpha/**"]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          targets: x86_64-pc-windows-msvc
+          components: clippy, rustfmt
+      - name: Check, build and package isolated Alpha
+        id: package
+        shell: pwsh
+        run: |
+          $package = & ./tools/build-alpha.ps1
+          "directory=$($package.Directory)" >> $env:GITHUB_OUTPUT
+          "artifact_name=$($package.ArtifactName)" >> $env:GITHUB_OUTPUT
+      - uses: actions/upload-artifact@v4
+        id: artifact
+        with:
+          name: ${{ steps.package.outputs.artifact_name }}
+          path: ${{ steps.package.outputs.directory }}/
+          if-no-files-found: error
+          include-hidden-files: false
+          retention-days: 14
+      - name: Link download and explain test scope
+        shell: pwsh
+        env:
+          ALPHA_ARTIFACT_URL: ${{ steps.artifact.outputs.artifact-url }}
+        run: |
+          "### Brows Alpha for Windows x64" >> $env:GITHUB_STEP_SUMMARY
+          "[Download test build]($env:ALPHA_ARTIFACT_URL)" >> $env:GITHUB_STEP_SUMMARY
+          "The archive contains the executable, Chinese test notes, source revision and SHA-256 checksums. Alpha uses its own data namespace." >> $env:GITHUB_STEP_SUMMARY
+          "This package does not certify real fingerprint support. Check the separate fingerprint job and the runtime probe on the test PC." >> $env:GITHUB_STEP_SUMMARY
+
+  fingerprint:
+    if: github.event_name == 'push' || inputs.official_runtime
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+      - name: Real official CFT installation and two-profile observation
+        run: cargo +1.97.1 test --locked -p brows-adapters-runtime official_windows_install_and_probe_smoke -- --ignored --nocapture
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-alpha-fingerprint-report
+          path: target/fingerprint-measurement.json
+          if-no-files-found: warn
+          retention-days: 14

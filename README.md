@@ -114,6 +114,15 @@ See [official runtime installation and acceptance](docs/runtime-installation.md)
 The platform-independent Rust crates can also be tested with the GNU Windows
 toolchain when MSVC Build Tools are unavailable.
 
+## Alpha testing
+
+A Windows x64 Alpha can be built through **Windows Alpha test build** in GitHub
+Actions or `npm.cmd run desktop:alpha` on a Windows build machine. It embeds the
+UI, uses the separate `local-brows-desktop-alpha` data namespace and includes
+source revision and SHA-256 checksums. See the [Chinese testing guide](docs/alpha-testing.md)
+for download, prerequisites, test cases and current execution status. A successful
+package build does not certify real fingerprint support.
+
 ## Development
 
 Install and run the UI:
