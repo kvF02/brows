@@ -9,3 +9,4 @@ description = "Fail-closed proxy control adapters for Brows"
 brows-application = { path = "../application" }
 brows-domain = { path = "../domain" }
 base64 = "0.22.1"
+mio = { version = "1.2.2", features = ["net", "os-poll"] }

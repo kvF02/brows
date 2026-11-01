@@ -3,20 +3,27 @@ use brows_application::{PortError, PortErrorKind, PortResult, SecretValue};
 use brows_domain::{DnsMode, ProxyScheme, ProxySpec};
 use std::{
     io::{Read, Write},
-    net::{Shutdown, TcpListener, TcpStream, ToSocketAddrs},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Arc, Condvar, Mutex,
-    },
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream, ToSocketAddrs},
+    sync::Arc,
     thread::{self, JoinHandle},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
+mod lifecycle;
+use lifecycle::{BrokerShutdown, ConnectionGate, SocketRegistration, Workers};
+
+#[cfg(test)]
+#[path = "broker/lifecycle_tests.rs"]
+mod lifecycle_tests;
+
 const MAX_UPSTREAM_CONNECTIONS: usize = 6;
+const MAX_CLIENT_CONNECTIONS: usize = 32;
+const CONNECT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 
 pub(crate) struct BrokerHandle {
     port: u16,
-    stop: Arc<AtomicBool>,
+    shutdown: Arc<BrokerShutdown>,
+    gate: Arc<ConnectionGate>,
     thread: Option<JoinHandle<()>>,
 }
 impl std::fmt::Debug for BrokerHandle {
@@ -38,24 +45,53 @@ impl BrokerHandle {
         listener
             .set_nonblocking(true)
             .map_err(|e| ioerr("configure broker listener", e))?;
-        let stop = Arc::new(AtomicBool::new(false));
-        let flag = stop.clone();
+        let shutdown = Arc::new(BrokerShutdown::default());
+        let flag = shutdown.clone();
         let secret = secret.map(Arc::new);
         let gate = Arc::new(ConnectionGate::new(MAX_UPSTREAM_CONNECTIONS));
+        let mut workers = Workers {
+            handles: Vec::new(),
+            shutdown: shutdown.clone(),
+            gate: gate.clone(),
+        };
         let thread = thread::Builder::new()
             .name(format!("brows-proxy-{port}"))
             .spawn(move || {
-                while !flag.load(Ordering::Acquire) {
+                while !flag.is_stopping() {
+                    workers.reap_finished();
                     match listener.accept() {
                         Ok((client, _)) => {
+                            if flag.is_stopping() || workers.handles.len() >= MAX_CLIENT_CONNECTIONS
+                            {
+                                let _ = client.shutdown(Shutdown::Both);
+                                continue;
+                            }
+                            let registration = match flag.track(&client) {
+                                Ok(registration) => registration,
+                                Err(_) => {
+                                    let _ = client.shutdown(Shutdown::Both);
+                                    continue;
+                                }
+                            };
                             let p = proxy.clone();
                             let s = secret.clone();
-                            let g = gate.clone();
-                            let _ = thread::Builder::new()
+                            let g = workers.gate.clone();
+                            let shutdown = flag.clone();
+                            if let Ok(worker) = thread::Builder::new()
                                 .name("brows-proxy-connection".into())
                                 .spawn(move || {
-                                    handle_with_failure_response(client, &p, s.as_deref(), &g);
-                                });
+                                    let _registration = registration;
+                                    handle_with_failure_response(
+                                        client,
+                                        &p,
+                                        s.as_deref(),
+                                        &g,
+                                        &shutdown,
+                                    );
+                                })
+                            {
+                                workers.handles.push(worker);
+                            }
                         }
                         Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                             thread::sleep(Duration::from_millis(20))
@@ -63,11 +99,14 @@ impl BrokerHandle {
                         Err(_) => break,
                     }
                 }
+                drop(listener);
+                // Workers drops next: close sockets, wake permit waiters, and join all handlers.
             })
             .map_err(|e| ioerr("start broker thread", e))?;
         Ok(Self {
             port,
-            stop,
+            shutdown,
+            gate,
             thread: Some(thread),
         })
     }
@@ -75,8 +114,8 @@ impl BrokerHandle {
         self.port
     }
     pub fn stop(&mut self) {
-        self.stop.store(true, Ordering::Release);
-        let _ = TcpStream::connect(("127.0.0.1", self.port));
+        self.shutdown.cancel();
+        self.gate.close();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -88,13 +127,18 @@ fn handle_with_failure_response(
     proxy: &ProxySpec,
     secret: Option<&SecretValue>,
     gate: &ConnectionGate,
+    shutdown: &Arc<BrokerShutdown>,
 ) {
     let fallback = client.try_clone().ok();
     let timeout = Duration::from_millis(proxy.connect_timeout_ms.into());
-    let result = gate
-        .acquire(timeout)
-        .and_then(|_permit| handle(client, proxy, secret));
+    let result = gate.acquire(timeout).and_then(|_permit| {
+        shutdown.check()?;
+        handle(client, proxy, secret, shutdown)
+    });
     if let Err(error) = result {
+        if shutdown.is_stopping() {
+            return;
+        }
         if let Some(mut client) = fallback {
             let (status, reason) = if error.kind == PortErrorKind::ProxyAuth {
                 (
@@ -115,66 +159,6 @@ fn handle_with_failure_response(
     }
 }
 
-#[derive(Debug)]
-struct ConnectionGate {
-    available: Mutex<usize>,
-    changed: Condvar,
-    capacity: usize,
-}
-
-impl ConnectionGate {
-    fn new(capacity: usize) -> Self {
-        Self {
-            available: Mutex::new(capacity),
-            changed: Condvar::new(),
-            capacity,
-        }
-    }
-
-    fn acquire(&self, timeout: Duration) -> PortResult<ConnectionPermit<'_>> {
-        let available = self.available.lock().map_err(|_| {
-            PortError::new(
-                PortErrorKind::Unavailable,
-                "proxy connection gate unavailable",
-            )
-        })?;
-        let (mut available, wait) = self
-            .changed
-            .wait_timeout_while(available, timeout, |count| *count == 0)
-            .map_err(|_| {
-                PortError::new(
-                    PortErrorKind::Unavailable,
-                    "proxy connection gate unavailable",
-                )
-            })?;
-        if wait.timed_out() && *available == 0 {
-            return Err(PortError::new(
-                PortErrorKind::ProxyConnect,
-                "upstream proxy connection limit remained busy",
-            ));
-        }
-        *available -= 1;
-        Ok(ConnectionPermit { gate: self })
-    }
-
-    fn release(&self) {
-        if let Ok(mut available) = self.available.lock() {
-            *available = (*available + 1).min(self.capacity);
-            self.changed.notify_one();
-        }
-    }
-}
-
-#[derive(Debug)]
-struct ConnectionPermit<'a> {
-    gate: &'a ConnectionGate,
-}
-
-impl Drop for ConnectionPermit<'_> {
-    fn drop(&mut self) {
-        self.gate.release();
-    }
-}
 impl Drop for BrokerHandle {
     fn drop(&mut self) {
         self.stop();
@@ -185,6 +169,7 @@ fn handle(
     mut client: TcpStream,
     proxy: &ProxySpec,
     secret: Option<&SecretValue>,
+    shutdown: &Arc<BrokerShutdown>,
 ) -> PortResult<()> {
     client
         .set_nonblocking(false)
@@ -199,7 +184,7 @@ fn handle(
     let method = parts.next().unwrap_or("");
     let target = parts.next().unwrap_or("");
     if method.eq_ignore_ascii_case("CONNECT") {
-        let upstream = connect_target(proxy, secret, target)?;
+        let (upstream, _registration) = connect_target(proxy, secret, target, shutdown)?;
         client
             .write_all(b"HTTP/1.1 200 Connection Established\r\n\r\n")
             .map_err(|e| ioerr("acknowledge tunnel", e))?;
@@ -208,7 +193,8 @@ fn handle(
     }
     if matches!(proxy.scheme, ProxyScheme::Socks5) {
         let destination = parse_absolute_http_target(target)?;
-        let mut upstream = socks_connect(proxy, secret, &destination.authority)?;
+        let (mut upstream, _registration) =
+            socks_connect(proxy, secret, &destination.authority, shutdown)?;
         let forwarded = rewrite_request_target(&head, &destination.path_and_query)?;
         upstream
             .write_all(&forwarded)
@@ -216,16 +202,8 @@ fn handle(
         tunnel(client, upstream);
         return Ok(());
     }
-    let timeout = Duration::from_millis(proxy.connect_timeout_ms.into());
-    let address = (proxy.host.as_str(), proxy.port)
-        .to_socket_addrs()
-        .map_err(|e| ioerr("resolve upstream proxy", e))?
-        .next()
-        .ok_or_else(|| {
-            PortError::new(PortErrorKind::ProxyConnect, "upstream proxy has no address")
-        })?;
-    let mut upstream = TcpStream::connect_timeout(&address, timeout)
-        .map_err(|e| ioerr("connect upstream proxy", e))?;
+    let (mut upstream, _registration) =
+        connect_upstream(proxy, "connect upstream proxy", shutdown)?;
     let forwarded = inject_auth(&head, proxy, secret)?;
     upstream
         .write_all(&forwarded)
@@ -338,18 +316,20 @@ fn connect_target(
     proxy: &ProxySpec,
     secret: Option<&SecretValue>,
     target: &str,
-) -> PortResult<TcpStream> {
+    shutdown: &Arc<BrokerShutdown>,
+) -> PortResult<(TcpStream, SocketRegistration)> {
     match proxy.scheme {
-        ProxyScheme::Http | ProxyScheme::Https => http_connect(proxy, secret, target),
-        ProxyScheme::Socks5 => socks_connect(proxy, secret, target),
+        ProxyScheme::Http | ProxyScheme::Https => http_connect(proxy, secret, target, shutdown),
+        ProxyScheme::Socks5 => socks_connect(proxy, secret, target, shutdown),
     }
 }
 fn http_connect(
     proxy: &ProxySpec,
     secret: Option<&SecretValue>,
     target: &str,
-) -> PortResult<TcpStream> {
-    let mut s = connect_upstream(proxy, "connect upstream proxy")?;
+    shutdown: &Arc<BrokerShutdown>,
+) -> PortResult<(TcpStream, SocketRegistration)> {
+    let (mut s, registration) = connect_upstream(proxy, "connect upstream proxy", shutdown)?;
     let auth = auth_header(proxy, secret)?;
     write!(
         s,
@@ -364,14 +344,15 @@ fn http_connect(
         ));
     }
     clear_transport_timeouts(&s);
-    Ok(s)
+    Ok((s, registration))
 }
 fn socks_connect(
     proxy: &ProxySpec,
     secret: Option<&SecretValue>,
     target: &str,
-) -> PortResult<TcpStream> {
-    let mut s = connect_upstream(proxy, "connect SOCKS5 proxy")?;
+    shutdown: &Arc<BrokerShutdown>,
+) -> PortResult<(TcpStream, SocketRegistration)> {
+    let (mut s, registration) = connect_upstream(proxy, "connect SOCKS5 proxy", shutdown)?;
     let auth = proxy.username.is_some();
     s.write_all(if auth { &[5, 1, 2] } else { &[5, 1, 0] })
         .map_err(|e| ioerr("send SOCKS greeting", e))?;
@@ -447,6 +428,7 @@ fn socks_connect(
             }
         }
     }
+    shutdown.check()?;
     b.extend(port.to_be_bytes());
     s.write_all(&b)
         .map_err(|e| ioerr("send SOCKS connect", e))?;
@@ -479,7 +461,7 @@ fn socks_connect(
     s.read_exact(&mut tail)
         .map_err(|e| ioerr("read SOCKS address", e))?;
     clear_transport_timeouts(&s);
-    Ok(s)
+    Ok((s, registration))
 }
 
 fn clear_transport_timeouts(stream: &TcpStream) {
@@ -487,23 +469,85 @@ fn clear_transport_timeouts(stream: &TcpStream) {
     stream.set_write_timeout(None).ok();
 }
 
-fn connect_upstream(proxy: &ProxySpec, context: &'static str) -> PortResult<TcpStream> {
+fn connect_upstream(
+    proxy: &ProxySpec,
+    context: &'static str,
+    shutdown: &Arc<BrokerShutdown>,
+) -> PortResult<(TcpStream, SocketRegistration)> {
+    shutdown.check()?;
     let timeout = Duration::from_millis(proxy.connect_timeout_ms.into());
+    // System DNS itself is synchronous. Check cancellation again before any connect.
     let addresses = (proxy.host.as_str(), proxy.port)
         .to_socket_addrs()
         .map_err(|_| PortError::new(PortErrorKind::ProxyConnect, "proxy host resolution failed"))?;
     for address in addresses {
-        if let Ok(stream) = TcpStream::connect_timeout(&address, timeout) {
-            stream.set_read_timeout(Some(timeout)).ok();
-            stream.set_write_timeout(Some(timeout)).ok();
-            return Ok(stream);
+        shutdown.check()?;
+        if let Ok(stream) = connect_address(address, timeout, shutdown) {
+            let registration = shutdown.track(&stream)?;
+            return Ok((stream, registration));
         }
     }
+    shutdown.check()?;
     Err(PortError::new(
         PortErrorKind::ProxyConnect,
         format!("{context}: connection timed out or failed"),
     ))
 }
+
+fn connect_address(
+    address: SocketAddr,
+    timeout: Duration,
+    shutdown: &BrokerShutdown,
+) -> PortResult<TcpStream> {
+    use mio::{Events, Interest, Poll, Token};
+    shutdown.check()?;
+    let mut poll = Poll::new().map_err(|e| ioerr("create proxy connection poller", e))?;
+    let mut stream =
+        mio::net::TcpStream::connect(address).map_err(|e| ioerr("connect upstream proxy", e))?;
+    poll.registry()
+        .register(&mut stream, Token(0), Interest::WRITABLE)
+        .map_err(|e| ioerr("register proxy connection", e))?;
+    let mut events = Events::with_capacity(4);
+    let started = Instant::now();
+    loop {
+        shutdown.check()?;
+        if let Some(error) = stream
+            .take_error()
+            .map_err(|e| ioerr("query proxy connection", e))?
+        {
+            return Err(ioerr("connect upstream proxy", error));
+        }
+        if stream.peer_addr().is_ok() {
+            poll.registry()
+                .deregister(&mut stream)
+                .map_err(|e| ioerr("finish proxy connection", e))?;
+            let stream: TcpStream = stream.into();
+            stream
+                .set_nonblocking(false)
+                .map_err(|e| ioerr("configure upstream proxy", e))?;
+            stream
+                .set_read_timeout(Some(timeout))
+                .map_err(|e| ioerr("configure upstream timeout", e))?;
+            stream
+                .set_write_timeout(Some(timeout))
+                .map_err(|e| ioerr("configure upstream timeout", e))?;
+            return Ok(stream);
+        }
+        let remaining = timeout.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return Err(PortError::new(
+                PortErrorKind::ProxyConnect,
+                "proxy connection timed out",
+            ));
+        }
+        if let Err(error) = poll.poll(&mut events, Some(remaining.min(CONNECT_POLL_INTERVAL))) {
+            if error.kind() != std::io::ErrorKind::Interrupted {
+                return Err(ioerr("wait for proxy connection", error));
+            }
+        }
+    }
+}
+
 fn split_target(v: &str) -> PortResult<(&str, u16)> {
     let (h, p) = v
         .rsplit_once(':')
@@ -561,19 +605,41 @@ fn read_head(s: &mut TcpStream) -> PortResult<Vec<u8>> {
         "proxy header incomplete or too large",
     ))
 }
-fn tunnel(a: TcpStream, b: TcpStream) {
-    let (mut ar, mut aw) = (a.try_clone().ok(), a);
-    let (mut br, mut bw) = (b.try_clone().ok(), b);
-    if let (Some(mut ar), Some(mut br)) = (ar.take(), br.take()) {
-        let t = thread::spawn(move || {
-            let _ = std::io::copy(&mut ar, &mut bw);
-            let _ = bw.shutdown(Shutdown::Write);
-        });
-        let _ = std::io::copy(&mut br, &mut aw);
-        let _ = aw.shutdown(Shutdown::Write);
-        let _ = t.join();
-    }
+fn tunnel(mut a: TcpStream, mut b: TcpStream) {
+    clear_transport_timeouts(&a);
+    clear_transport_timeouts(&b);
+    let (Ok(mut ar), Ok(mut bw)) = (a.try_clone(), b.try_clone()) else {
+        let _ = a.shutdown(Shutdown::Both);
+        let _ = b.shutdown(Shutdown::Both);
+        return;
+    };
+    // Both copy directions are joined, including when the parent handler unwinds.
+    thread::scope(|scope| {
+        let outgoing = thread::Builder::new()
+            .name("brows-proxy-upload".into())
+            .spawn_scoped(scope, move || {
+                if std::io::copy(&mut ar, &mut bw).is_err() {
+                    let _ = ar.shutdown(Shutdown::Both);
+                    let _ = bw.shutdown(Shutdown::Both);
+                } else {
+                    let _ = bw.shutdown(Shutdown::Write);
+                }
+            });
+        if let Ok(outgoing) = outgoing {
+            if std::io::copy(&mut b, &mut a).is_err() {
+                let _ = a.shutdown(Shutdown::Both);
+                let _ = b.shutdown(Shutdown::Both);
+            } else {
+                let _ = a.shutdown(Shutdown::Write);
+            }
+            let _ = outgoing.join();
+        } else {
+            let _ = a.shutdown(Shutdown::Both);
+            let _ = b.shutdown(Shutdown::Both);
+        }
+    });
 }
+
 fn ioerr(context: &'static str, e: std::io::Error) -> PortError {
     PortError::new(PortErrorKind::ProxyConnect, format!("{context}: {e}"))
 }
