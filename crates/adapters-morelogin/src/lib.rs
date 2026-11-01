@@ -13,6 +13,8 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
+mod recovery;
+
 const MAX_EXPORT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_MIGRATION_FILES: u64 = 500_000;
 const MAX_MIGRATION_BYTES: u64 = 8 * 1024 * 1024 * 1024;
@@ -227,6 +229,14 @@ impl MoreLoginProfileDataMigrator {
     fn profile_dir(&self, profile_id: &ProfileId) -> PortResult<PathBuf> {
         let key = hex_digest(profile_id.as_str().as_bytes());
         let path = self.target_root.join(key);
+        if let Ok(metadata) = fs::symlink_metadata(&path) {
+            if recovery::is_link(&metadata) || !metadata.is_dir() {
+                return Err(PortError::new(
+                    PortErrorKind::InvalidData,
+                    "target profile directory is linked or invalid",
+                ));
+            }
+        }
         fs::create_dir_all(&path)
             .map_err(|error| io_error("create target profile directory", error))?;
         let path = path
@@ -285,7 +295,7 @@ impl LegacyProfileDataMigrator for MoreLoginProfileDataMigrator {
                 "migration staging or backup already exists",
             ));
         }
-        if !target.exists() {
+        if !recovery::checked_tree(&target)? {
             fs::create_dir_all(&target)
                 .map_err(|error| io_error("create empty target profile", error))?;
         }
@@ -317,26 +327,11 @@ impl LegacyProfileDataMigrator for MoreLoginProfileDataMigrator {
     }
 
     fn rollback(&self, profile_id: &ProfileId, backup_key: &str) -> PortResult<()> {
-        validate_backup_key(backup_key)?;
-        let profile_dir = self.profile_dir(profile_id)?;
-        let target = profile_dir.join("userdata");
-        let backup = profile_dir.join(backup_key);
-        ensure_confined_child(&backup, &profile_dir)?;
-        let after = profile_dir.join(format!("userdata.after-rollback-{}", &backup_key[16..]));
-        ensure_confined_child(&after, &profile_dir)?;
-        if !target.is_dir() || !backup.is_dir() || after.exists() {
-            return Err(PortError::new(
-                PortErrorKind::InvalidData,
-                "rollback directories are unavailable",
-            ));
-        }
-        fs::rename(&target, &after)
-            .map_err(|error| io_error("preserve migrated profile", error))?;
-        if let Err(error) = fs::rename(&backup, &target) {
-            let _ = fs::rename(&after, &target);
-            return Err(io_error("restore migration backup", error));
-        }
-        Ok(())
+        self.recover_rollback(profile_id, backup_key)
+    }
+
+    fn recover(&self, profile_id: &ProfileId, operation_key: &str) -> PortResult<()> {
+        self.recover_migration(profile_id, operation_key)
     }
 }
 
@@ -364,8 +359,14 @@ fn copy_tree(source: &Path, target: &Path) -> PortResult<()> {
             let file_type = entry
                 .file_type()
                 .map_err(|error| io_error("read source entry type", error))?;
-            if file_type.is_symlink() {
-                continue;
+            if recovery::is_link(
+                &fs::symlink_metadata(entry.path())
+                    .map_err(|e| io_error("inspect migration link", e))?,
+            ) {
+                return Err(PortError::new(
+                    PortErrorKind::InvalidData,
+                    "migration contains a link or reparse point",
+                ));
             }
             let destination = to.join(entry.file_name());
             if file_type.is_dir() {
@@ -404,8 +405,14 @@ fn inspect_tree(root: &Path) -> PortResult<(u64, u64)> {
             let file_type = entry
                 .file_type()
                 .map_err(|error| io_error("inspect profile entry type", error))?;
-            if file_type.is_symlink() {
-                continue;
+            if recovery::is_link(
+                &fs::symlink_metadata(entry.path())
+                    .map_err(|e| io_error("inspect migration link", e))?,
+            ) {
+                return Err(PortError::new(
+                    PortErrorKind::InvalidData,
+                    "migration contains a link or reparse point",
+                ));
             }
             let metadata = entry
                 .metadata()

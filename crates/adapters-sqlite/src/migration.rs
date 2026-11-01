@@ -1,7 +1,7 @@
 use brows_application::{PortError, PortErrorKind, PortResult};
 use rusqlite::{Connection, TransactionBehavior};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 8;
+pub const CURRENT_SCHEMA_VERSION: u32 = 9;
 
 const MIGRATION_1: &str = r#"
 CREATE TABLE profiles (
@@ -190,6 +190,13 @@ DROP TABLE restore_tasks_v7;
 CREATE INDEX restore_tasks_pending_idx ON restore_tasks (status, cleanup_pending, id);
 "#;
 
+const MIGRATION_9: &str = r#"
+ALTER TABLE migration_records ADD COLUMN recovery_pending INTEGER NOT NULL DEFAULT 0 CHECK (recovery_pending IN (0, 1));
+ALTER TABLE migration_records ADD COLUMN rollback_pending INTEGER NOT NULL DEFAULT 0 CHECK (rollback_pending IN (0, 1) AND (rollback_pending = 0 OR (recovery_pending = 1 AND status = 'completed')));
+UPDATE migration_records SET recovery_pending = 1 WHERE status IN ('running', 'failed');
+CREATE INDEX migration_recovery_idx ON migration_records (recovery_pending, id);
+"#;
+
 pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
     let found: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -233,6 +240,9 @@ pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
             8 => transaction
                 .execute_batch(MIGRATION_8)
                 .map_err(|error| sqlite_error("apply schema migration 8", error))?,
+            9 => transaction
+                .execute_batch(MIGRATION_9)
+                .map_err(|error| sqlite_error("apply schema migration 9", error))?,
             target => {
                 return Err(PortError::new(
                     PortErrorKind::Incompatible,
@@ -332,7 +342,7 @@ mod tests {
             connection
                 .pragma_query_value::<u32, _>(None, "user_version", |r| r.get(0))
                 .unwrap(),
-            8
+            CURRENT_SCHEMA_VERSION
         );
     }
 }

@@ -275,6 +275,9 @@ pub trait BackupService: fmt::Debug + Send + Sync {
 
 /// Filesystem installation is kept behind an adapter alongside archive extraction.
 pub trait RestorableBackupService: BackupService {
+    fn cleanup_pending(&self) -> bool {
+        false
+    }
     /// Adapters without cooperative I/O must decline cancellation before they write.
     fn export_controlled(
         &self,
@@ -418,6 +421,9 @@ pub trait LegacyProfileDataMigrator: fmt::Debug + Send + Sync {
         operation_key: &str,
     ) -> PortResult<LegacyMigrationArtifact>;
     fn rollback(&self, profile_id: &ProfileId, backup_key: &str) -> PortResult<()>;
+    /// Restores the pre-migration layout and preserves any installed new data.
+    /// Must be idempotent and must never read the legacy source during recovery.
+    fn recover(&self, profile_id: &ProfileId, operation_key: &str) -> PortResult<()>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -446,6 +452,8 @@ pub struct MigrationRecord {
     pub source_kind: String,
     pub source_profile_id: String,
     pub status: MigrationRecordStatus,
+    pub recovery_pending: bool,
+    pub rollback_pending: bool,
     pub started_at_ms: u64,
     pub completed_at_ms: Option<u64>,
     pub copied_files: Option<u64>,
@@ -469,7 +477,11 @@ pub trait MigrationRecordRepository: fmt::Debug + Send + Sync {
         artifact: &LegacyMigrationArtifact,
     ) -> PortResult<MigrationRecord>;
     fn fail(&self, id: u64, completed_at_ms: u64, summary: &str) -> PortResult<MigrationRecord>;
+    fn has_newer_commit(&self, profile_id: &ProfileId, id: u64) -> PortResult<bool>;
+    fn begin_rollback(&self, id: u64) -> PortResult<MigrationRecord>;
     fn mark_rolled_back(&self, id: u64, completed_at_ms: u64) -> PortResult<MigrationRecord>;
+    fn pending(&self) -> PortResult<Vec<MigrationRecord>>;
+    fn recovery_finished(&self, id: u64) -> PortResult<()>;
     fn get(&self, id: u64) -> PortResult<MigrationRecord>;
     fn list(&self, limit: usize) -> PortResult<Vec<MigrationRecord>>;
 }

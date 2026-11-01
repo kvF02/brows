@@ -62,7 +62,7 @@ impl MigrationRecordRepository for SqliteMigrationRecordRepository {
         let started = to_i64(started_at_ms, "started_at_ms")?;
         let connection = self.lock()?;
         connection.execute(
-            "INSERT INTO migration_records (profile_id, source_kind, source_profile_id, status, started_at_ms) VALUES (?1, ?2, ?3, 'running', ?4)",
+            "INSERT INTO migration_records (profile_id, source_kind, source_profile_id, status, started_at_ms, recovery_pending) VALUES (?1, ?2, ?3, 'running', ?4, 1)",
             params![profile_id.as_str(), source_kind, source_profile_id, started],
         ).map_err(|error| sqlite_error("create migration record", error))?;
         let id = u64::try_from(connection.last_insert_rowid())
@@ -78,7 +78,7 @@ impl MigrationRecordRepository for SqliteMigrationRecordRepository {
     ) -> PortResult<MigrationRecord> {
         let connection = self.lock()?;
         let changed = connection.execute(
-            "UPDATE migration_records SET status='completed', completed_at_ms=?2, copied_files=?3, copied_bytes=?4, backup_key=?5, error_summary=NULL WHERE id=?1 AND status='running'",
+            "UPDATE migration_records SET status='completed', completed_at_ms=MAX(started_at_ms, ?2), copied_files=?3, copied_bytes=?4, backup_key=?5, error_summary=NULL, recovery_pending=0 WHERE id=?1 AND status='running' AND recovery_pending=1 AND rollback_pending=0",
             params![to_i64(id, "id")?, to_i64(completed_at_ms, "completed_at_ms")?, to_i64(artifact.copied_files, "copied_files")?, to_i64(artifact.copied_bytes, "copied_bytes")?, artifact.backup_key],
         ).map_err(|error| sqlite_error("complete migration record", error))?;
         ensure_changed(changed)?;
@@ -88,17 +88,47 @@ impl MigrationRecordRepository for SqliteMigrationRecordRepository {
     fn fail(&self, id: u64, completed_at_ms: u64, summary: &str) -> PortResult<MigrationRecord> {
         let connection = self.lock()?;
         let changed = connection.execute(
-            "UPDATE migration_records SET status='failed', completed_at_ms=?2, error_summary=?3 WHERE id=?1 AND status='running'",
+            "UPDATE migration_records SET status='failed', completed_at_ms=MAX(started_at_ms, ?2), error_summary=?3 WHERE id=?1 AND status='running'",
             params![to_i64(id, "id")?, to_i64(completed_at_ms, "completed_at_ms")?, summary],
         ).map_err(|error| sqlite_error("fail migration record", error))?;
         ensure_changed(changed)?;
         get_with_connection(&connection, id)
     }
 
+    fn has_newer_commit(&self, profile_id: &ProfileId, id: u64) -> PortResult<bool> {
+        self.lock()?.query_row("SELECT EXISTS(SELECT 1 FROM migration_records WHERE profile_id=?1 AND id>?2 AND status IN ('completed', 'rolled_back'))", params![profile_id.as_str(), to_i64(id, "id")?], |row| row.get(0))
+            .map_err(|error| sqlite_error("check newer migration commits", error))
+    }
+
+    fn begin_rollback(&self, id: u64) -> PortResult<MigrationRecord> {
+        let connection = self.lock()?;
+        let changed = connection.execute("UPDATE migration_records SET recovery_pending=1, rollback_pending=1 WHERE id=?1 AND status='completed' AND recovery_pending=0 AND rollback_pending=0", [to_i64(id, "id")?])
+            .map_err(|error| sqlite_error("journal migration rollback", error))?;
+        ensure_changed(changed)?;
+        get_with_connection(&connection, id)
+    }
+
+    fn pending(&self) -> PortResult<Vec<MigrationRecord>> {
+        let connection = self.lock()?;
+        let mut statement = connection.prepare("SELECT id, profile_id, source_kind, source_profile_id, status, started_at_ms, completed_at_ms, copied_files, copied_bytes, backup_key, error_summary, recovery_pending, rollback_pending FROM migration_records WHERE recovery_pending=1 ORDER BY id")
+            .map_err(|error| sqlite_error("prepare migration recovery", error))?;
+        let rows = statement
+            .query_map([], from_row)
+            .map_err(|error| sqlite_error("query migration recovery", error))?;
+        rows.collect::<Result<Vec<_>, _>>()
+            .map_err(|error| sqlite_error("read migration recovery", error))
+    }
+
+    fn recovery_finished(&self, id: u64) -> PortResult<()> {
+        let changed = self.lock()?.execute("UPDATE migration_records SET recovery_pending=0 WHERE id=?1 AND status='failed' AND rollback_pending=0", [to_i64(id, "id")?])
+            .map_err(|error| sqlite_error("finish migration recovery", error))?;
+        ensure_changed(changed)
+    }
+
     fn mark_rolled_back(&self, id: u64, completed_at_ms: u64) -> PortResult<MigrationRecord> {
         let connection = self.lock()?;
         let changed = connection.execute(
-            "UPDATE migration_records SET status='rolled_back', completed_at_ms=?2 WHERE id=?1 AND status='completed'",
+            "UPDATE migration_records SET status='rolled_back', completed_at_ms=MAX(started_at_ms, ?2), recovery_pending=0, rollback_pending=0 WHERE id=?1 AND status='completed' AND rollback_pending=1",
             params![to_i64(id, "id")?, to_i64(completed_at_ms, "completed_at_ms")?],
         ).map_err(|error| sqlite_error("mark migration rolled back", error))?;
         ensure_changed(changed)?;
@@ -113,7 +143,7 @@ impl MigrationRecordRepository for SqliteMigrationRecordRepository {
     fn list(&self, limit: usize) -> PortResult<Vec<MigrationRecord>> {
         let connection = self.lock()?;
         let mut statement = connection.prepare(
-            "SELECT id, profile_id, source_kind, source_profile_id, status, started_at_ms, completed_at_ms, copied_files, copied_bytes, backup_key, error_summary FROM migration_records ORDER BY started_at_ms DESC, id DESC LIMIT ?1"
+            "SELECT id, profile_id, source_kind, source_profile_id, status, started_at_ms, completed_at_ms, copied_files, copied_bytes, backup_key, error_summary, recovery_pending, rollback_pending FROM migration_records ORDER BY started_at_ms DESC, id DESC LIMIT ?1"
         ).map_err(|error| sqlite_error("prepare migration history", error))?;
         let rows = statement
             .query_map([i64::try_from(limit).unwrap_or(i64::MAX)], from_row)
@@ -125,7 +155,7 @@ impl MigrationRecordRepository for SqliteMigrationRecordRepository {
 
 fn get_with_connection(connection: &Connection, id: u64) -> PortResult<MigrationRecord> {
     connection.query_row(
-        "SELECT id, profile_id, source_kind, source_profile_id, status, started_at_ms, completed_at_ms, copied_files, copied_bytes, backup_key, error_summary FROM migration_records WHERE id=?1",
+        "SELECT id, profile_id, source_kind, source_profile_id, status, started_at_ms, completed_at_ms, copied_files, copied_bytes, backup_key, error_summary, recovery_pending, rollback_pending FROM migration_records WHERE id=?1",
         [to_i64(id, "id")?], from_row,
     ).optional().map_err(|error| sqlite_error("get migration record", error))?
         .ok_or_else(|| PortError::not_found("migration record"))
@@ -143,6 +173,8 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<MigrationRecord> {
                 Box::new(error),
             )
         })?,
+        recovery_pending: row.get(11)?,
+        rollback_pending: row.get(12)?,
         source_kind: row.get(2)?,
         source_profile_id: row.get(3)?,
         status: parse_status(&status).map_err(|error| {

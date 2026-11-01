@@ -120,7 +120,7 @@ fn restore_schema_upgrade_preserves_v6_settings_and_profiles() {
     drop(profiles);
     Connection::open(database.path())
         .unwrap()
-        .execute_batch("DROP TABLE restore_tasks; PRAGMA user_version = 6;")
+        .execute_batch("DROP TABLE restore_tasks; DROP INDEX migration_recovery_idx; ALTER TABLE migration_records DROP COLUMN rollback_pending; ALTER TABLE migration_records DROP COLUMN recovery_pending; PRAGMA user_version = 6;")
         .unwrap();
     let tasks = SqliteRestoreTaskRepository::open(database.path()).unwrap();
     assert!(tasks.list(10).unwrap().is_empty());
@@ -174,7 +174,7 @@ fn settings_migration_upgrades_v5_without_modifying_existing_profiles() {
         let connection = Connection::open(database.path()).unwrap();
         connection
             .execute_batch(
-                "DROP TABLE restore_tasks; DROP TABLE manager_settings; PRAGMA user_version = 5;",
+                "DROP TABLE restore_tasks; DROP TABLE manager_settings; DROP INDEX migration_recovery_idx; ALTER TABLE migration_records DROP COLUMN rollback_pending; ALTER TABLE migration_records DROP COLUMN recovery_pending; PRAGMA user_version = 5;",
             )
             .unwrap();
     }
@@ -532,4 +532,120 @@ fn cancelled_restore_cannot_activate_a_profile_or_change_its_terminal_outcome() 
         RestoreTaskStatus::Cancelled
     );
     assert!(reopened.pending().unwrap().is_empty());
+}
+
+#[test]
+fn migration_recovery_and_rollback_intent_survive_restart_and_acknowledge_once() {
+    use brows_application::{
+        LegacyMigrationArtifact, MigrationRecordRepository, MigrationRecordStatus,
+    };
+    let database = TemporaryDatabase::new("migration-recovery");
+    let profiles = SqliteProfileRepository::open(database.path()).unwrap();
+    let profile = profile("migration-profile", "Migration");
+    profiles.create(profile.clone()).unwrap();
+    let records = SqliteMigrationRecordRepository::open(database.path()).unwrap();
+    let failed = records
+        .begin(&profile.id, "morelogin", "12345678", 100)
+        .unwrap();
+    records.fail(failed.id, 99, "fixed failure").unwrap();
+    assert!(records.get(failed.id).unwrap().recovery_pending);
+    assert!(records.recovery_finished(failed.id + 100).is_err());
+    records.recovery_finished(failed.id).unwrap();
+    let running = records
+        .begin(&profile.id, "morelogin", "12345678", 110)
+        .unwrap();
+    assert!(records.recovery_finished(running.id).is_err());
+    let completed = records
+        .complete(
+            running.id,
+            111,
+            &LegacyMigrationArtifact {
+                backup_key: format!("userdata.backup-migration-{}", running.id),
+                copied_files: 2,
+                copied_bytes: 20,
+            },
+        )
+        .unwrap();
+    assert!(!completed.recovery_pending);
+    assert!(!completed.rollback_pending);
+    assert!(records.has_newer_commit(&profile.id, failed.id).unwrap());
+    assert!(!records.has_newer_commit(&profile.id, running.id).unwrap());
+    assert!(records.mark_rolled_back(running.id, 112).is_err());
+    records.begin_rollback(running.id).unwrap();
+    assert!(records.begin_rollback(running.id).is_err());
+    drop(records);
+    let records = SqliteMigrationRecordRepository::open(database.path()).unwrap();
+    let pending = records.pending().unwrap();
+    assert_eq!(pending.len(), 1);
+    assert!(pending[0].rollback_pending);
+    assert!(records.recovery_finished(running.id).is_err());
+    let result = records.mark_rolled_back(running.id, 113).unwrap();
+    assert_eq!(result.status, MigrationRecordStatus::RolledBack);
+    assert!(!result.recovery_pending);
+    assert!(!result.rollback_pending);
+    assert!(records.pending().unwrap().is_empty());
+    assert!(records
+        .complete(
+            running.id,
+            114,
+            &LegacyMigrationArtifact {
+                backup_key: "x".into(),
+                copied_files: 0,
+                copied_bytes: 0
+            }
+        )
+        .is_err());
+}
+
+#[test]
+fn v8_upgrade_marks_only_unfinished_and_failed_migrations_for_recovery() {
+    use brows_application::{LegacyMigrationArtifact, MigrationRecordRepository};
+    let database = TemporaryDatabase::new("migration-v8-upgrade");
+    let profiles = SqliteProfileRepository::open(database.path()).unwrap();
+    let profile = profile("old-migration", "Old");
+    profiles.create(profile.clone()).unwrap();
+    let records = SqliteMigrationRecordRepository::open(database.path()).unwrap();
+    let running = records
+        .begin(&profile.id, "morelogin", "12345678", 1)
+        .unwrap();
+    let failed = records
+        .begin(&profile.id, "morelogin", "12345678", 2)
+        .unwrap();
+    records.fail(failed.id, 3, "failed").unwrap();
+    let complete = records
+        .begin(&profile.id, "morelogin", "12345678", 4)
+        .unwrap();
+    records
+        .complete(
+            complete.id,
+            5,
+            &LegacyMigrationArtifact {
+                backup_key: "userdata.backup-migration-3".into(),
+                copied_files: 2,
+                copied_bytes: 10,
+            },
+        )
+        .unwrap();
+    drop(records);
+    drop(profiles);
+    Connection::open(database.path()).unwrap().execute_batch("DROP INDEX migration_recovery_idx;
+        ALTER TABLE migration_records DROP COLUMN rollback_pending; ALTER TABLE migration_records DROP COLUMN recovery_pending; PRAGMA user_version=8;").unwrap();
+    let records = SqliteMigrationRecordRepository::open(database.path()).unwrap();
+    assert_eq!(
+        records
+            .pending()
+            .unwrap()
+            .iter()
+            .map(|r| r.id)
+            .collect::<Vec<_>>(),
+        vec![running.id, failed.id]
+    );
+    assert!(!records.get(complete.id).unwrap().recovery_pending);
+    assert_eq!(
+        SqliteProfileRepository::open(database.path())
+            .unwrap()
+            .get(&profile.id)
+            .unwrap(),
+        profile
+    );
 }

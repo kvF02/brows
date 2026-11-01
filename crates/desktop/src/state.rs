@@ -199,6 +199,9 @@ impl AppState {
             migration_records,
             clock.clone(),
         ));
+        // Recovery must finish or retain per-profile launch reservations before
+        // the supervisor/UI can admit any sessions.
+        migration_service.recover_incomplete()?;
         let proxy_management = Arc::new(ProxyApplicationService::new(
             proxy_records,
             credential_store,
@@ -871,6 +874,192 @@ mod tests {
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn startup_recovers_migration_and_rollback_boundaries_and_locks_ambiguous_profiles() {
+        use brows_application::{
+            LegacyProfileDataMigrator, MigrationRecordRepository, MigrationRecordStatus,
+            ProfileRepository,
+        };
+        for phase in 0..9 {
+            let root = std::env::temp_dir()
+                .join(format!("brows-migration-restart-{}", uuid::Uuid::new_v4()));
+            let missing = || {
+                Err(brows_application::ApplicationError::new(
+                    ErrorCode::CapabilityUnsupported,
+                    "missing",
+                ))
+            };
+            drop(AppState::production_with_runtime(root.clone(), missing()).unwrap());
+            let database = root.join("profiles.sqlite3");
+            let profiles = SqliteProfileRepository::open(&database).unwrap();
+            let original = draft("Migration target")
+                .into_domain(
+                    ProfileId::new("migration-target").unwrap(),
+                    brows_domain::Revision::FIRST,
+                    false,
+                )
+                .unwrap();
+            profiles.create(original.clone()).unwrap();
+            let records = SqliteMigrationRecordRepository::open(&database).unwrap();
+            let task = records
+                .begin(&original.id, "morelogin", "12345678", 100)
+                .unwrap();
+            let source = root.join("source/chrome_12345678");
+            std::fs::create_dir_all(&source).unwrap();
+            std::fs::write(source.join("state"), b"imported").unwrap();
+            let migrator =
+                MoreLoginProfileDataMigrator::new(root.join("source"), root.join("profiles"))
+                    .unwrap();
+            let key = format!("migration-{}", task.id);
+            let artifact = migrator.migrate(&original.id, "12345678", &key).unwrap();
+            let directory = std::fs::read_dir(root.join("profiles"))
+                .unwrap()
+                .next()
+                .unwrap()
+                .unwrap()
+                .path();
+            let target = directory.join("userdata");
+            let backup = directory.join(&artifact.backup_key);
+            let staging = directory.join(format!("userdata.staging-{key}"));
+            std::fs::write(backup.join("state"), b"original").unwrap();
+            match phase {
+                0 => {
+                    std::fs::rename(&target, &staging).unwrap();
+                    std::fs::rename(&backup, &target).unwrap();
+                }
+                1 => {
+                    std::fs::rename(&target, &staging).unwrap();
+                }
+                2 => {}
+                3 => {
+                    std::fs::rename(
+                        &target,
+                        directory.join(format!("userdata.interrupted-{key}")),
+                    )
+                    .unwrap();
+                }
+                4 => {
+                    records.complete(task.id, 101, &artifact).unwrap();
+                }
+                5 => {
+                    records.complete(task.id, 101, &artifact).unwrap();
+                    records.begin_rollback(task.id).unwrap();
+                    std::fs::rename(
+                        &target,
+                        directory.join(format!("userdata.after-rollback-{key}")),
+                    )
+                    .unwrap();
+                }
+                6 => {
+                    records.complete(task.id, 101, &artifact).unwrap();
+                    records.begin_rollback(task.id).unwrap();
+                    migrator
+                        .rollback(&original.id, &artifact.backup_key)
+                        .unwrap();
+                }
+                7 => {
+                    std::fs::create_dir(&staging).unwrap();
+                    records
+                        .begin(&original.id, "morelogin", "12345678", 102)
+                        .unwrap();
+                }
+                8 => {
+                    // A legacy failure followed by a newer committed migration
+                    // cannot be reconstructed by reverting the older backup.
+                    records.fail(task.id, 101, "legacy failure").unwrap();
+                    let newer = records
+                        .begin(&original.id, "morelogin", "12345678", 102)
+                        .unwrap();
+                    let newer_backup = format!("userdata.backup-migration-{}", newer.id);
+                    std::fs::create_dir(directory.join(&newer_backup)).unwrap();
+                    std::fs::write(directory.join(&newer_backup).join("state"), b"imported")
+                        .unwrap();
+                    std::fs::write(target.join("state"), b"latest").unwrap();
+                    records
+                        .complete(
+                            newer.id,
+                            103,
+                            &brows_application::LegacyMigrationArtifact {
+                                backup_key: newer_backup,
+                                copied_files: 1,
+                                copied_bytes: 6,
+                            },
+                        )
+                        .unwrap();
+                }
+                _ => unreachable!(),
+            }
+            drop(records);
+            drop(profiles);
+            drop(migrator);
+            // Production's legacy source does not exist. Recovery must use only
+            // the durable journal and target layout, not the original cache.
+            std::fs::remove_dir_all(root.join("source")).unwrap();
+            for attempt in 0..2 {
+                let state = AppState::production_with_runtime(root.clone(), missing()).unwrap();
+                let migrations = state.migrations.as_ref().unwrap();
+                if phase == 8 {
+                    assert!(migrations.recovery_pending());
+                    assert!(state
+                        .sessions
+                        .reserve_stopped_profile(&original.id)
+                        .is_err());
+                    assert!(migrations.recover_incomplete().unwrap());
+                    assert_eq!(std::fs::read(target.join("state")).unwrap(), b"latest");
+                    assert_eq!(std::fs::read(backup.join("state")).unwrap(), b"original");
+                    drop(state);
+                    continue;
+                }
+                if phase == 7 && attempt == 0 {
+                    assert!(migrations.recovery_pending());
+                    assert!(state
+                        .sessions
+                        .reserve_stopped_profile(&original.id)
+                        .is_err());
+                    assert!(state
+                        .profiles
+                        .archive(ProfileRevisionRequest {
+                            profile_id: (&original.id).into(),
+                            expected_revision: original.revision.get()
+                        })
+                        .is_err());
+                    assert_eq!(std::fs::read(target.join("state")).unwrap(), b"imported");
+                    std::fs::remove_dir(&staging).unwrap();
+                    assert!(!migrations.recover_incomplete().unwrap());
+                }
+                assert!(!migrations.recovery_pending());
+                let record = migrations
+                    .list(20)
+                    .unwrap()
+                    .into_iter()
+                    .find(|r| r.id == task.id)
+                    .unwrap();
+                assert!(!record.recovery_pending);
+                assert_eq!(
+                    record.status,
+                    if phase == 4 {
+                        MigrationRecordStatus::Completed
+                    } else if (5..=6).contains(&phase) {
+                        MigrationRecordStatus::RolledBack
+                    } else {
+                        MigrationRecordStatus::Failed
+                    }
+                );
+                assert_eq!(
+                    std::fs::read(target.join("state")).unwrap(),
+                    if phase == 4 {
+                        b"imported".as_slice()
+                    } else {
+                        b"original".as_slice()
+                    }
+                );
+                assert!(state.sessions.reserve_stopped_profile(&original.id).is_ok());
+                drop(state);
+            }
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
     #[test]
     fn startup_recovers_each_restore_boundary_without_activating_interrupted_profiles() {
         use brows_application::{ProfileRepository, RestoreTaskRepository, RestoreTaskStatus};

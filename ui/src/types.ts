@@ -214,6 +214,7 @@ export interface LegacyMigrationRecord {
   copiedFiles?: number;
   copiedBytes?: number;
   canRollback: boolean;
+  recoveryPending?: boolean;
   errorSummary?: string;
 }
 

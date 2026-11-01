@@ -669,7 +669,7 @@ function ProfilesView({
                 onLaunch={() => void run(() => api.launchSession(profile.id), "环境已启动。")}
                 onStop={() => void run(() => api.stopSession(profile.id), "环境已停止。")}
                 onEdit={() => onEdit(profile)}
-                onClone={() => void run(() => api.cloneProfile(profile.id), "环境副本已创建；指纹模式已生成新种子。")}
+                onClone={() => void run(() => api.cloneProfile(profile.id), profile.persona?.kind === "seedable_noise" ? "环境副本已创建；指纹模式已生成新种子。" : "环境副本已创建。")}
                 onArchive={() => void run(() => api.archiveProfile(profile.id, profile.revision), "环境已归档。")}
                 onRestore={() => void run(() => api.restoreProfile(profile.id, profile.revision), "环境已恢复。")}
               />
@@ -746,7 +746,7 @@ function ProfileCard({
           {canLaunch && <button className="card-action primary" type="button" disabled={fingerprintBlocked} title={fingerprintBlocked ? "SeedableNoise 需要运行时指纹加载检测通过。请到设置执行检测，或编辑为系统原生。" : undefined} onClick={onLaunch}>启动</button>}
           {canStop && <button className="card-action stop" type="button" onClick={onStop}>停止</button>}
           {canEdit && <button className="card-action" type="button" onClick={onEdit}>编辑</button>}
-          <button className="card-action" type="button" title="复制配置并生成新的指纹种子，不复制登录数据" onClick={onClone}>克隆</button>
+          <button className="card-action" type="button" title="复制环境配置；指纹模式分配新种子。不复制登录数据。" onClick={onClone}>克隆</button>
           {canArchive && <button className="card-action" type="button" onClick={onArchive}>归档</button>}
         </div>
       </div>
@@ -1493,7 +1493,7 @@ function MoreLoginImportModal({
             {migration?.status === "completed" && <div className="import-result success"><strong>完整迁移完成</strong><span>{migration.copiedFiles?.toLocaleString()} 个文件 · {formatBytes(migration.copiedBytes ?? 0)}</span><small>原目标数据已保留为本机备份，可从迁移记录回滚。</small></div>}
           </div>
         )}
-        {history.length > 0 && <div className="migration-history"><strong>最近迁移记录</strong>{history.slice(0, 5).map((record) => <div className="migration-history-row" key={record.id}><span>#{record.id} · {record.sourceProfileId}</span><span>{migrationStatusLabel(record.status)}</span>{record.canRollback && <button className="table-button" type="button" disabled={busy} onClick={() => void rollback(record.id)}>回滚</button>}</div>)}</div>}
+        {history.length > 0 && <div className="migration-history"><strong>最近迁移记录</strong>{history.slice(0, 5).map((record) => <div className="migration-history-row" key={record.id}><span>#{record.id} · {record.sourceProfileId}</span><span>{record.recoveryPending ? "待恢复（环境已锁定）" : migrationStatusLabel(record.status)}</span>{record.canRollback && <button className="table-button" type="button" disabled={busy} onClick={() => void rollback(record.id)}>回滚</button>}</div>)}</div>}
         {formError && <div className="form-error" role="alert">{formError}</div>}
         <div className="modal-actions">
           <button className="secondary-button" type="button" disabled={busy} onClick={onClose}>关闭</button>
@@ -1653,7 +1653,7 @@ function BackupsView({ api, profiles, backups, onRefresh, onError, onNotice }: {
     try {
       const result = await api.cleanupBackupStaging();
       await onRefresh();
-      onNotice(result.cleanupPending ? "部分暂存无法安全清理，已保留，可稍后重试。" : "暂存检查完成；已有环境数据未修改。");
+      onNotice(result.cleanupPending ? "部分数据恢复或清理尚未完成，已保留数据，可稍后重试。" : "数据恢复与清理检查完成。");
     } catch (cause) { onError(getErrorMessage(cause)); }
     finally { setBusy(undefined); }
   };
@@ -1707,7 +1707,7 @@ function BackupsView({ api, profiles, backups, onRefresh, onError, onNotice }: {
       </div>
       <button className="secondary-button" type="button" disabled={occupied || !importName || !importPassword} onClick={() => void importBackup()}>{busy === "import" ? "正在恢复…" : "恢复为新环境"}</button>
     </div>
-    <div className="subsection-heading"><div><h2>归档与恢复记录</h2><span>恢复结果跨重启保留；每次处理一个任务</span></div><button className="secondary-button" type="button" disabled={occupied} onClick={() => void cleanup()}>{busy === "cleanup" ? "清理中…" : "重试暂存清理"}</button></div>
+    <div className="subsection-heading"><div><h2>归档与恢复记录</h2><span>恢复结果跨重启保留；每次处理一个任务</span></div><button className="secondary-button" type="button" disabled={occupied} onClick={() => void cleanup()}>{busy === "cleanup" ? "清理中…" : "重试数据恢复与清理"}</button></div>
     {backups.length === 0 ? <div className="empty-state compact"><div className="empty-icon">↥</div><strong>还没有备份任务</strong><span>完成的归档会显示在这里。</span></div> : <div className="data-table-wrap"><table className="data-table">
       <thead><tr><th>环境</th><th>状态</th><th>创建时间</th><th>进度与备注</th><th>操作</th></tr></thead>
       <tbody>{backups.map((backup) => <tr key={backup.id}>

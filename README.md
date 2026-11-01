@@ -25,7 +25,8 @@ current [fingerprint design and acceptance plan](docs/fingerprint-design.md).
 The repository contains the first implementation milestone:
 
 - framework-independent profile, proxy, runtime and session domain models;
-- a ten-session FIFO scheduler with duplicate-profile protection;
+- a FIFO scheduler with persisted 1–10 session capacity, duplicate-profile
+  protection, exit reconciliation and Windows process-tree cleanup;
 - versioned, allow-listed UI command and event contracts;
 - application services and ports with in-memory test adapters;
 - SQLite profile persistence, including `SeedableNoise` persona fields;
@@ -33,6 +34,9 @@ The repository contains the first implementation milestone:
 - a Chromium runtime adapter that confines paths, verifies the Windows
   Authenticode signer against the `Google LLC` allowlist and rechecks SHA-256
   before every launch;
+- encrypted full-profile export/restore with background progress, pre-commit
+  cancellation, durable restore outcomes and interrupted-operation recovery;
+- authenticated HTTP/SOCKS5 proxy brokers with bounded workers and cancellation;
 - a Windows Credential Manager `SecretStore` adapter with redacted errors,
   idempotent cleanup and a non-Windows unavailable stub;
 - a React management UI with a real, allow-listed Tauri client and a mock used
@@ -54,9 +58,12 @@ checks that digest again before each launch. This remains local admission, not
 a remotely signed runtime catalog. It has passed the
 repeatable two-profile smoke test documented in
 [`docs/phase-1-acceptance.md`](docs/phase-1-acceptance.md). It is still an MVP:
-DPAPI-backed secret migration, encrypted backup, managed runtime
-installation/update, online revocation freshness and high-strength fingerprint
-resistance remain later milestones.
+legacy secret migration, managed runtime installation/update, online revocation
+freshness, full network diagnostics and high-strength fingerprint resistance
+remain later milestones. Encrypted backup/restore and startup recovery are now
+implemented; the latest lifecycle changes still require Windows stress and
+forced-termination acceptance. See [reliability status](docs/reliability-milestone.md)
+and the [fingerprint and multi-session quality review](docs/fingerprint-quality.md).
 
 The Windows secret adapter stores only Generic Credentials in the current
 user's Credential Manager namespace. Profile isolation and multi-open behavior

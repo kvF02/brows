@@ -85,8 +85,14 @@ pub(crate) async fn backup_list(state: State<'_, AppState>) -> IpcResult<Vec<Bac
     let archives = backup_service(&state)?;
     let operations = state.backup_operations.clone();
     let jobs = state.backup_jobs.clone();
+    let migrations = state.migrations.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        build_backup_list(&archives, operations.as_deref(), &jobs)
+        build_backup_list(
+            &archives,
+            operations.as_deref(),
+            migrations.as_deref(),
+            &jobs,
+        )
     })
     .await
     .map_err(|_| ErrorDto {
@@ -99,6 +105,7 @@ pub(crate) async fn backup_list(state: State<'_, AppState>) -> IpcResult<Vec<Bac
 fn build_backup_list(
     archives: &brows_adapters_backup::EncryptedBackupService,
     operations: Option<&brows_application::BackupApplicationService>,
+    migrations: Option<&brows_application::MigrationApplicationService>,
     job_registry: &crate::backup_jobs::BackupJobs,
 ) -> IpcResult<Vec<BackupJobDto>> {
     let entries = archives
@@ -206,6 +213,26 @@ fn build_backup_list(
             });
         }
     }
+    if migrations.is_some_and(|service| service.recovery_pending()) {
+        jobs.insert(
+            0,
+            BackupJobDto {
+                id: "migration-recovery".into(),
+                profile_id: String::new(),
+                profile_name: "迁移恢复待处理".into(),
+                status: "interrupted",
+                created_at: String::new(),
+                size_bytes: None,
+                note: Some("相关环境已锁定；数据保留，重试数据恢复与清理后再启动。".into()),
+                operation_id: None,
+                phase: None,
+                processed_bytes: None,
+                total_bytes: None,
+                can_cancel: false,
+                cancel_requested: false,
+            },
+        );
+    }
     for job in live.into_iter().rev() {
         let active = !job.progress.phase.is_terminal();
         // The SQL snapshot may predate the worker's final journal write. Keep
@@ -236,7 +263,7 @@ fn build_backup_list(
                 profile_name: match job.kind {
                     BackupJobKind::Export => "导出任务",
                     BackupJobKind::Import => "恢复任务",
-                    BackupJobKind::Cleanup => "暂存检查",
+                    BackupJobKind::Cleanup => "数据恢复与清理",
                 }
                 .into(),
                 status,
@@ -277,6 +304,7 @@ pub(crate) async fn backup_cleanup(
         message: "备份不可用".into(),
         violations: Vec::new(),
     })?;
+    let migrations = state.migrations.clone();
     backup_jobs::execute(
         state.backup_jobs.clone(),
         BackupJobKind::Cleanup,
@@ -285,8 +313,13 @@ pub(crate) async fn backup_cleanup(
                 .begin_commit()
                 .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
             control.begin_cleanup();
+            let migration_pending = migrations
+                .map(|service| ipc(service.recover_incomplete()))
+                .transpose()?
+                .unwrap_or(false);
+            let backup_pending = ipc(operations.recover_incomplete())?;
             Ok(BackupCleanupResultDto {
-                cleanup_pending: ipc(operations.recover_incomplete())?,
+                cleanup_pending: migration_pending || backup_pending,
             })
         },
     )
@@ -886,7 +919,8 @@ fn migration_inspection_dto(value: LegacyProfileDataSummary) -> LegacyMigrationI
 }
 
 fn migration_record_dto(value: MigrationRecord) -> LegacyMigrationRecordDto {
-    let can_rollback = value.status == MigrationRecordStatus::Completed
+    let can_rollback = !value.recovery_pending
+        && value.status == MigrationRecordStatus::Completed
         && value
             .backup_key
             .as_deref()
@@ -907,6 +941,7 @@ fn migration_record_dto(value: MigrationRecord) -> LegacyMigrationRecordDto {
         copied_files: value.copied_files,
         copied_bytes: value.copied_bytes,
         can_rollback,
+        recovery_pending: value.recovery_pending,
         error_summary: value.error_summary,
     }
 }
@@ -1038,7 +1073,7 @@ mod tests {
             })
         };
         ready.recv_timeout(Duration::from_secs(5)).unwrap();
-        let list = build_backup_list(&archives, None, &jobs).unwrap();
+        let list = build_backup_list(&archives, None, None, &jobs).unwrap();
         assert_eq!(list.len(), 1);
         assert_eq!(list[0].status, "running");
         assert_eq!(list[0].phase, Some("processing"));
@@ -1046,7 +1081,7 @@ mod tests {
         assert!(list[0].can_cancel);
         let id = list[0].operation_id.as_ref().unwrap();
         jobs.cancel(id).unwrap();
-        let pending = build_backup_list(&archives, None, &jobs).unwrap();
+        let pending = build_backup_list(&archives, None, None, &jobs).unwrap();
         assert_eq!(pending[0].status, "running");
         assert!(pending[0].cancel_requested);
         let duplicate: IpcResult<()> = tauri::async_runtime::block_on(backup_jobs::execute(
@@ -1058,7 +1093,7 @@ mod tests {
         resume.send(()).unwrap();
         let outcome = tauri::async_runtime::block_on(worker).unwrap();
         assert_eq!(outcome.unwrap_err().code, ErrorCode::OperationCancelled);
-        let finished = build_backup_list(&archives, None, &jobs).unwrap();
+        let finished = build_backup_list(&archives, None, None, &jobs).unwrap();
         assert_eq!(finished[0].status, "cancelled");
         assert!(!finished[0].can_cancel);
         jobs.shutdown();

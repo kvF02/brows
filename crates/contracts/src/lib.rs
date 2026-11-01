@@ -1125,6 +1125,8 @@ pub struct LegacyMigrationRecordDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub copied_bytes: Option<u64>,
     pub can_rollback: bool,
+    #[serde(default)]
+    pub recovery_pending: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_summary: Option<String>,
 }

@@ -146,7 +146,7 @@ impl BackupApplicationService {
     }
 
     pub fn cleanup_pending(&self) -> bool {
-        self.cleanup_warning.load(Ordering::Acquire)
+        self.cleanup_warning.load(Ordering::Acquire) || self.archives.cleanup_pending()
     }
 
     pub fn restore_tasks(&self) -> ApplicationResult<Vec<RestoreTask>> {

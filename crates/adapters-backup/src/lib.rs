@@ -28,6 +28,7 @@ use tar::{Archive, Builder, Header};
 use walkdir::WalkDir;
 use zeroize::Zeroizing;
 
+mod export_staging;
 mod progress;
 mod recovery;
 use progress::{ProgressReader, ProgressWriter};
@@ -60,6 +61,7 @@ type HeaderKeyNonce = (Vec<u8>, DerivedKey, [u8; STREAM_NONCE_BYTES]);
 pub struct EncryptedBackupService {
     backup_root: PathBuf,
     profile_root: PathBuf,
+    export_cleanup_warning: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -79,6 +81,7 @@ impl EncryptedBackupService {
         Ok(Self {
             backup_root,
             profile_root,
+            export_cleanup_warning: false.into(),
         })
     }
 
@@ -233,14 +236,16 @@ impl EncryptedBackupService {
             inspect_source_tree_controlled(&source, &self.profile_root, control)?;
         }
 
-        // Only remove the partial file if this operation created it.
-        let output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&partial)
-            .map_err(|error| io_error("create partial backup", error))?;
+        // New exports stage in a dedicated owned namespace; legacy partials
+        // above remain untouched because their ownership cannot be established.
+        let directory = self.allocate_export()?;
+        let partial = directory.join("archive.partial");
         let result = (|| {
-            let mut output = output;
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&partial)
+                .map_err(|error| io_error("create partial backup", error))?;
             control.phase(BackupPhase::DerivingKey);
             let (header, key, nonce) = build_header(spec.password.expose())?;
             control.checkpoint()?;
@@ -284,6 +289,7 @@ impl EncryptedBackupService {
             Ok(())
         })();
 
+        control.begin_cleanup();
         let result = result.map_err(|error| {
             if control.snapshot().cancel_requested {
                 PortError::new(PortErrorKind::Cancelled, "任务已取消")
@@ -291,10 +297,16 @@ impl EncryptedBackupService {
                 error
             }
         });
-        if result.is_err() {
-            control.begin_cleanup();
-            fs::remove_file(&partial)
-                .map_err(|error| io_error("partial backup cleanup failed", error))?;
+        if self.remove_export(&directory).is_err() {
+            self.export_cleanup_warning
+                .store(true, std::sync::atomic::Ordering::Release);
+            if result.is_err() {
+                return Err(unavailable(
+                    "incomplete export cleanup failed; retry managed cleanup",
+                ));
+            }
+            // The final archive was already committed. Do not misreport its
+            // outcome when only an empty staging directory could not be removed.
         }
         result
     }
@@ -374,6 +386,10 @@ impl EncryptedBackupService {
 }
 
 impl brows_application::RestorableBackupService for EncryptedBackupService {
+    fn cleanup_pending(&self) -> bool {
+        self.export_cleanup_warning
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
     fn export_controlled(
         &self,
         spec: &BackupExportSpec,
@@ -401,7 +417,9 @@ impl brows_application::RestorableBackupService for EncryptedBackupService {
         self.cleanup_task_staging(task_id)
     }
     fn cleanup_stale_staging(&self) -> PortResult<bool> {
-        self.sweep_staging()
+        let restores = self.sweep_staging();
+        let exports = self.sweep_exports();
+        Ok(restores? | exports?)
     }
 
     fn install_restored_data(
