@@ -38,6 +38,7 @@ use std::{
 /// assembled once and remain hidden behind the application's ports.
 #[derive(Debug)]
 pub(crate) struct AppState {
+    pub(crate) backup_jobs: Arc<crate::backup_jobs::BackupJobs>,
     pub(crate) runtime_issue: Option<String>,
     pub(crate) backup_operations: Option<Arc<brows_application::BackupApplicationService>>,
     pub(crate) browsers: Arc<dyn BrowserRuntime>,
@@ -217,6 +218,7 @@ impl AppState {
             let _ = backups.recover_incomplete();
         }
         Ok(Self {
+            backup_jobs: Arc::new(crate::backup_jobs::BackupJobs::default()),
             runtime_issue,
             backup_operations,
             browsers: browsers.clone(),
@@ -293,6 +295,7 @@ impl AppState {
             session_service.clone(),
         ));
         Ok(Self {
+            backup_jobs: Arc::new(crate::backup_jobs::BackupJobs::default()),
             runtime_issue: None,
             backup_operations: None,
             browsers: browsers.clone(),
@@ -305,6 +308,14 @@ impl AppState {
             backups: None,
             _instance_lock: None,
         })
+    }
+}
+
+impl Drop for AppState {
+    fn drop(&mut self) {
+        self.backup_jobs.stop_accepting();
+        let _ = self.sessions.shutdown();
+        self.backup_jobs.shutdown();
     }
 }
 

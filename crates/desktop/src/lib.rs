@@ -1,18 +1,19 @@
 #![forbid(unsafe_code)]
 #![deny(missing_debug_implementations)]
 
+mod backup_jobs;
 mod commands;
 mod state;
 mod supervisor;
 
 use commands::{
-    backup_cleanup, backup_export, backup_import, backup_list, diagnostic_list, diagnostic_run,
-    fingerprint_preview, legacy_migration_execute, legacy_migration_inspect, legacy_migration_list,
-    legacy_migration_rollback, list_runtimes, morelogin_import, morelogin_preview,
-    probe_runtime_fingerprint, profile_archive, profile_clone, profile_create, profile_get,
-    profile_list, profile_restore, profile_update, proxy_list, proxy_remove, proxy_save,
-    proxy_test, session_cancel_queued, session_launch, session_list, session_stop, settings_get,
-    settings_update,
+    backup_cancel, backup_cleanup, backup_export, backup_import, backup_list, diagnostic_list,
+    diagnostic_run, fingerprint_preview, legacy_migration_execute, legacy_migration_inspect,
+    legacy_migration_list, legacy_migration_rollback, list_runtimes, morelogin_import,
+    morelogin_preview, probe_runtime_fingerprint, profile_archive, profile_clone, profile_create,
+    profile_get, profile_list, profile_restore, profile_update, proxy_list, proxy_remove,
+    proxy_save, proxy_test, session_cancel_queued, session_launch, session_list, session_stop,
+    settings_get, settings_update,
 };
 use state::AppState;
 use tauri::{Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder};
@@ -81,6 +82,7 @@ pub fn run() {
             list_runtimes,
             backup_list,
             backup_cleanup,
+            backup_cancel,
             backup_export,
             backup_import,
         ])
@@ -89,13 +91,15 @@ pub fn run() {
         .run(|app, event| {
             if let RunEvent::ExitRequested { .. } = event {
                 app.state::<supervisor::SessionSupervisor>().stop();
-                cleanup_sessions(app.state::<AppState>().inner());
+                shutdown_services(app.state::<AppState>().inner());
             }
         })
 }
 
-fn cleanup_sessions(state: &AppState) {
+fn shutdown_services(state: &AppState) {
+    state.backup_jobs.stop_accepting();
     let _ = state.sessions.shutdown();
+    state.backup_jobs.shutdown();
 }
 
 fn main_window_url() -> WebviewUrl {

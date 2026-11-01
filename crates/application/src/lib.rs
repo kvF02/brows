@@ -9,6 +9,7 @@
 //! and straightforward to test.
 
 mod backup_service;
+mod backup_task;
 mod compiler;
 mod error;
 pub mod memory;
@@ -28,6 +29,7 @@ mod stealth_template;
 mod tests;
 
 pub use backup_service::BackupApplicationService;
+pub use backup_task::{BackupPhase, BackupProgress, BackupTaskControl};
 pub use compiler::{LaunchPlanCompiler, PreparedLaunch};
 pub use error::{ApplicationError, ApplicationResult};
 pub use migration_service::MigrationApplicationService;

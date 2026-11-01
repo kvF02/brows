@@ -394,6 +394,9 @@ export class MockApiClient implements ApiClient {
     return this.backups.map((backup) => ({ ...backup }));
   }
 
+  async cancelBackup(_operationId: string): Promise<void> {
+    throw new ApiError("NOT_FOUND", "浏览器预览中没有可取消的后台任务");
+  }
   async cleanupBackupStaging(): Promise<{ cleanupPending: boolean }> {
     return { cleanupPending: false };
   }

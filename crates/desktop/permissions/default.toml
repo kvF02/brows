@@ -158,10 +158,16 @@ identifier = "allow-backup-cleanup"
 description = "Retry cleanup of interrupted restore staging."
 commands = { allow = ["backup_cleanup"] }
 
+[[permission]]
+identifier = "allow-backup-cancel"
+description = "Request cancellation before a backup operation commits."
+commands = { allow = ["backup_cancel"] }
+
 # Default permission set: auto-allowed for all capabilities.
 [default]
 description = "Default permissions for the Brows app — all custom commands."
 permissions = [
+  "allow-backup-cancel",
   "allow-backup-cleanup",
   "allow-settings-get",
   "allow-settings-update",

@@ -7,6 +7,7 @@ import {
   DEFAULT_PRESETS,
   type ApiClient,
   type BackupJob,
+  type BackupPhase,
   type BrowserRuntime,
   type DeviceMemoryGb,
   type DiagnosticReport,
@@ -148,7 +149,10 @@ function App() {
   const [showArchived, setShowArchived] = useState(false);
   const [search, setSearch] = useState("");
 
+  const backupRequest = useRef(0);
+
   const refresh = useCallback(async () => {
+    const request = ++backupRequest.current;
     setLoading(true);
     setError("");
     const results = await Promise.allSettled([
@@ -171,7 +175,7 @@ function App() {
     apply(results[0], setProfiles, "环境");
     apply(results[1], setProxies, "代理");
     apply(results[2], setDiagnostics, "诊断");
-    apply(results[3], setBackups, "备份");
+    if (request === backupRequest.current) apply(results[3], setBackups, "备份");
     apply(results[4], setRuntimes, "浏览器运行时");
     apply(results[5], setSettings, "设置");
     if (failures.length > 0) setError(failures.join("；"));
@@ -181,6 +185,25 @@ function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  useEffect(() => {
+    if (activeView !== "backups") return;
+    let disposed = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      const request = ++backupRequest.current;
+      try {
+        const jobs = await apiRef.current.listBackups();
+        if (!disposed && request === backupRequest.current) setBackups(jobs);
+      } catch (cause) {
+        if (!disposed && request === backupRequest.current) setError(`备份：${getErrorMessage(cause)}`);
+      } finally {
+        if (!disposed) timer = window.setTimeout(() => void poll(), 750);
+      }
+    };
+    void poll();
+    return () => { disposed = true; window.clearTimeout(timer); };
+  }, [activeView]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -1587,14 +1610,19 @@ function DiagnosticsView({ api, profiles, reports, onRefresh, onError, onNotice 
   </section>;
 }
 
-function BackupsView({
-  api,
-  profiles,
-  backups,
-  onRefresh,
-  onError,
-  onNotice,
-}: {
+const backupPhaseLabels: Record<BackupPhase, string> = {
+  preparing: "检查文件", deriving_key: "派生加密密钥", processing: "处理归档数据",
+  verifying: "校验并同步", committing: "提交结果", cleaning: "清理暂存",
+  completed: "已完成", cancelled: "已取消", failed: "失败",
+};
+
+function backupBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KiB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MiB`;
+}
+
+function BackupsView({ api, profiles, backups, onRefresh, onError, onNotice }: {
   api: ApiClient;
   profiles: Profile[];
   backups: BackupJob[];
@@ -1608,29 +1636,95 @@ function BackupsView({
   const [passwordConfirm, setPasswordConfirm] = useState("");
   const [importName, setImportName] = useState("");
   const [importPassword, setImportPassword] = useState("");
-  useEffect(() => { if (!profiles.some((profile) => profile.id === profileId)) setProfileId(profiles[0]?.id ?? ""); }, [profiles, profileId]);
-  const [cleaning, setCleaning] = useState(false);
+  const [busy, setBusy] = useState<"export" | "import" | "cleanup" | undefined>();
+  const [cancelling, setCancelling] = useState<string | undefined>();
+  const occupied = busy !== undefined || backups.some((job) => job.status === "running");
+  useEffect(() => {
+    if (!profiles.some((profile) => profile.id === profileId)) setProfileId(profiles[0]?.id ?? "");
+  }, [profiles, profileId]);
+
+  const handleFailure = (cause: unknown) => {
+    if (cause instanceof ApiError && cause.code === "OPERATION_CANCELLED") {
+      onNotice("任务已取消；清理结果可在任务记录中查看。");
+    } else onError(getErrorMessage(cause));
+  };
   const cleanup = async () => {
-    setCleaning(true);
+    setBusy("cleanup");
     try {
       const result = await api.cleanupBackupStaging();
       await onRefresh();
       onNotice(result.cleanupPending ? "部分暂存无法安全清理，已保留，可稍后重试。" : "暂存检查完成；已有环境数据未修改。");
     } catch (cause) { onError(getErrorMessage(cause)); }
-    finally { setCleaning(false); }
+    finally { setBusy(undefined); }
   };
   const exportBackup = async () => {
-    if (!profileId) return;
+    if (!profileId || occupied) return;
     if (password.length < 12) { onError("恢复口令至少需要 12 个字符"); return; }
     if (password !== passwordConfirm) { onError("两次输入的恢复口令不一致"); return; }
     if (!destinationName.toLowerCase().endsWith(".browsbak")) { onError("文件名必须以 .browsbak 结尾"); return; }
-    try { await api.exportBackup(profileId, destinationName, false, password); setPassword(""); setPasswordConfirm(""); await onRefresh(); onNotice("加密备份已创建"); } catch (cause) { onError(getErrorMessage(cause)); }
+    setBusy("export");
+    const operation = api.exportBackup(profileId, destinationName, false, password);
+    setPassword(""); setPasswordConfirm("");
+    try { await operation; await onRefresh(); onNotice("加密备份已创建"); }
+    catch (cause) { await onRefresh(); handleFailure(cause); }
+    finally { setBusy(undefined); }
   };
   const importBackup = async () => {
+    if (occupied) return;
     if (!importName || importPassword.length < 12) { onError("请输入归档文件名和至少 12 个字符的恢复口令"); return; }
-    try { const profile = await api.importBackup(importName, importPassword); setImportPassword(""); await onRefresh(); onNotice(`已恢复环境：${profile.name}`); } catch (cause) { await onRefresh(); onError(getErrorMessage(cause)); }
+    setBusy("import");
+    const operation = api.importBackup(importName, importPassword);
+    setImportPassword("");
+    try { const profile = await operation; await onRefresh(); onNotice(`已恢复环境：${profile.name}`); }
+    catch (cause) { await onRefresh(); handleFailure(cause); }
+    finally { setBusy(undefined); }
   };
-  return <section className="view-section"><div className="page-heading"><div><div className="eyebrow">ENCRYPTED ARCHIVES</div><h1>备份与恢复</h1><p>使用恢复口令加密完整 Chromium Profile。恢复会生成新的环境 UUID，不覆盖现有环境。</p></div></div><div className="backup-panel"><div className="backup-panel-head"><div><h2>导出完整环境</h2><p>包含 Cookie、缓存和站点存储；代理密码不会写入归档。</p></div><span className="vault-badge">Argon2id · XChaCha20</span></div><div className="form-grid"><div><label className="field-label" htmlFor="backup-profile">选择环境</label><select id="backup-profile" className="text-input" value={profileId} onChange={(e) => setProfileId(e.target.value)}><option value="">请选择</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></div><div><label className="field-label" htmlFor="backup-name">备份文件名</label><input id="backup-name" className="text-input" value={destinationName} onChange={(e) => setDestinationName(e.target.value)} /></div><div><label className="field-label" htmlFor="backup-password">恢复口令（至少 12 个字符）</label><input id="backup-password" className="text-input" type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} /></div><div><label className="field-label" htmlFor="backup-password-confirm">确认恢复口令</label><input id="backup-password-confirm" className="text-input" type="password" autoComplete="new-password" value={passwordConfirm} onChange={(e) => setPasswordConfirm(e.target.value)} /></div></div><div className="backup-warning"><span aria-hidden="true">i</span> Chromium 的 DPAPI / App-Bound Encryption 可能让登录态无法跨 Windows 设备直接使用。备份恢复配置成功不代表免登录。</div><button className="primary-button" type="button" disabled={!profileId || !password || !passwordConfirm} onClick={() => void exportBackup()}>导出加密备份</button></div><div className="backup-panel"><div className="backup-panel-head"><div><h2>恢复加密归档</h2><p>输入应用备份目录中的文件名；恢复将创建新的环境并安装隔离 userdata。</p></div></div><div className="form-grid"><div><label className="field-label" htmlFor="restore-name">归档文件名</label><input id="restore-name" className="text-input" placeholder="profile-backup.browsbak" value={importName} onChange={(e) => setImportName(e.target.value)} /></div><div><label className="field-label" htmlFor="restore-password">恢复口令</label><input id="restore-password" className="text-input" type="password" autoComplete="current-password" value={importPassword} onChange={(e) => setImportPassword(e.target.value)} /></div></div><button className="secondary-button" type="button" disabled={!importName || !importPassword} onClick={() => void importBackup()}>恢复为新环境</button></div><div className="subsection-heading"><div><h2>归档与恢复记录</h2><span>恢复任务跨重启保留</span></div><button className="secondary-button" type="button" disabled={cleaning} onClick={() => void cleanup()}>{cleaning ? "清理中…" : "重试暂存清理"}</button></div>{backups.length === 0 ? <div className="empty-state compact"><div className="empty-icon">↥</div><strong>还没有备份任务</strong><span>完成的归档会显示在这里。</span></div> : <div className="data-table-wrap"><table className="data-table"><thead><tr><th>环境</th><th>状态</th><th>创建时间</th><th>备注</th></tr></thead><tbody>{backups.map((backup) => <tr key={backup.id}><td><strong>{backup.profileName}</strong></td><td><span className={`status-pill ${backup.status === "completed" ? "green" : (backup.status === "failed" || backup.status === "interrupted") ? "red" : "blue"}`}>{{ ready: "待处理", running: "进行中", completed: "已完成", failed: "失败", interrupted: "已中断" }[backup.status]}</span></td><td>{formatDate(backup.createdAt)}</td><td>{backup.note ?? "—"}</td></tr>)}</tbody></table></div>}</section>;
+  const cancel = async (operationId: string) => {
+    setCancelling(operationId);
+    try { await api.cancelBackup(operationId); await onRefresh(); onNotice("取消请求已接受，处理和清理结果会显示在任务记录中。"); }
+    catch (cause) { await onRefresh(); onError(getErrorMessage(cause)); }
+    finally { setCancelling(undefined); }
+  };
+
+  return <section className="view-section">
+    <div className="page-heading"><div><div className="eyebrow">ENCRYPTED ARCHIVES</div><h1>备份与恢复</h1><p>使用恢复口令加密完整 Chromium Profile。恢复会生成新的环境 UUID，不覆盖现有环境。</p></div></div>
+    <div className="backup-panel">
+      <div className="backup-panel-head"><div><h2>导出完整环境</h2><p>包含 Cookie、缓存和站点存储；代理密码不会写入归档。</p></div><span className="vault-badge">Argon2id · XChaCha20</span></div>
+      <div className="form-grid">
+        <div><label className="field-label" htmlFor="backup-profile">选择环境</label><select id="backup-profile" className="text-input" value={profileId} onChange={(e) => setProfileId(e.target.value)}><option value="">请选择</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></div>
+        <div><label className="field-label" htmlFor="backup-name">备份文件名</label><input id="backup-name" className="text-input" value={destinationName} onChange={(e) => setDestinationName(e.target.value)} /></div>
+        <div><label className="field-label" htmlFor="backup-password">恢复口令（至少 12 个字符）</label><input id="backup-password" className="text-input" type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} /></div>
+        <div><label className="field-label" htmlFor="backup-password-confirm">确认恢复口令</label><input id="backup-password-confirm" className="text-input" type="password" autoComplete="new-password" value={passwordConfirm} onChange={(e) => setPasswordConfirm(e.target.value)} /></div>
+      </div>
+      <div className="backup-warning"><span aria-hidden="true">i</span> Chromium 的 DPAPI / App-Bound Encryption 可能让登录态无法跨 Windows 设备直接使用。备份恢复配置成功不代表免登录。</div>
+      <button className="primary-button" type="button" disabled={occupied || !profileId || !password || !passwordConfirm} onClick={() => void exportBackup()}>{busy === "export" ? "正在导出…" : "导出加密备份"}</button>
+    </div>
+    <div className="backup-panel">
+      <div className="backup-panel-head"><div><h2>恢复加密归档</h2><p>输入应用备份目录中的文件名；恢复将创建新的环境并安装隔离 userdata。</p></div></div>
+      <div className="form-grid">
+        <div><label className="field-label" htmlFor="restore-name">归档文件名</label><input id="restore-name" className="text-input" placeholder="profile-backup.browsbak" value={importName} onChange={(e) => setImportName(e.target.value)} /></div>
+        <div><label className="field-label" htmlFor="restore-password">恢复口令</label><input id="restore-password" className="text-input" type="password" autoComplete="current-password" value={importPassword} onChange={(e) => setImportPassword(e.target.value)} /></div>
+      </div>
+      <button className="secondary-button" type="button" disabled={occupied || !importName || !importPassword} onClick={() => void importBackup()}>{busy === "import" ? "正在恢复…" : "恢复为新环境"}</button>
+    </div>
+    <div className="subsection-heading"><div><h2>归档与恢复记录</h2><span>恢复结果跨重启保留；每次处理一个任务</span></div><button className="secondary-button" type="button" disabled={occupied} onClick={() => void cleanup()}>{busy === "cleanup" ? "清理中…" : "重试暂存清理"}</button></div>
+    {backups.length === 0 ? <div className="empty-state compact"><div className="empty-icon">↥</div><strong>还没有备份任务</strong><span>完成的归档会显示在这里。</span></div> : <div className="data-table-wrap"><table className="data-table">
+      <thead><tr><th>环境</th><th>状态</th><th>创建时间</th><th>进度与备注</th><th>操作</th></tr></thead>
+      <tbody>{backups.map((backup) => <tr key={backup.id}>
+        <td><strong>{backup.profileName}</strong></td>
+        <td><span className={`status-pill ${backup.status === "completed" ? "green" : (backup.status === "failed" || backup.status === "interrupted") ? "red" : "blue"}`}>{{ ready: "待处理", running: "进行中", completed: "已完成", failed: "失败", interrupted: "已中断", cancelled: "已取消" }[backup.status]}</span></td>
+        <td>{formatDate(backup.createdAt)}</td>
+        <td>
+          {backup.phase && <div>{backupPhaseLabels[backup.phase]}{backup.status === "running" && backup.cancelRequested ? " · 已请求取消，等待收尾" : ""}</div>}
+          {backup.processedBytes !== undefined && <div>已处理归档数据 {backupBytes(backup.processedBytes)}{backup.totalBytes !== undefined ? ` / ${backupBytes(backup.totalBytes)}` : ""}</div>}
+          {backup.phase === "deriving_key" && <div>取消需等待当前密钥计算结束。</div>}
+          {backup.status === "running" && (backup.phase === "committing" || backup.phase === "cleaning") && <div>正在收尾，请等待完成。</div>}
+          {backup.note ?? (!backup.phase ? "—" : "")}
+        </td>
+        <td>{backup.operationId && backup.status === "running" && <button className="secondary-button" type="button" disabled={!backup.canCancel || backup.cancelRequested || cancelling === backup.operationId} onClick={() => void cancel(backup.operationId!)}>{backup.cancelRequested || cancelling === backup.operationId ? "等待取消…" : "取消任务"}</button>}</td>
+      </tr>)}</tbody>
+    </table></div>}
+  </section>;
 }
 
 function fingerprintSupportLabel(runtime?: BrowserRuntime): string {

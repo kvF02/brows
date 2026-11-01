@@ -1,4 +1,7 @@
-use crate::state::AppState;
+use crate::{
+    backup_jobs::{self, BackupJobKind},
+    state::AppState,
+};
 use brows_adapters_morelogin::{inspect_export as inspect_morelogin, MoreLoginPreview};
 use brows_application::{
     persona_fingerprint::PersonaFingerprint, ApplicationResult, BackupImportSpec,
@@ -19,6 +22,7 @@ use brows_contracts::{
 use brows_domain::ProfileId;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, State};
 
@@ -34,6 +38,16 @@ pub(crate) struct BackupJobDto {
     created_at: String,
     size_bytes: Option<u64>,
     note: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    operation_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    phase: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    processed_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    total_bytes: Option<u64>,
+    can_cancel: bool,
+    cancel_requested: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -43,8 +57,10 @@ pub(crate) struct BackupImportResultDto {
     note: String,
 }
 
-fn backup_service(state: &AppState) -> IpcResult<&brows_adapters_backup::EncryptedBackupService> {
-    state.backups.as_deref().ok_or_else(|| ErrorDto {
+fn backup_service(
+    state: &AppState,
+) -> IpcResult<Arc<brows_adapters_backup::EncryptedBackupService>> {
+    state.backups.clone().ok_or_else(|| ErrorDto {
         code: ErrorCode::CapabilityUnsupported,
         message: "加密备份在当前运行模式下不可用".to_owned(),
         violations: Vec::new(),
@@ -65,8 +81,27 @@ pub(crate) fn settings_update(
 }
 
 #[tauri::command]
-pub(crate) fn backup_list(state: State<'_, AppState>) -> IpcResult<Vec<BackupJobDto>> {
-    let entries = backup_service(&state)?
+pub(crate) async fn backup_list(state: State<'_, AppState>) -> IpcResult<Vec<BackupJobDto>> {
+    let archives = backup_service(&state)?;
+    let operations = state.backup_operations.clone();
+    let jobs = state.backup_jobs.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        build_backup_list(&archives, operations.as_deref(), &jobs)
+    })
+    .await
+    .map_err(|_| ErrorDto {
+        code: ErrorCode::Internal,
+        message: "无法读取备份记录".into(),
+        violations: Vec::new(),
+    })?
+}
+
+fn build_backup_list(
+    archives: &brows_adapters_backup::EncryptedBackupService,
+    operations: Option<&brows_application::BackupApplicationService>,
+    job_registry: &crate::backup_jobs::BackupJobs,
+) -> IpcResult<Vec<BackupJobDto>> {
+    let entries = archives
         .list_archives()
         .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
     let mut jobs = entries
@@ -76,6 +111,12 @@ pub(crate) fn backup_list(state: State<'_, AppState>) -> IpcResult<Vec<BackupJob
             profile_id: String::new(),
             profile_name: "加密归档".to_owned(),
             status: "completed",
+            operation_id: None,
+            phase: None,
+            processed_bytes: None,
+            total_bytes: None,
+            can_cancel: false,
+            cancel_requested: false,
             created_at: entry
                 .modified_at_ms
                 .map(|value| value.to_string())
@@ -84,9 +125,26 @@ pub(crate) fn backup_list(state: State<'_, AppState>) -> IpcResult<Vec<BackupJob
             note: Some(format!("文件：{}；代理凭据未导出", entry.name)),
         })
         .collect::<Vec<_>>();
-    if let Some(operations) = &state.backup_operations {
-        for task in ipc(operations.restore_tasks())? {
+    let tasks = operations
+        .map(|operations| ipc(operations.restore_tasks()))
+        .transpose()?
+        .unwrap_or_default();
+    let live = job_registry.snapshots();
+    if let Some(operations) = operations {
+        for task in &tasks {
+            if live.iter().any(|job| {
+                job.kind == BackupJobKind::Import
+                    && ((job.progress.restore_task_id == Some(task.id)
+                        && (!job.progress.phase.is_terminal()
+                            || task.status == brows_application::RestoreTaskStatus::Running))
+                        || (!job.progress.phase.is_terminal()
+                            && job.progress.restore_task_id.is_none()
+                            && task.status == brows_application::RestoreTaskStatus::Running))
+            }) {
+                continue;
+            }
             let outcome = match task.failure {
+                Some(brows_application::RestoreFailure::Cancelled) => "恢复已取消",
                 Some(brows_application::RestoreFailure::WrongPassword) => "口令错误",
                 Some(brows_application::RestoreFailure::Tampered) => "归档校验失败",
                 Some(brows_application::RestoreFailure::Incompatible) => "配置或运行时不兼容",
@@ -106,10 +164,17 @@ pub(crate) fn backup_list(state: State<'_, AppState>) -> IpcResult<Vec<BackupJob
                 id: format!("restore-{}", task.id),
                 profile_id: task
                     .profile_id
-                    .map(|id| id.into_string())
+                    .as_ref()
+                    .map(|id| id.as_str().to_owned())
                     .unwrap_or_default(),
                 profile_name: format!("恢复任务 #{}", task.id),
                 status: task.status.as_str(),
+                operation_id: None,
+                phase: None,
+                processed_bytes: None,
+                total_bytes: None,
+                can_cancel: false,
+                cancel_requested: false,
                 created_at: task.started_at_ms.to_string(),
                 size_bytes: None,
                 note: Some(format!(
@@ -132,10 +197,67 @@ pub(crate) fn backup_list(state: State<'_, AppState>) -> IpcResult<Vec<BackupJob
                 .then_with(|| a.id.cmp(&b.id))
         });
         if operations.cleanup_pending() {
-            jobs.insert(0, BackupJobDto { id: "restore-cleanup".into(), profile_id: String::new(), profile_name: "暂存清理".into(),
-                status: "interrupted", created_at: String::new(), size_bytes: None,
-                note: Some("部分暂存目录或任务记录尚待处理，已保留。可重试清理；已有环境数据不会删除。".into()) });
+            jobs.insert(0, BackupJobDto {
+                id: "restore-cleanup".into(), profile_id: String::new(), profile_name: "暂存清理".into(),
+                status: "interrupted", operation_id: None, phase: None, processed_bytes: None,
+                total_bytes: None, can_cancel: false, cancel_requested: false,
+                created_at: String::new(), size_bytes: None,
+                note: Some("部分暂存目录或任务记录尚待处理，已保留。可重试清理；已有环境数据不会删除。".into()),
+            });
         }
+    }
+    for job in live.into_iter().rev() {
+        let active = !job.progress.phase.is_terminal();
+        // The SQL snapshot may predate the worker's final journal write. Keep
+        // its terminal result visible until that snapshot contains the outcome.
+        let durable_outcome = job.progress.restore_task_id.is_some_and(|id| {
+            tasks.iter().any(|task| {
+                task.id == id && task.status != brows_application::RestoreTaskStatus::Running
+            })
+        });
+        if !active
+            && ((job.kind == BackupJobKind::Import && durable_outcome)
+                || (job.kind != BackupJobKind::Import
+                    && job.progress.phase == brows_application::BackupPhase::Completed))
+        {
+            continue;
+        }
+        let status = match job.progress.phase {
+            brows_application::BackupPhase::Completed => "completed",
+            brows_application::BackupPhase::Cancelled => "cancelled",
+            brows_application::BackupPhase::Failed => "failed",
+            _ => "running",
+        };
+        jobs.insert(
+            0,
+            BackupJobDto {
+                id: format!("operation-{}", job.id),
+                profile_id: String::new(),
+                profile_name: match job.kind {
+                    BackupJobKind::Export => "导出任务",
+                    BackupJobKind::Import => "恢复任务",
+                    BackupJobKind::Cleanup => "暂存检查",
+                }
+                .into(),
+                status,
+                created_at: job.created_at_ms.to_string(),
+                size_bytes: None,
+                note: job.error.map(|code| {
+                    if code == ErrorCode::OperationCancelled {
+                        "任务已取消"
+                    } else {
+                        "任务失败，请检查操作错误和任务记录"
+                    }
+                    .into()
+                }),
+                operation_id: Some(job.id),
+                phase: Some(job.progress.phase.as_str()),
+                processed_bytes: Some(job.progress.processed_bytes),
+                total_bytes: job.progress.total_bytes,
+                can_cancel: job.progress.can_cancel && active,
+                cancel_requested: job.progress.cancel_requested,
+            },
+        );
     }
     Ok(jobs)
 }
@@ -147,74 +269,122 @@ pub(crate) struct BackupCleanupResultDto {
 }
 
 #[tauri::command]
-pub(crate) fn backup_cleanup(state: State<'_, AppState>) -> IpcResult<BackupCleanupResultDto> {
-    let operations = state.backup_operations.as_ref().ok_or_else(|| ErrorDto {
+pub(crate) async fn backup_cleanup(
+    state: State<'_, AppState>,
+) -> IpcResult<BackupCleanupResultDto> {
+    let operations = state.backup_operations.clone().ok_or_else(|| ErrorDto {
         code: ErrorCode::CapabilityUnsupported,
         message: "备份不可用".into(),
         violations: Vec::new(),
     })?;
-    Ok(BackupCleanupResultDto {
-        cleanup_pending: ipc(operations.recover_incomplete())?,
-    })
+    backup_jobs::execute(
+        state.backup_jobs.clone(),
+        BackupJobKind::Cleanup,
+        move |control| {
+            control
+                .begin_commit()
+                .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
+            control.begin_cleanup();
+            Ok(BackupCleanupResultDto {
+                cleanup_pending: ipc(operations.recover_incomplete())?,
+            })
+        },
+    )
+    .await
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct BackupCancelRequest {
+    operation_id: String,
 }
 
 #[tauri::command]
-pub(crate) fn backup_export(
+pub(crate) fn backup_cancel(
+    state: State<'_, AppState>,
+    request: BackupCancelRequest,
+) -> IpcResult<()> {
+    state.backup_jobs.cancel(&request.operation_id)
+}
+
+#[tauri::command]
+pub(crate) async fn backup_export(
     state: State<'_, AppState>,
     request: BackupExportRequest,
 ) -> IpcResult<BackupJobDto> {
-    let operations = state.backup_operations.as_ref().ok_or_else(|| ErrorDto {
+    let operations = state.backup_operations.clone().ok_or_else(|| ErrorDto {
         code: ErrorCode::CapabilityUnsupported,
         message: "备份不可用".into(),
         violations: Vec::new(),
     })?;
-    let password = SecretValue::new(request.password.expose().as_bytes().to_vec())
-        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
-    let profile = ipc(operations.export(
-        profile_id(&request.profile_id)?,
-        request.destination_name.clone(),
-        password,
-        request.include_proxy_credential,
-    ))?;
-    let profile_name = profile.name;
-    let size_bytes = backup_service(&state)?
-        .archive_size(&request.destination_name)
-        .ok();
-    Ok(BackupJobDto {
-        id: format!("backup-{}", request.destination_name),
-        profile_id: request.profile_id.as_str().to_owned(),
-        profile_name,
-        status: "completed",
-        created_at: SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_millis()
-            .to_string(),
-        size_bytes,
-        note: Some("本地加密归档；代理凭据未导出".to_owned()),
-    })
+    let archives = backup_service(&state)?;
+    backup_jobs::execute(
+        state.backup_jobs.clone(),
+        BackupJobKind::Export,
+        move |control| {
+            let password = SecretValue::new(request.password.expose().as_bytes().to_vec())
+                .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
+            let profile = ipc(operations.export_controlled(
+                profile_id(&request.profile_id)?,
+                request.destination_name.clone(),
+                password,
+                request.include_proxy_credential,
+                control,
+            ))?;
+            Ok(BackupJobDto {
+                id: format!("backup-{}", request.destination_name),
+                profile_id: request.profile_id.as_str().into(),
+                profile_name: profile.name,
+                status: "completed",
+                created_at: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_millis()
+                    .to_string(),
+                size_bytes: archives.archive_size(&request.destination_name).ok(),
+                note: Some("本地加密归档；代理凭据未导出".into()),
+                operation_id: None,
+                phase: None,
+                processed_bytes: None,
+                total_bytes: None,
+                can_cancel: false,
+                cancel_requested: false,
+            })
+        },
+    )
+    .await
 }
 
 #[tauri::command]
-pub(crate) fn backup_import(
+pub(crate) async fn backup_import(
     state: State<'_, AppState>,
     request: BackupImportRequest,
 ) -> IpcResult<BackupImportResultDto> {
-    let password = SecretValue::new(request.password.expose().as_bytes().to_vec())
-        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
-    let operations = state.backup_operations.as_ref().ok_or_else(|| ErrorDto {
+    let operations = state.backup_operations.clone().ok_or_else(|| ErrorDto {
         code: ErrorCode::CapabilityUnsupported,
         message: "备份不可用".into(),
         violations: Vec::new(),
     })?;
-    let imported = ipc(operations.import(BackupImportSpec {
-        source_name: request.source_name,
-        password,
-    }))?;
-    Ok(BackupImportResultDto {
-        profile: imported,
-        note: "已恢复为新的环境 UUID，未覆盖现有环境".to_owned(),
-    })
+    backup_jobs::execute(
+        state.backup_jobs.clone(),
+        BackupJobKind::Import,
+        move |control| {
+            let password = SecretValue::new(request.password.expose().as_bytes().to_vec())
+                .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
+            let imported = ipc(operations.import_controlled(
+                BackupImportSpec {
+                    source_name: request.source_name,
+                    password,
+                },
+                control,
+            ))?;
+            Ok(BackupImportResultDto {
+                profile: imported,
+                note: "已恢复为新的环境 UUID，未覆盖现有环境".into(),
+            })
+        },
+    )
+    .await
 }
 
 #[derive(Debug, Deserialize)]
@@ -837,6 +1007,64 @@ pub(crate) fn session_list(state: State<'_, AppState>) -> IpcResult<Vec<SessionD
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn backup_polling_and_cancellation_remain_available_during_blocking_work() {
+        use crate::backup_jobs::BackupJobs;
+        use brows_application::BackupPhase;
+        use std::{sync::mpsc, time::Duration};
+        let root = std::env::temp_dir().join(format!("brows-backup-poll-{}", uuid::Uuid::new_v4()));
+        let archives = brows_adapters_backup::EncryptedBackupService::new(
+            root.join("backups"),
+            root.join("profiles"),
+        )
+        .unwrap();
+        let jobs = Arc::new(BackupJobs::default());
+        let (started, ready) = mpsc::channel();
+        let (resume, wait) = mpsc::channel();
+        let worker = {
+            let jobs = jobs.clone();
+            tauri::async_runtime::spawn(async move {
+                backup_jobs::execute(jobs, BackupJobKind::Export, move |control| {
+                    control.phase(BackupPhase::Processing);
+                    control.processed(1234);
+                    started.send(()).unwrap();
+                    wait.recv_timeout(Duration::from_secs(5)).unwrap();
+                    control.begin_cleanup();
+                    control.checkpoint().map_err(|error| {
+                        brows_application::ApplicationError::from(error).to_contract()
+                    })
+                })
+                .await
+            })
+        };
+        ready.recv_timeout(Duration::from_secs(5)).unwrap();
+        let list = build_backup_list(&archives, None, &jobs).unwrap();
+        assert_eq!(list.len(), 1);
+        assert_eq!(list[0].status, "running");
+        assert_eq!(list[0].phase, Some("processing"));
+        assert_eq!(list[0].processed_bytes, Some(1234));
+        assert!(list[0].can_cancel);
+        let id = list[0].operation_id.as_ref().unwrap();
+        jobs.cancel(id).unwrap();
+        let pending = build_backup_list(&archives, None, &jobs).unwrap();
+        assert_eq!(pending[0].status, "running");
+        assert!(pending[0].cancel_requested);
+        let duplicate: IpcResult<()> = tauri::async_runtime::block_on(backup_jobs::execute(
+            jobs.clone(),
+            BackupJobKind::Import,
+            |_| Ok(()),
+        ));
+        assert_eq!(duplicate.unwrap_err().code, ErrorCode::AlreadyExists);
+        resume.send(()).unwrap();
+        let outcome = tauri::async_runtime::block_on(worker).unwrap();
+        assert_eq!(outcome.unwrap_err().code, ErrorCode::OperationCancelled);
+        let finished = build_backup_list(&archives, None, &jobs).unwrap();
+        assert_eq!(finished[0].status, "cancelled");
+        assert!(!finished[0].can_cancel);
+        jobs.shutdown();
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     use super::*;
     use brows_application::memory::{InMemoryBrowserRuntime, ManualClock};
     use brows_contracts::{ErrorCode, ProfileListRequest};

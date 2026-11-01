@@ -244,13 +244,21 @@ export interface DiagnosticReport {
   externalEndpoints: string[];
 }
 
-export type BackupStatus = "ready" | "running" | "completed" | "failed" | "interrupted";
+export type BackupStatus = "ready" | "running" | "completed" | "failed" | "interrupted" | "cancelled";
+
+export type BackupPhase = "preparing" | "deriving_key" | "processing" | "verifying" | "committing" | "cleaning" | "completed" | "cancelled" | "failed";
 
 export interface BackupJob {
   id: string;
   profileId: string;
   profileName: string;
   status: BackupStatus;
+  operationId?: string;
+  phase?: BackupPhase;
+  processedBytes?: number;
+  totalBytes?: number;
+  canCancel?: boolean;
+  cancelRequested?: boolean;
   createdAt: string;
   sizeBytes?: number;
   note?: string;
@@ -332,6 +340,7 @@ export interface ApiClient {
   listDiagnostics(profileId?: string): Promise<DiagnosticReport[]>;
   runDiagnostic(profileId: string, external?: boolean): Promise<DiagnosticReport>;
   listBackups(): Promise<BackupJob[]>;
+  cancelBackup(operationId: string): Promise<void>;
   cleanupBackupStaging(): Promise<{ cleanupPending: boolean }>;
   exportBackup(
     profileId: string,

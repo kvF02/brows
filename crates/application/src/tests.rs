@@ -974,6 +974,14 @@ impl BackupService for TestArchives {
         Ok(())
     }
     fn import(&self, _: &BackupImportSpec) -> PortResult<BackupImportPayload> {
+        if let Some((started, resume)) = &self.export_gate {
+            started.send(()).unwrap();
+            resume
+                .lock()
+                .unwrap()
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+        }
         Ok(BackupImportPayload {
             profile: self.profile.clone(),
             restored_data_dir: PathBuf::from("test-staging/userdata"),
@@ -1232,4 +1240,87 @@ fn recovery_interrupts_unfinished_tasks_and_never_activates_their_profiles() {
         tasks.list(10).unwrap()[0].failure,
         Some(RestoreFailure::Interrupted)
     );
+}
+
+#[test]
+fn cancelled_restore_is_journaled_without_creating_a_profile_and_cleanup_can_retry() {
+    for blocked in [false, true] {
+        let h = Harness::new(1);
+        let source = h.create_profile("Cancellation source");
+        let (started, wait) = std::sync::mpsc::channel();
+        let (resume, receiver) = std::sync::mpsc::channel();
+        let archives = Arc::new(TestArchives {
+            profile: source.clone().try_into().unwrap(),
+            exported: 0.into(),
+            discarded: 0.into(),
+            fail_install: false,
+            cleanup_blocked: blocked.into(),
+            export_gate: Some((started, std::sync::Mutex::new(receiver))),
+        });
+        let tasks = Arc::new(InMemoryRestoreTaskRepository::new(h.profiles.clone()));
+        let service = BackupApplicationService::new(
+            h.profile_service.clone(),
+            h.session_service.clone(),
+            archives.clone(),
+            tasks.clone(),
+            h.clock.clone(),
+        );
+        let control = BackupTaskControl::new();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                service.import_controlled(
+                    BackupImportSpec {
+                        source_name: "test.browsbak".into(),
+                        password: SecretValue::new(b"long-test-password".to_vec()).unwrap(),
+                    },
+                    &control,
+                )
+            });
+            wait.recv_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            assert_eq!(
+                tasks.list(10).unwrap()[0].status,
+                RestoreTaskStatus::Running
+            );
+            assert!(control.request_cancel());
+            resume.send(()).unwrap();
+            assert_eq!(
+                worker.join().unwrap().unwrap_err().code(),
+                &ErrorCode::OperationCancelled
+            );
+        });
+        let task = tasks.list(10).unwrap().remove(0);
+        assert_eq!(task.status, RestoreTaskStatus::Cancelled);
+        assert_eq!(task.failure, Some(RestoreFailure::Cancelled));
+        assert!(task.profile_id.is_none());
+        assert_eq!(task.cleanup_pending, blocked);
+        assert_eq!(h.profiles.profiles().unwrap().len(), 1);
+        assert_eq!(service.cleanup_pending(), blocked);
+        archives
+            .cleanup_blocked
+            .store(false, std::sync::atomic::Ordering::SeqCst);
+        assert!(!service.recover_incomplete().unwrap());
+        assert_eq!(
+            tasks.list(10).unwrap()[0].status,
+            RestoreTaskStatus::Cancelled
+        );
+        assert!(tasks.pending().unwrap().is_empty());
+
+        let control = BackupTaskControl::new();
+        assert!(control.request_cancel());
+        assert_eq!(
+            service
+                .import_controlled(
+                    BackupImportSpec {
+                        source_name: "test.browsbak".into(),
+                        password: SecretValue::new(b"long-test-password".to_vec()).unwrap(),
+                    },
+                    &control
+                )
+                .unwrap_err()
+                .code(),
+            &ErrorCode::OperationCancelled
+        );
+        assert_eq!(tasks.list(10).unwrap().len(), 1);
+    }
 }

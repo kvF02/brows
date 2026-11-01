@@ -119,15 +119,7 @@ interface DiagnosticReportDto {
   externalEndpoints: string[];
 }
 
-interface BackupJobDto {
-  id: string;
-  profileId: string;
-  profileName: string;
-  status: "ready" | "running" | "completed" | "failed" | "interrupted";
-  createdAt: string;
-  sizeBytes?: number;
-  note?: string;
-}
+type BackupJobDto = BackupJob;
 interface BackupImportResultDto {
   profile: ProfileDto;
   note: string;
@@ -163,6 +155,7 @@ const handlers = Object.freeze({
   listRuntimes: "list_runtimes",
   probeRuntimeFingerprint: "probe_runtime_fingerprint",
   backupList: "backup_list",
+  backupCancel: "backup_cancel",
   backupCleanup: "backup_cleanup",
   backupExport: "backup_export",
   backupImport: "backup_import",
@@ -442,6 +435,9 @@ export class TauriApiClient implements ApiClient {
   async listBackups(): Promise<BackupJob[]> {
     const jobs = await this.call<BackupJobDto[]>(handlers.backupList);
     return jobs.map((job) => ({ ...job }));
+  }
+  async cancelBackup(operationId: string): Promise<void> {
+    return this.call<void>(handlers.backupCancel, { request: { operationId } });
   }
   async cleanupBackupStaging(): Promise<{ cleanupPending: boolean }> {
     return this.call<{ cleanupPending: boolean }>(handlers.backupCleanup);

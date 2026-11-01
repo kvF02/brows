@@ -92,6 +92,7 @@ impl From<crate::ports::PortError> for ApplicationError {
     fn from(error: crate::ports::PortError) -> Self {
         use crate::ports::PortErrorKind;
         let code = match error.kind {
+            PortErrorKind::Cancelled => ErrorCode::OperationCancelled,
             PortErrorKind::NotFound => ErrorCode::NotFound,
             PortErrorKind::AlreadyExists => ErrorCode::AlreadyExists,
             PortErrorKind::RevisionConflict => ErrorCode::RevisionConflict,

@@ -99,12 +99,20 @@ impl RestoreTaskRepository for SqliteRestoreTaskRepository {
         failure: RestoreFailure,
         at_ms: u64,
     ) -> PortResult<()> {
-        if interrupted != (failure == RestoreFailure::Interrupted) {
+        if failure == RestoreFailure::Cancelled
+            || interrupted != (failure == RestoreFailure::Interrupted)
+        {
             return Err(invalid("inconsistent restore outcome"));
         }
         let changed = self.lock()?.execute("UPDATE restore_tasks SET status = ?2, failure_code = ?3, completed_at_ms = MAX(started_at_ms, ?4) WHERE id = ?1 AND status = 'running'",
             params![integer(id)?, if interrupted { "interrupted" } else { "failed" }, failure.as_str(), integer(at_ms)?])
             .map_err(|e| sqlite_error("record restore failure", e))?;
+        changed_one(changed)
+    }
+
+    fn cancel(&self, id: u64, at_ms: u64) -> PortResult<()> {
+        let changed = self.lock()?.execute("UPDATE restore_tasks SET status = 'cancelled', failure_code = 'cancelled', completed_at_ms = MAX(started_at_ms, ?2) WHERE id = ?1 AND status = 'running'", params![integer(id)?, integer(at_ms)?])
+            .map_err(|e| sqlite_error("cancel restore task", e))?;
         changed_one(changed)
     }
 
@@ -145,6 +153,7 @@ impl RestoreTaskRepository for SqliteRestoreTaskRepository {
 fn from_row(row: &Row<'_>) -> rusqlite::Result<RestoreTask> {
     let status: String = row.get(1)?;
     let status = match status.as_str() {
+        "cancelled" => RestoreTaskStatus::Cancelled,
         "running" => RestoreTaskStatus::Running,
         "completed" => RestoreTaskStatus::Completed,
         "failed" => RestoreTaskStatus::Failed,
@@ -155,6 +164,7 @@ fn from_row(row: &Row<'_>) -> rusqlite::Result<RestoreTask> {
     let failure: Option<String> = row.get(6)?;
     let failure = match failure.as_deref() {
         None => None,
+        Some("cancelled") => Some(RestoreFailure::Cancelled),
         Some("wrong_password") => Some(RestoreFailure::WrongPassword),
         Some("tampered") => Some(RestoreFailure::Tampered),
         Some("incompatible") => Some(RestoreFailure::Incompatible),

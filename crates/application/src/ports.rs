@@ -10,6 +10,7 @@ pub type PortResult<T> = Result<T, PortError>;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PortErrorKind {
+    Cancelled,
     NotFound,
     AlreadyExists,
     RevisionConflict,
@@ -274,6 +275,27 @@ pub trait BackupService: fmt::Debug + Send + Sync {
 
 /// Filesystem installation is kept behind an adapter alongside archive extraction.
 pub trait RestorableBackupService: BackupService {
+    /// Adapters without cooperative I/O must decline cancellation before they write.
+    fn export_controlled(
+        &self,
+        spec: &BackupExportSpec,
+        control: &crate::BackupTaskControl,
+    ) -> PortResult<()> {
+        control.begin_commit()?;
+        self.export(spec)
+    }
+    fn import_controlled(
+        &self,
+        spec: &BackupImportSpec,
+        task_id: u64,
+        control: &crate::BackupTaskControl,
+    ) -> PortResult<BackupImportPayload> {
+        control.checkpoint()?;
+        let payload = self.import_for_task(spec, task_id)?;
+        control.checkpoint()?;
+        Ok(payload)
+    }
+
     fn install_restored_data(&self, id: &ProfileId, staging: &std::path::Path) -> PortResult<()>;
     fn discard_restored_data(&self, staging: &std::path::Path);
     fn import_for_task(
@@ -289,6 +311,7 @@ pub trait RestorableBackupService: BackupService {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestoreTaskStatus {
+    Cancelled,
     Running,
     Completed,
     Failed,
@@ -298,6 +321,7 @@ pub enum RestoreTaskStatus {
 impl RestoreTaskStatus {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Cancelled => "cancelled",
             Self::Running => "running",
             Self::Completed => "completed",
             Self::Failed => "failed",
@@ -308,6 +332,7 @@ impl RestoreTaskStatus {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RestoreFailure {
+    Cancelled,
     WrongPassword,
     Tampered,
     Incompatible,
@@ -318,6 +343,7 @@ pub enum RestoreFailure {
 impl RestoreFailure {
     pub fn as_str(self) -> &'static str {
         match self {
+            Self::Cancelled => "cancelled",
             Self::WrongPassword => "wrong_password",
             Self::Tampered => "tampered",
             Self::Incompatible => "incompatible",
@@ -352,6 +378,7 @@ pub trait RestoreTaskRepository: fmt::Debug + Send + Sync {
         failure: RestoreFailure,
         at_ms: u64,
     ) -> PortResult<()>;
+    fn cancel(&self, id: u64, at_ms: u64) -> PortResult<()>;
     fn cleanup_finished(&self, id: u64) -> PortResult<()>;
     fn list(&self, limit: usize) -> PortResult<Vec<RestoreTask>>;
     fn pending(&self) -> PortResult<Vec<RestoreTask>>;

@@ -501,3 +501,35 @@ fn proxy_repository_round_trips_metadata_and_refuses_in_use_delete() {
     let error = proxies.delete(&proxy.id).unwrap_err();
     assert_eq!(error.kind, PortErrorKind::Locked);
 }
+
+#[test]
+fn cancelled_restore_cannot_activate_a_profile_or_change_its_terminal_outcome() {
+    let database = TemporaryDatabase::new("restore-cancel");
+    let profiles = SqliteProfileRepository::open(database.path()).unwrap();
+    let tasks = SqliteRestoreTaskRepository::open(database.path()).unwrap();
+    let task = tasks.begin(100).unwrap();
+    let mut restored = profile("cancelled-profile", "Cancelled");
+    restored.archived = true;
+    profiles.create(restored.clone()).unwrap();
+    tasks.bind_profile(task.id, &restored.id).unwrap();
+    tasks.cancel(task.id, 99).unwrap();
+    assert!(tasks.complete(task.id, &restored, 110).is_err());
+    assert!(tasks
+        .fail(task.id, true, RestoreFailure::Interrupted, 110)
+        .is_err());
+    assert!(tasks.cancel(task.id, 110).is_err());
+    assert_eq!(profiles.get(&restored.id).unwrap(), restored);
+    let cancelled = tasks.list(10).unwrap().remove(0);
+    assert_eq!(cancelled.status, RestoreTaskStatus::Cancelled);
+    assert_eq!(cancelled.failure, Some(RestoreFailure::Cancelled));
+    assert_eq!(cancelled.completed_at_ms, Some(100));
+    assert!(cancelled.cleanup_pending);
+    tasks.cleanup_finished(task.id).unwrap();
+    drop(tasks);
+    let reopened = SqliteRestoreTaskRepository::open(database.path()).unwrap();
+    assert_eq!(
+        reopened.list(10).unwrap()[0].status,
+        RestoreTaskStatus::Cancelled
+    );
+    assert!(reopened.pending().unwrap().is_empty());
+}

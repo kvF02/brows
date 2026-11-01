@@ -5,8 +5,8 @@
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use brows_application::{
-    BackupExportSpec, BackupImportPayload, BackupImportSpec, BackupInspection, BackupService,
-    PortError, PortErrorKind, PortResult,
+    BackupExportSpec, BackupImportPayload, BackupImportSpec, BackupInspection, BackupPhase,
+    BackupService, BackupTaskControl, PortError, PortErrorKind, PortResult,
 };
 use brows_contracts::ProfileDto;
 use chacha20poly1305::{
@@ -28,7 +28,9 @@ use tar::{Archive, Builder, Header};
 use walkdir::WalkDir;
 use zeroize::Zeroizing;
 
+mod progress;
 mod recovery;
+use progress::{ProgressReader, ProgressWriter};
 
 const MAGIC: &[u8; 8] = b"BROWSBAK";
 const PAYLOAD_VERSION: u16 = 1;
@@ -195,7 +197,12 @@ impl EncryptedBackupService {
             .join("userdata")
     }
 
-    fn export_archive(&self, spec: &BackupExportSpec) -> PortResult<()> {
+    fn export_archive(
+        &self,
+        spec: &BackupExportSpec,
+        control: &BackupTaskControl,
+    ) -> PortResult<()> {
+        control.checkpoint()?;
         validate_password(spec.password.expose())?;
         if spec.include_proxy_credential {
             return Err(PortError::new(
@@ -223,23 +230,33 @@ impl EncryptedBackupService {
 
         let source = self.profile_data_path(spec.profile.id.as_str());
         if source.exists() {
-            inspect_source_tree(&source, &self.profile_root)?;
+            inspect_source_tree_controlled(&source, &self.profile_root, control)?;
         }
 
+        // Only remove the partial file if this operation created it.
+        let output = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&partial)
+            .map_err(|error| io_error("create partial backup", error))?;
         let result = (|| {
-            let mut output = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&partial)
-                .map_err(|error| io_error("create partial backup", error))?;
+            let mut output = output;
+            control.phase(BackupPhase::DerivingKey);
             let (header, key, nonce) = build_header(spec.password.expose())?;
+            control.checkpoint()?;
             output
                 .write_all(&header)
                 .map_err(|error| io_error("write backup header", error))?;
 
             let encrypted = EncryptedWriter::new(output, &key, &nonce, header);
-            let mut archive = Builder::new(encrypted);
+            control.phase(BackupPhase::Processing);
+            let mut archive = Builder::new(ProgressWriter {
+                inner: encrypted,
+                control,
+            });
             archive.follow_symlinks(false);
+            // The restore format accepts regular files, not GNU sparse entries.
+            archive.sparse(false);
             append_manifest(&mut archive, &spec.profile)?;
             if source.exists() {
                 archive
@@ -252,20 +269,32 @@ impl EncryptedBackupService {
             let encrypted = archive
                 .into_inner()
                 .map_err(|error| io_error("finalize backup archive", error))?;
-            let mut output = encrypted.finish()?;
+            control.phase(BackupPhase::Verifying);
+            control.checkpoint()?;
+            let mut output = encrypted.inner.finish()?;
             output
                 .flush()
                 .map_err(|error| io_error("flush encrypted backup", error))?;
             output
                 .sync_all()
                 .map_err(|error| io_error("sync encrypted backup", error))?;
+            control.begin_commit()?;
             fs::rename(&partial, &destination)
                 .map_err(|error| io_error("install encrypted backup", error))?;
             Ok(())
         })();
 
+        let result = result.map_err(|error| {
+            if control.snapshot().cancel_requested {
+                PortError::new(PortErrorKind::Cancelled, "任务已取消")
+            } else {
+                error
+            }
+        });
         if result.is_err() {
-            let _ = fs::remove_file(&partial);
+            control.begin_cleanup();
+            fs::remove_file(&partial)
+                .map_err(|error| io_error("partial backup cleanup failed", error))?;
         }
         result
     }
@@ -274,11 +303,42 @@ impl EncryptedBackupService {
         &self,
         spec: &BackupImportSpec,
         task_id: Option<u64>,
+        control: &BackupTaskControl,
     ) -> PortResult<BackupImportPayload> {
+        self.import_archive_inner(spec, task_id, control)
+            .map_err(|error| {
+                if control.snapshot().cancel_requested {
+                    PortError::new(PortErrorKind::Cancelled, "任务已取消")
+                } else {
+                    error
+                }
+            })
+    }
+
+    fn import_archive_inner(
+        &self,
+        spec: &BackupImportSpec,
+        task_id: Option<u64>,
+        control: &BackupTaskControl,
+    ) -> PortResult<BackupImportPayload> {
+        control.checkpoint()?;
         validate_password(spec.password.expose())?;
         let source = self.archive_path(&spec.source_name)?;
-        let mut input = File::open(&source).map_err(|error| io_error("open backup", error))?;
+        let input = File::open(&source).map_err(|error| io_error("open backup", error))?;
+        control.total(
+            input
+                .metadata()
+                .map_err(|e| io_error("inspect backup size", e))?
+                .len(),
+        );
+        let mut input = ProgressReader {
+            inner: input,
+            control,
+        };
+        control.phase(BackupPhase::DerivingKey);
         let (header, key, nonce) = read_and_verify_header(&mut input, spec.password.expose())?;
+        control.checkpoint()?;
+        control.phase(BackupPhase::Processing);
         let encrypted = EncryptedReader::new(input, &key, &nonce, header);
         let mut archive = Archive::new(encrypted);
 
@@ -289,9 +349,12 @@ impl EncryptedBackupService {
             Some(id) => self.task_staging(id)?,
             None => unique_staging_directory(&staging_parent)?,
         };
-        let result = extract_archive(&mut archive, &staging).and_then(|profile| {
+        let result = extract_archive(&mut archive, &staging, control).and_then(|profile| {
+            control.phase(BackupPhase::Verifying);
+            control.checkpoint()?;
             let mut encrypted = archive.into_inner();
             encrypted.finish_authentication()?;
+            control.checkpoint()?;
             let restored_data_dir = staging.join("userdata");
             fs::create_dir_all(&restored_data_dir)
                 .map_err(|error| io_error("create restored profile directory", error))?;
@@ -301,6 +364,7 @@ impl EncryptedBackupService {
             })
         });
         if result.is_err() {
+            control.begin_cleanup();
             if let Some(key) = staging.file_name().and_then(OsStr::to_str) {
                 let _ = self.remove_staging_named(key);
             }
@@ -310,12 +374,28 @@ impl EncryptedBackupService {
 }
 
 impl brows_application::RestorableBackupService for EncryptedBackupService {
+    fn export_controlled(
+        &self,
+        spec: &BackupExportSpec,
+        control: &BackupTaskControl,
+    ) -> PortResult<()> {
+        self.export_archive(spec, control)
+    }
+    fn import_controlled(
+        &self,
+        spec: &BackupImportSpec,
+        task_id: u64,
+        control: &BackupTaskControl,
+    ) -> PortResult<BackupImportPayload> {
+        self.import_archive(spec, Some(task_id), control)
+    }
+
     fn import_for_task(
         &self,
         spec: &BackupImportSpec,
         task_id: u64,
     ) -> PortResult<BackupImportPayload> {
-        self.import_archive(spec, Some(task_id))
+        self.import_archive(spec, Some(task_id), &BackupTaskControl::new())
     }
     fn cleanup_task(&self, task_id: u64) -> PortResult<()> {
         self.cleanup_task_staging(task_id)
@@ -349,11 +429,11 @@ impl BackupService for EncryptedBackupService {
     }
 
     fn export(&self, spec: &BackupExportSpec) -> PortResult<()> {
-        self.export_archive(spec)
+        self.export_archive(spec, &BackupTaskControl::new())
     }
 
     fn import(&self, spec: &BackupImportSpec) -> PortResult<BackupImportPayload> {
-        self.import_archive(spec, None)
+        self.import_archive(spec, None, &BackupTaskControl::new())
     }
 }
 
@@ -388,6 +468,7 @@ fn append_manifest<W: Write>(
 fn extract_archive<R: Read>(
     archive: &mut Archive<R>,
     staging: &Path,
+    control: &BackupTaskControl,
 ) -> PortResult<brows_domain::ProfileSpec> {
     let mut manifest = None;
     let mut file_count = 0_u64;
@@ -396,6 +477,7 @@ fn extract_archive<R: Read>(
         .entries()
         .map_err(|error| tampered(format!("read backup entries: {error}")))?;
     for entry in entries {
+        control.checkpoint()?;
         let mut entry = entry.map_err(|error| tampered(format!("read backup entry: {error}")))?;
         let path = entry
             .path()
@@ -871,6 +953,15 @@ fn frame_aad(header: &[u8], prefix: &[u8]) -> Vec<u8> {
 }
 
 fn inspect_source_tree(source: &Path, profile_root: &Path) -> PortResult<()> {
+    inspect_source_tree_controlled(source, profile_root, &BackupTaskControl::new())
+}
+
+fn inspect_source_tree_controlled(
+    source: &Path,
+    profile_root: &Path,
+    control: &BackupTaskControl,
+) -> PortResult<()> {
+    control.checkpoint()?;
     let source = source
         .canonicalize()
         .map_err(|error| io_error("canonicalize profile data", error))?;
@@ -878,6 +969,7 @@ fn inspect_source_tree(source: &Path, profile_root: &Path) -> PortResult<()> {
     let mut count = 0_u64;
     let mut bytes = 0_u64;
     for entry in WalkDir::new(&source).follow_links(false) {
+        control.checkpoint()?;
         let entry = entry.map_err(|error| invalid(format!("inspect profile data: {error}")))?;
         if entry.path() == source {
             continue;
@@ -1082,6 +1174,90 @@ mod tests {
     }
 
     #[test]
+    fn cancelling_live_archive_io_removes_only_owned_partial_and_staging() {
+        use brows_application::RestorableBackupService;
+        use std::time::{Duration, Instant};
+        let (service, root) = service("cancel-io");
+        let source = service.profile_data_path(profile().id.as_str());
+        fs::create_dir_all(&source).unwrap();
+        let data = source.join("large-state");
+        File::create(&data)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
+        let spec = BackupExportSpec {
+            profile: profile(),
+            destination_name: "cancel.browsbak".into(),
+            password: password("correct horse battery"),
+            include_proxy_credential: false,
+        };
+        let cancel_after_io = |control: &BackupTaskControl, finished: &dyn Fn() -> bool| {
+            let deadline = Instant::now() + Duration::from_secs(20);
+            while control.snapshot().processed_bytes < 1024 * 1024 {
+                if finished() {
+                    return false;
+                }
+                assert!(
+                    Instant::now() < deadline,
+                    "worker never reached archive I/O"
+                );
+                std::thread::sleep(Duration::from_millis(1));
+            }
+            control.request_cancel()
+        };
+        let control = BackupTaskControl::new();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| service.export_controlled(&spec, &control));
+            let cancelled = cancel_after_io(&control, &|| worker.is_finished());
+            let result = worker.join().unwrap();
+            assert!(cancelled, "worker finished before cancellation: {result:?}");
+            assert_eq!(result.unwrap_err().kind, PortErrorKind::Cancelled);
+        });
+        assert!(!service.archive_path("cancel.browsbak").unwrap().exists());
+        assert!(!root.join("backups/cancel.browsbak.partial").exists());
+        assert_eq!(fs::metadata(&data).unwrap().len(), 64 * 1024 * 1024);
+
+        // A prior partial belongs to another invocation and must survive.
+        let partial = root.join("backups/cancel.browsbak.partial");
+        fs::write(&partial, b"previous export").unwrap();
+        assert_eq!(
+            service.export(&spec).unwrap_err().kind,
+            PortErrorKind::AlreadyExists
+        );
+        assert_eq!(fs::read(&partial).unwrap(), b"previous export");
+        fs::remove_file(partial).unwrap();
+        service.export(&spec).unwrap();
+        let archive_size = service.archive_size("cancel.browsbak").unwrap();
+        let control = BackupTaskControl::new();
+        std::thread::scope(|scope| {
+            let worker = scope.spawn(|| {
+                service.import_controlled(
+                    &BackupImportSpec {
+                        source_name: "cancel.browsbak".into(),
+                        password: password("correct horse battery"),
+                    },
+                    77,
+                    &control,
+                )
+            });
+            let cancelled = cancel_after_io(&control, &|| worker.is_finished());
+            let result = worker.join().unwrap();
+            assert!(cancelled, "worker finished before cancellation: {result:?}");
+            assert_eq!(result.unwrap_err().kind, PortErrorKind::Cancelled);
+        });
+        assert_eq!(control.snapshot().total_bytes, Some(archive_size));
+        assert!(!root
+            .join("backups/restore-staging/task-000000000000004d")
+            .exists());
+        assert_eq!(
+            service.archive_size("cancel.browsbak").unwrap(),
+            archive_size
+        );
+        assert_eq!(fs::metadata(data).unwrap().len(), 64 * 1024 * 1024);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn encrypted_archive_round_trips_profile_and_userdata() {
         let (service, root) = service("roundtrip");
         let profile = profile();
@@ -1094,6 +1270,10 @@ mod tests {
             b"test-cookie-data",
         )
         .unwrap();
+        File::create(userdata.join("Default/SparseCache"))
+            .unwrap()
+            .set_len(4096)
+            .unwrap();
         service
             .export(&BackupExportSpec {
                 destination_name: "roundtrip.browsbak".to_owned(),
@@ -1112,6 +1292,10 @@ mod tests {
             })
             .unwrap();
         assert_eq!(restored.profile, profile);
+        assert_eq!(
+            fs::read(restored.restored_data_dir.join("Default/SparseCache")).unwrap(),
+            vec![0; 4096]
+        );
         assert_eq!(
             fs::read(restored.restored_data_dir.join("Default").join("Cookies")).unwrap(),
             b"test-cookie-data"

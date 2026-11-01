@@ -1,7 +1,7 @@
 use brows_application::{PortError, PortErrorKind, PortResult};
 use rusqlite::{Connection, TransactionBehavior};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 7;
+pub const CURRENT_SCHEMA_VERSION: u32 = 8;
 
 const MIGRATION_1: &str = r#"
 CREATE TABLE profiles (
@@ -167,6 +167,29 @@ CREATE TABLE restore_tasks (
 CREATE INDEX restore_tasks_pending_idx ON restore_tasks (status, cleanup_pending, id);
 "#;
 
+const MIGRATION_8: &str = r#"
+DROP INDEX restore_tasks_pending_idx;
+ALTER TABLE restore_tasks RENAME TO restore_tasks_v7;
+CREATE TABLE restore_tasks (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'failed', 'interrupted', 'cancelled')),
+    profile_id TEXT,
+    started_at_ms INTEGER NOT NULL CHECK (started_at_ms >= 0),
+    completed_at_ms INTEGER CHECK (completed_at_ms IS NULL OR completed_at_ms >= started_at_ms),
+    cleanup_pending INTEGER NOT NULL CHECK (cleanup_pending IN (0, 1)),
+    failure_code TEXT CHECK (failure_code IN ('wrong_password', 'tampered', 'incompatible', 'unavailable', 'interrupted', 'cancelled')),
+    CHECK ((status = 'running' AND completed_at_ms IS NULL AND failure_code IS NULL AND cleanup_pending = 1)
+        OR (status = 'completed' AND completed_at_ms IS NOT NULL AND failure_code IS NULL AND profile_id IS NOT NULL)
+        OR (status = 'failed' AND completed_at_ms IS NOT NULL AND failure_code IS NOT NULL AND failure_code NOT IN ('interrupted', 'cancelled'))
+        OR (status = 'interrupted' AND completed_at_ms IS NOT NULL AND failure_code IS NOT NULL AND failure_code = 'interrupted')
+        OR (status = 'cancelled' AND completed_at_ms IS NOT NULL AND failure_code IS NOT NULL AND failure_code = 'cancelled'))
+) STRICT;
+INSERT INTO restore_tasks (id, status, profile_id, started_at_ms, completed_at_ms, cleanup_pending, failure_code)
+    SELECT id, status, profile_id, started_at_ms, completed_at_ms, cleanup_pending, failure_code FROM restore_tasks_v7;
+DROP TABLE restore_tasks_v7;
+CREATE INDEX restore_tasks_pending_idx ON restore_tasks (status, cleanup_pending, id);
+"#;
+
 pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
     let found: u32 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
@@ -207,6 +230,9 @@ pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
             7 => transaction
                 .execute_batch(MIGRATION_7)
                 .map_err(|error| sqlite_error("apply schema migration 7", error))?,
+            8 => transaction
+                .execute_batch(MIGRATION_8)
+                .map_err(|error| sqlite_error("apply schema migration 8", error))?,
             target => {
                 return Err(PortError::new(
                     PortErrorKind::Incompatible,
@@ -227,4 +253,86 @@ pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
 
 pub(crate) fn sqlite_error(context: &'static str, error: rusqlite::Error) -> PortError {
     PortError::new(PortErrorKind::Internal, format!("{context}: {error}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn version_eight_preserves_all_version_seven_restore_outcomes() {
+        let mut connection = Connection::open_in_memory().unwrap();
+        for migration in [
+            MIGRATION_1,
+            MIGRATION_2,
+            MIGRATION_3,
+            MIGRATION_4,
+            MIGRATION_5,
+            MIGRATION_6,
+            MIGRATION_7,
+        ] {
+            connection.execute_batch(migration).unwrap();
+        }
+        connection.execute_batch("INSERT INTO restore_tasks VALUES (7, 'running', NULL, 10, NULL, 1, NULL);
+            INSERT INTO restore_tasks VALUES (8, 'completed', 'installed', 11, 12, 0, NULL);
+            INSERT INTO restore_tasks VALUES (9, 'failed', NULL, 12, 13, 1, 'wrong_password');
+            INSERT INTO restore_tasks VALUES (10, 'interrupted', 'archived', 13, 14, 1, 'interrupted');
+            UPDATE manager_settings SET max_concurrent_sessions = 3;
+            PRAGMA user_version = 7;").unwrap();
+        type StoredRow = (
+            i64,
+            String,
+            Option<String>,
+            i64,
+            Option<i64>,
+            bool,
+            Option<String>,
+        );
+        let rows = |connection: &Connection| -> Vec<StoredRow> {
+            connection
+                .prepare("SELECT * FROM restore_tasks ORDER BY id")
+                .unwrap()
+                .query_map([], |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        let before = rows(&connection);
+        migrate(&mut connection).unwrap();
+        assert_eq!(before, rows(&connection));
+        assert_eq!(
+            connection
+                .query_row(
+                    "SELECT max_concurrent_sessions FROM manager_settings",
+                    [],
+                    |r| r.get::<_, i64>(0)
+                )
+                .unwrap(),
+            3
+        );
+        connection.execute_batch("INSERT INTO restore_tasks (status, started_at_ms, completed_at_ms, cleanup_pending, failure_code) VALUES ('cancelled', 20, 21, 1, 'cancelled');").unwrap();
+        assert!(connection.last_insert_rowid() > 10);
+        assert!(connection
+            .execute_batch(
+                "UPDATE restore_tasks SET failure_code = 'cancelled' WHERE status = 'failed';"
+            )
+            .is_err());
+        migrate(&mut connection).unwrap();
+        assert_eq!(
+            connection
+                .pragma_query_value::<u32, _>(None, "user_version", |r| r.get(0))
+                .unwrap(),
+            8
+        );
+    }
 }

@@ -31,3 +31,22 @@ test("cleanup errors are propagated and browser preview does not claim restore s
   assert.deepEqual(plain(await mock.cleanupBackupStaging()), { cleanupPending: false });
   await assert.rejects(mock.importBackup("test.browsbak", "test-only-password"), (error) => error.code === "CAPABILITY_UNSUPPORTED");
 });
+
+test("live task phases, measured bytes and pending cancellation survive IPC mapping", async () => {
+  const jobs = [{ id: "operation-opaque", operationId: "opaque", profileId: "", profileName: "恢复任务", status: "running",
+    createdAt: "2000", phase: "processing", processedBytes: 12345, totalBytes: 67890, canCancel: true, cancelRequested: true },
+    { id: "restore-8", profileId: "", profileName: "恢复任务 #8", status: "cancelled", createdAt: "1000", note: "已取消" }];
+  const api = new TauriApiClient({ invoke: async () => jobs });
+  assert.deepEqual(plain(await api.listBackups()), jobs);
+});
+
+test("cancellation sends only an operation identifier and propagates commit rejection", async () => {
+  const api = new TauriApiClient({ invoke: async (handler, args) => {
+    assert.equal(handler, "backup_cancel");
+    assert.deepEqual(plain(args), { request: { operationId: "opaque-task" } });
+  } });
+  await api.cancelBackup("opaque-task");
+  const committed = new TauriApiClient({ invoke: async () => { throw { code: "INVALID_PROFILE_STATE", message: "committing" }; } });
+  await assert.rejects(committed.cancelBackup("opaque-task"), (error) => error.code === "INVALID_PROFILE_STATE");
+  await assert.rejects(new MockApiClient().cancelBackup("opaque-task"), (error) => error.code === "NOT_FOUND");
+});

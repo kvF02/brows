@@ -106,6 +106,7 @@ impl RestoreTaskRepository for InMemoryRestoreTaskRepository {
             .get_mut(&id)
             .ok_or_else(|| PortError::not_found("restore task"))?;
         if task.status != RestoreTaskStatus::Running
+            || failure == RestoreFailure::Cancelled
             || interrupted != (failure == RestoreFailure::Interrupted)
         {
             return Err(invalid());
@@ -116,6 +117,22 @@ impl RestoreTaskRepository for InMemoryRestoreTaskRepository {
             RestoreTaskStatus::Failed
         };
         task.failure = Some(failure);
+        task.completed_at_ms = Some(at_ms.max(task.started_at_ms));
+        Ok(())
+    }
+    fn cancel(&self, id: u64, at_ms: u64) -> PortResult<()> {
+        let mut tasks = self
+            .tasks
+            .lock()
+            .map_err(|_| unavailable("restore tasks"))?;
+        let task = tasks
+            .get_mut(&id)
+            .ok_or_else(|| PortError::not_found("restore task"))?;
+        if task.status != RestoreTaskStatus::Running {
+            return Err(invalid());
+        }
+        task.status = RestoreTaskStatus::Cancelled;
+        task.failure = Some(RestoreFailure::Cancelled);
         task.completed_at_ms = Some(at_ms.max(task.started_at_ms));
         Ok(())
     }

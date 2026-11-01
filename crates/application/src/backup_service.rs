@@ -1,6 +1,6 @@
 use crate::{
-    ApplicationError, ApplicationResult, BackupExportSpec, BackupImportSpec, Clock,
-    ProfileApplicationService, RestorableBackupService, RestoreFailure, RestoreTask,
+    ApplicationError, ApplicationResult, BackupExportSpec, BackupImportSpec, BackupTaskControl,
+    Clock, ProfileApplicationService, RestorableBackupService, RestoreFailure, RestoreTask,
     RestoreTaskRepository, RestoreTaskStatus, SecretValue, SessionApplicationService,
 };
 use brows_contracts::{ProfileDto, ProfileIdRequest};
@@ -48,27 +48,60 @@ impl BackupApplicationService {
         password: SecretValue,
         include_proxy_credential: bool,
     ) -> ApplicationResult<ProfileDto> {
+        self.export_controlled(
+            id,
+            destination_name,
+            password,
+            include_proxy_credential,
+            &BackupTaskControl::new(),
+        )
+    }
+
+    pub fn export_controlled(
+        &self,
+        id: ProfileId,
+        destination_name: String,
+        password: SecretValue,
+        include_proxy_credential: bool,
+        control: &BackupTaskControl,
+    ) -> ApplicationResult<ProfileDto> {
+        control.checkpoint()?;
         let _reservation = self.sessions.reserve_stopped_profile(&id)?;
         let profile = self.profiles.get(ProfileIdRequest {
             profile_id: (&id).into(),
         })?;
-        self.archives.export(&BackupExportSpec {
-            profile: profile.clone().try_into()?,
-            destination_name,
-            password,
-            include_proxy_credential,
-        })?;
+        self.archives.export_controlled(
+            &BackupExportSpec {
+                profile: profile.clone().try_into()?,
+                destination_name,
+                password,
+                include_proxy_credential,
+            },
+            control,
+        )?;
         Ok(profile)
     }
 
     pub fn import(&self, spec: BackupImportSpec) -> ApplicationResult<ProfileDto> {
+        self.import_controlled(spec, &BackupTaskControl::new())
+    }
+
+    pub fn import_controlled(
+        &self,
+        spec: BackupImportSpec,
+        control: &BackupTaskControl,
+    ) -> ApplicationResult<ProfileDto> {
+        control.checkpoint()?;
         let _operation = self
             .restore_operation
             .lock()
             .map_err(|_| ApplicationError::poisoned("restore"))?;
+        control.checkpoint()?;
         let task = self.tasks.begin(self.clock.now_ms())?;
+        control.attach_restore(task.id);
         let result = (|| -> ApplicationResult<ProfileDto> {
-            let payload = self.archives.import_for_task(&spec, task.id)?;
+            let payload = self.archives.import_controlled(&spec, task.id, control)?;
+            control.begin_commit()?;
             self.profiles.create_imported_journaled(
                 payload.profile,
                 |id| Ok(self.tasks.bind_profile(task.id, id)?),
@@ -79,20 +112,27 @@ impl BackupApplicationService {
                 },
             )
         })();
+        control.begin_cleanup();
         if let Err(error) = &result {
-            let failure = match error.code() {
-                brows_contracts::ErrorCode::BackupWrongPassword => RestoreFailure::WrongPassword,
-                brows_contracts::ErrorCode::BackupTampered => RestoreFailure::Tampered,
-                brows_contracts::ErrorCode::BackupIncompatible
-                | brows_contracts::ErrorCode::ValidationFailed
-                | brows_contracts::ErrorCode::RuntimeUntrusted
-                | brows_contracts::ErrorCode::NotFound => RestoreFailure::Incompatible,
-                _ => RestoreFailure::Unavailable,
-            };
-            // A journal failure leaves a pending record for restart recovery.
-            let _ = self
-                .tasks
-                .fail(task.id, false, failure, self.clock.now_ms());
+            if error.code() == &brows_contracts::ErrorCode::OperationCancelled {
+                let _ = self.tasks.cancel(task.id, self.clock.now_ms());
+            } else {
+                let failure = match error.code() {
+                    brows_contracts::ErrorCode::BackupWrongPassword => {
+                        RestoreFailure::WrongPassword
+                    }
+                    brows_contracts::ErrorCode::BackupTampered => RestoreFailure::Tampered,
+                    brows_contracts::ErrorCode::BackupIncompatible
+                    | brows_contracts::ErrorCode::ValidationFailed
+                    | brows_contracts::ErrorCode::RuntimeUntrusted
+                    | brows_contracts::ErrorCode::NotFound => RestoreFailure::Incompatible,
+                    _ => RestoreFailure::Unavailable,
+                };
+                // A journal failure leaves a pending record for restart recovery.
+                let _ = self
+                    .tasks
+                    .fail(task.id, false, failure, self.clock.now_ms());
+            }
         }
         if self
             .archives
