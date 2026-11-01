@@ -56,6 +56,7 @@ try {
 
     Invoke-Checked -Program 'npm.cmd' -Arguments @('ci', '--prefix', 'ui')
     Invoke-Checked -Program 'npm.cmd' -Arguments @('run', 'ui:build')
+    Invoke-Checked -Program 'npm.cmd' -Arguments @('run', 'ui:audit')
     foreach ($suite in @('test:fingerprint', 'test:settings', 'test:backups', 'test:runtimes', 'test:alpha')) {
         Invoke-Checked -Program 'npm.cmd' -Arguments @('run', $suite)
     }
