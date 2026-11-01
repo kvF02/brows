@@ -19,6 +19,7 @@ mod profile_operations;
 mod profile_service;
 mod proxy_service;
 mod session_service;
+mod settings_service;
 mod sha256;
 #[path = "stealth_template/mod.rs"]
 mod stealth_template;
@@ -35,3 +36,4 @@ pub use profile_operations::{ProfileOperations, ProfileReservation};
 pub use profile_service::ProfileApplicationService;
 pub use proxy_service::ProxyApplicationService;
 pub use session_service::{SessionApplicationService, SessionLaunchOutcome};
+pub use settings_service::SettingsApplicationService;

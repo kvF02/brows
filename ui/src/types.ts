@@ -259,7 +259,7 @@ export interface BackupJob {
 export interface Settings {
   maxConcurrentSessions: number;
   telemetryEnabled: false;
-  stopSessionsOnExit: boolean;
+  stopSessionsOnExit: true;
   retainArchivedDays: number;
   activeRuntimeId?: string;
 }

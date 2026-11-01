@@ -22,6 +22,244 @@ struct Harness {
     compiler: Arc<LaunchPlanCompiler>,
 }
 
+fn settings_patch(limit: u32) -> brows_contracts::SettingsUpdateRequest {
+    brows_contracts::SettingsUpdateRequest {
+        changes: brows_contracts::SettingsPatchDto {
+            max_concurrent_sessions: Some(limit),
+            ..Default::default()
+        },
+    }
+}
+
+#[test]
+fn settings_resize_live_sessions_fifo_and_drain_after_lowering_the_limit() {
+    let h = Harness::new(1);
+    let repository = Arc::new(InMemorySettingsRepository(std::sync::Mutex::new(
+        brows_domain::ManagerSettings {
+            max_concurrent_sessions: 1,
+        },
+    )));
+    let settings = SettingsApplicationService::new(repository.clone(), h.session_service.clone());
+    let profiles: Vec<_> = (0..5)
+        .map(|n| h.create_profile(&format!("Resize {n}")))
+        .collect();
+    for profile in &profiles {
+        h.session_service
+            .launch(SessionLaunchRequest {
+                profile_id: profile.id.clone(),
+            })
+            .unwrap();
+    }
+    assert_eq!(
+        settings
+            .update(settings_patch(3))
+            .unwrap()
+            .max_concurrent_sessions,
+        3
+    );
+    let sessions = h.session_service.list().unwrap();
+    for (index, profile) in profiles.iter().enumerate() {
+        assert_eq!(
+            sessions
+                .iter()
+                .find(|s| s.profile_id == profile.id)
+                .unwrap()
+                .state,
+            if index < 3 {
+                SessionStateDto::Running
+            } else {
+                SessionStateDto::Queued
+            }
+        );
+    }
+    assert_eq!(repository.load().unwrap().max_concurrent_sessions, 3);
+    settings.update(settings_patch(1)).unwrap();
+    for profile in &profiles[..2] {
+        let session = h
+            .session_service
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|s| s.profile_id == profile.id)
+            .unwrap();
+        h.session_service
+            .stop(SessionStopRequest {
+                session_id: session.id,
+            })
+            .unwrap();
+        assert_eq!(
+            h.session_service
+                .list()
+                .unwrap()
+                .iter()
+                .filter(|s| s.state == SessionStateDto::Queued)
+                .count(),
+            2
+        );
+    }
+    let session = h
+        .session_service
+        .list()
+        .unwrap()
+        .into_iter()
+        .find(|s| s.profile_id == profiles[2].id)
+        .unwrap();
+    h.session_service
+        .stop(SessionStopRequest {
+            session_id: session.id,
+        })
+        .unwrap();
+    assert_eq!(
+        h.browsers.running_plans().unwrap()[0].profile_id.as_str(),
+        profiles[3].id.as_str()
+    );
+    assert_eq!(repository.load().unwrap().max_concurrent_sessions, 1);
+}
+
+#[derive(Debug)]
+struct UnwritableSettings;
+impl SettingsRepository for UnwritableSettings {
+    fn load(&self) -> PortResult<brows_domain::ManagerSettings> {
+        Ok(brows_domain::ManagerSettings {
+            max_concurrent_sessions: 1,
+        })
+    }
+    fn save(&self, _: &brows_domain::ManagerSettings) -> PortResult<()> {
+        Err(PortError::new(
+            PortErrorKind::Unavailable,
+            "simulated write failure",
+        ))
+    }
+}
+
+#[test]
+fn failed_settings_write_leaves_live_capacity_and_queue_unchanged() {
+    let h = Harness::new(1);
+    let settings =
+        SettingsApplicationService::new(Arc::new(UnwritableSettings), h.session_service.clone());
+    for n in 0..3 {
+        let p = h.create_profile(&format!("Write failure {n}"));
+        h.session_service
+            .launch(SessionLaunchRequest { profile_id: p.id })
+            .unwrap();
+    }
+    let before = h.session_service.list().unwrap();
+    assert!(settings.update(settings_patch(3)).is_err());
+    assert_eq!(h.session_service.list().unwrap(), before);
+    assert_eq!(h.browsers.running_plans().unwrap().len(), 1);
+    assert_eq!(settings.get().unwrap().max_concurrent_sessions, 1);
+    let p = h.create_profile("Must still queue");
+    assert!(matches!(
+        h.session_service
+            .launch(SessionLaunchRequest { profile_id: p.id })
+            .unwrap(),
+        SessionLaunchOutcome::Queued { .. }
+    ));
+}
+
+#[test]
+fn invalid_or_locked_settings_do_not_partially_save_other_changes() {
+    let h = Harness::new(1);
+    let repository = Arc::new(InMemorySettingsRepository(std::sync::Mutex::new(
+        brows_domain::ManagerSettings {
+            max_concurrent_sessions: 1,
+        },
+    )));
+    let settings = SettingsApplicationService::new(repository.clone(), h.session_service.clone());
+    for limit in [0, 11, u32::MAX] {
+        assert_eq!(
+            settings.update(settings_patch(limit)).unwrap_err().code(),
+            &ErrorCode::ValidationFailed
+        );
+    }
+    for changes in [
+        brows_contracts::SettingsPatchDto {
+            stop_sessions_on_exit: Some(false),
+            ..Default::default()
+        },
+        brows_contracts::SettingsPatchDto {
+            telemetry_enabled: Some(true),
+            ..Default::default()
+        },
+        brows_contracts::SettingsPatchDto {
+            check_updates: Some(true),
+            ..Default::default()
+        },
+        brows_contracts::SettingsPatchDto {
+            retain_archived_days: Some(0),
+            ..Default::default()
+        },
+    ] {
+        let request = brows_contracts::SettingsUpdateRequest {
+            changes: brows_contracts::SettingsPatchDto {
+                max_concurrent_sessions: Some(3),
+                ..changes
+            },
+        };
+        assert_eq!(
+            settings.update(request).unwrap_err().code(),
+            &ErrorCode::CapabilityUnsupported
+        );
+        assert_eq!(repository.load().unwrap().max_concurrent_sessions, 1);
+    }
+    h.session_service.shutdown().unwrap();
+    assert!(settings.update(settings_patch(3)).is_err());
+    assert_eq!(repository.load().unwrap().max_concurrent_sessions, 1);
+}
+
+#[test]
+fn resize_keeps_fifo_when_a_promoted_browser_fails_to_start() {
+    let h = Harness::new(1);
+    let repository = Arc::new(InMemorySettingsRepository::default());
+    let settings = SettingsApplicationService::new(repository, h.session_service.clone());
+    let profiles: Vec<_> = (0..4)
+        .map(|n| h.create_profile(&format!("Failing promotion {n}")))
+        .collect();
+    for p in &profiles {
+        h.session_service
+            .launch(SessionLaunchRequest {
+                profile_id: p.id.clone(),
+            })
+            .unwrap();
+    }
+    h.browsers.fail_next_launch();
+    assert_eq!(
+        settings
+            .update(settings_patch(3))
+            .unwrap()
+            .max_concurrent_sessions,
+        3
+    );
+    let launched: Vec<_> = h
+        .audit
+        .events()
+        .unwrap()
+        .into_iter()
+        .filter(|e| e.action == "session.launch" && e.outcome == AuditOutcome::Succeeded)
+        .collect();
+    let sessions = h.session_service.list().unwrap();
+    let launched_profiles: Vec<_> = launched
+        .iter()
+        .map(|event| {
+            sessions
+                .iter()
+                .find(|s| s.id.as_str() == event.entity_id)
+                .unwrap()
+                .profile_id
+                .clone()
+        })
+        .collect();
+    assert_eq!(
+        launched_profiles,
+        vec![
+            profiles[0].id.clone(),
+            profiles[2].id.clone(),
+            profiles[3].id.clone()
+        ]
+    );
+    assert_eq!(h.browsers.running_plans().unwrap().len(), 3);
+}
+
 impl Harness {
     fn new(limit: usize) -> Self {
         let profiles = Arc::new(InMemoryProfileRepository::default());

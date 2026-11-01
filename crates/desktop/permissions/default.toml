@@ -143,10 +143,22 @@ identifier = "allow-backup-import"
 description = "Enables the backup_import command without any pre-configured scope."
 commands = { allow = ["backup_import"] }
 
+[[permission]]
+identifier = "allow-settings-get"
+description = "Read manager settings."
+commands = { allow = ["settings_get"] }
+
+[[permission]]
+identifier = "allow-settings-update"
+description = "Update supported manager preferences."
+commands = { allow = ["settings_update"] }
+
 # Default permission set: auto-allowed for all capabilities.
 [default]
 description = "Default permissions for the Brows app — all custom commands."
 permissions = [
+  "allow-settings-get",
+  "allow-settings-update",
   "allow-profile-list",
   "allow-profile-get",
   "allow-profile-create",

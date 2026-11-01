@@ -1131,15 +1131,19 @@ pub struct LegacyMigrationRecordDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsDto {
+    #[serde(default = "default_stop_sessions_on_exit")]
+    pub stop_sessions_on_exit: bool,
     pub max_concurrent_sessions: u32,
     pub retain_archived_days: u32,
     pub telemetry_enabled: bool,
     pub check_updates: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Debug, Default, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SettingsPatchDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_sessions_on_exit: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_sessions: Option<u32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1148,6 +1152,22 @@ pub struct SettingsPatchDto {
     pub telemetry_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_updates: Option<bool>,
+}
+
+fn default_stop_sessions_on_exit() -> bool {
+    true
+}
+
+impl From<&domain::ManagerSettings> for SettingsDto {
+    fn from(value: &domain::ManagerSettings) -> Self {
+        Self {
+            max_concurrent_sessions: value.max_concurrent_sessions as u32,
+            retain_archived_days: 7,
+            telemetry_enabled: false,
+            check_updates: false,
+            stop_sessions_on_exit: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1707,5 +1727,24 @@ mod tests {
             source_name: "C:\\Users\\tester\\backup.browsbak".to_owned(),
         };
         assert!(CommandEnvelope::new("request-2", command).is_err());
+    }
+    #[test]
+    fn settings_contract_rejects_unknown_fields_and_non_integer_limits() {
+        for changes in [
+            serde_json::json!({"maxConcurrentSessions": 1.5}),
+            serde_json::json!({"maxConcurrentSessions": -1}),
+            serde_json::json!({"activeRuntimeId": "unregistered"}),
+            serde_json::json!({"stopSessionsOnExit": "false"}),
+        ] {
+            assert!(serde_json::from_value::<SettingsUpdateRequest>(
+                serde_json::json!({"changes": changes})
+            )
+            .is_err());
+        }
+        let dto = SettingsDto::from(&domain::ManagerSettings::default());
+        let value = serde_json::to_value(dto).unwrap();
+        assert_eq!(value["stopSessionsOnExit"], true);
+        assert_eq!(value["telemetryEnabled"], false);
+        assert_eq!(value["maxConcurrentSessions"], 10);
     }
 }

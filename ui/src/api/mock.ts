@@ -192,7 +192,7 @@ export class MockApiClient implements ApiClient {
     if (profile.revision !== revision) {
       throw new ApiError("REVISION_CONFLICT", "环境已被其他操作更新，请刷新后重试");
     }
-    if (profile.status === "running" || profile.status === "starting") {
+    if (profile.status === "running" || profile.status === "starting" || profile.status === "queued") {
       throw new ApiError("INVALID_PROFILE_STATE", "运行中的环境不能修改配置");
     }
     Object.assign(profile, changes, { revision: profile.revision + 1 });
@@ -279,6 +279,7 @@ export class MockApiClient implements ApiClient {
     }
     profile.status = "stopped";
     profile.revision += 1;
+    this.promoteQueuedSessions();
     return { ...profile, tags: [...profile.tags] };
   }
 
@@ -427,15 +428,33 @@ export class MockApiClient implements ApiClient {
   }
 
   async updateSettings(changes: Partial<Settings>): Promise<Settings> {
-    if (changes.maxConcurrentSessions !== undefined) {
-      const value = Math.round(changes.maxConcurrentSessions);
-      if (value < 1 || value > 10) {
-        throw new ApiError("VALIDATION_FAILED", "并发上限必须在 1 到 10 之间");
-      }
-      changes.maxConcurrentSessions = value;
+    const allowed = ["maxConcurrentSessions", "stopSessionsOnExit", "telemetryEnabled", "retainArchivedDays"];
+    if (Object.keys(changes).some((key) => !allowed.includes(key)) || (changes as { stopSessionsOnExit?: boolean }).stopSessionsOnExit === false ||
+        (changes as { telemetryEnabled?: boolean }).telemetryEnabled === true ||
+        (changes.retainArchivedDays !== undefined && changes.retainArchivedDays !== 7)) {
+      throw new ApiError("CAPABILITY_UNSUPPORTED", "仅支持修改并发上限；退出时停止会话固定开启");
     }
-    this.settings = { ...this.settings, ...changes, telemetryEnabled: false };
+    const value = changes.maxConcurrentSessions ?? this.settings.maxConcurrentSessions;
+    if (!Number.isInteger(value) || value < 1 || value > 10) {
+      throw new ApiError("VALIDATION_FAILED", "并发上限必须是 1 到 10 的整数");
+    }
+    this.settings = { ...this.settings, maxConcurrentSessions: value };
+    this.promoteQueuedSessions();
     return { ...this.settings };
+  }
+
+  private promoteQueuedSessions(): void {
+    let running = this.profiles.filter((profile) => profile.status === "running" || profile.status === "starting").length;
+    for (const session of this.sessions.values()) {
+      if (running >= this.settings.maxConcurrentSessions) break;
+      if (session.state !== "queued") continue;
+      const profile = this.findProfile(session.profileId);
+      session.state = "running";
+      session.updatedAtMs = Date.now();
+      profile.status = "running";
+      profile.lastUsedAt = now();
+      running += 1;
+    }
   }
 
   private findProfile(id: string): Profile {

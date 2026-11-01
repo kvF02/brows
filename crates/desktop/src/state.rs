@@ -6,7 +6,7 @@ use brows_adapters_runtime::{verify_authenticode_publisher, ManagedChromiumRunti
 use brows_adapters_secret_windows::WindowsCredentialStore;
 use brows_adapters_sqlite::{
     SqliteAuditSink, SqliteMigrationRecordRepository, SqliteProfileRepository,
-    SqliteProxyRepository,
+    SqliteProxyRepository, SqliteSettingsRepository,
 };
 #[cfg(test)]
 use brows_application::memory::InMemoryAuditSink;
@@ -26,7 +26,7 @@ use brows_application::{
 };
 use brows_domain::{
     BrowserBuild, BrowserBuildId, BrowserCapabilities, BrowserChannel, ProfileId, RuntimeTrust,
-    SecretRef, SessionId, DEFAULT_MAX_CONCURRENT_SESSIONS,
+    SecretRef, SessionId,
 };
 use std::{
     path::PathBuf,
@@ -43,6 +43,7 @@ pub(crate) struct AppState {
     pub(crate) browsers: Arc<dyn BrowserRuntime>,
     pub(crate) profiles: Arc<ProfileApplicationService>,
     pub(crate) sessions: Arc<SessionApplicationService>,
+    pub(crate) settings: Arc<brows_application::SettingsApplicationService>,
     pub(crate) migrations: Option<Arc<MigrationApplicationService>>,
     pub(crate) proxy_management: Option<Arc<ProxyApplicationService>>,
     pub(crate) diagnostics: Option<Arc<LocalNetworkDiagnosticRunner>>,
@@ -88,6 +89,9 @@ impl AppState {
         })?;
         let clock = Arc::new(SystemClock);
         let database_path = data_root.join("profiles.sqlite3");
+        let settings_repository = Arc::new(SqliteSettingsRepository::open(&database_path)?);
+        let saved_settings =
+            brows_application::SettingsRepository::load(settings_repository.as_ref())?;
         let profiles = Arc::new(SqliteProfileRepository::open(&database_path)?);
         let migration_records = Arc::new(SqliteMigrationRecordRepository::open(&database_path)?);
         let proxy_records = Arc::new(SqliteProxyRepository::open(&database_path)?);
@@ -173,8 +177,12 @@ impl AppState {
             audit,
             clock.clone(),
             ids.clone(),
-            DEFAULT_MAX_CONCURRENT_SESSIONS,
+            saved_settings.max_concurrent_sessions,
         )?);
+        let settings_service = Arc::new(brows_application::SettingsApplicationService::new(
+            settings_repository,
+            session_service.clone(),
+        ));
         let migration_service = Arc::new(MigrationApplicationService::new(
             profiles.clone(),
             session_service.clone(),
@@ -206,6 +214,7 @@ impl AppState {
             backup_operations,
             browsers: browsers.clone(),
             profiles: profile_service,
+            settings: settings_service,
             sessions: session_service,
             migrations: Some(migration_service),
             proxy_management: Some(proxy_management),
@@ -217,7 +226,7 @@ impl AppState {
 
     #[cfg(test)]
     pub(crate) fn prototype(data_root: PathBuf) -> ApplicationResult<Self> {
-        Self::prototype_with_capacity(data_root, DEFAULT_MAX_CONCURRENT_SESSIONS)
+        Self::prototype_with_capacity(data_root, brows_domain::DEFAULT_MAX_CONCURRENT_SESSIONS)
     }
 
     #[cfg(test)]
@@ -267,11 +276,21 @@ impl AppState {
             max_concurrent_sessions,
         )?);
 
+        let settings_repository = Arc::new(brows_application::memory::InMemorySettingsRepository(
+            std::sync::Mutex::new(brows_domain::ManagerSettings {
+                max_concurrent_sessions,
+            }),
+        ));
+        let settings_service = Arc::new(brows_application::SettingsApplicationService::new(
+            settings_repository,
+            session_service.clone(),
+        ));
         Ok(Self {
             runtime_issue: None,
             backup_operations: None,
             browsers: browsers.clone(),
             profiles: profile_service,
+            settings: settings_service,
             sessions: session_service,
             migrations: None,
             proxy_management: None,
@@ -796,5 +815,42 @@ mod tests {
             drop(reopened);
             std::fs::remove_dir_all(root).unwrap();
         }
+    }
+    #[test]
+    fn settings_are_restored_on_restart_without_a_browser_installation() {
+        let root = std::env::temp_dir().join(format!("brows-settings-{}", uuid::Uuid::new_v4()));
+        let missing = || {
+            Err(brows_application::ApplicationError::new(
+                brows_contracts::ErrorCode::CapabilityUnsupported,
+                "missing",
+            ))
+        };
+        let state = AppState::production_with_runtime(root.clone(), missing()).unwrap();
+        assert_eq!(state.settings.get().unwrap().max_concurrent_sessions, 10);
+        let saved = state
+            .settings
+            .update(brows_contracts::SettingsUpdateRequest {
+                changes: brows_contracts::SettingsPatchDto {
+                    max_concurrent_sessions: Some(2),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        assert_eq!(saved.max_concurrent_sessions, 2);
+        assert!(saved.stop_sessions_on_exit);
+        drop(state);
+        let state = AppState::production_with_runtime(root.clone(), missing()).unwrap();
+        assert_eq!(state.settings.get().unwrap().max_concurrent_sessions, 2);
+        state
+            .settings
+            .update(brows_contracts::SettingsUpdateRequest {
+                changes: brows_contracts::SettingsPatchDto {
+                    max_concurrent_sessions: Some(3),
+                    ..Default::default()
+                },
+            })
+            .unwrap();
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

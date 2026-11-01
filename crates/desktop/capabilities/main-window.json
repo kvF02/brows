@@ -8,6 +8,8 @@
   },
   "windows": ["main"],
   "permissions": [
+    "allow-settings-get",
+    "allow-settings-update",
     "core:default",
     "allow-profile-list",
     "allow-profile-get",

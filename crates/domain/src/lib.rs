@@ -5,6 +5,7 @@ mod error;
 mod ids;
 mod model;
 mod scheduler;
+mod settings;
 
 pub use error::DomainError;
 pub use ids::{BrowserBuildId, PresetId, ProfileId, ProxyId, Revision, SecretRef, SessionId};
@@ -20,6 +21,7 @@ pub use model::{
     MAX_TAG_CHARS,
 };
 pub use scheduler::{EnqueueOutcome, LaunchTicket, QueueSnapshot, SessionScheduler};
+pub use settings::ManagerSettings;
 
 #[cfg(test)]
 mod tests {

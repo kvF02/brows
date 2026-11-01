@@ -1714,8 +1714,9 @@ function SettingsView({
         <article className="settings-card">
           <div className="settings-card-head"><div><h2>会话调度</h2><p>同一环境只允许一个活动会话。</p></div><span className="settings-icon">↯</span></div>
           <label className="field-label" htmlFor="max-concurrent">最大并发环境</label>
-          <div className="number-control"><input id="max-concurrent" className="text-input" type="number" min="1" max="10" value={settings.maxConcurrentSessions} disabled={saving} onChange={(e) => void save({ maxConcurrentSessions: Number(e.target.value) })} /><span>个</span></div>
-          <label className="switch-row"><input type="checkbox" checked={settings.stopSessionsOnExit} disabled={saving} onChange={(e) => void save({ stopSessionsOnExit: e.target.checked })} /><span className="switch-ui" /><span><strong>退出管理器时停止会话</strong><small>避免遗留浏览器和代理进程。</small></span></label>
+          <div className="number-control"><select id="max-concurrent" className="text-input" value={settings.maxConcurrentSessions} disabled={saving} onChange={(e) => void save({ maxConcurrentSessions: Number(e.target.value) })}>{Array.from({ length: 10 }, (_, index) => index + 1).map((limit) => <option key={limit} value={limit}>{limit}</option>)}</select><span>个</span></div>
+          <p className="form-info">保存后立即生效并在重启后保留。降低上限不会停止现有会话；提高上限会按排队顺序启动。</p>
+          <label className="switch-row"><input type="checkbox" checked={settings.stopSessionsOnExit} disabled /><span className="switch-ui" /><span><strong>退出管理器时停止会话</strong><small>固定开启，确保浏览器和代理资源随管理器退出回收。</small></span></label>
         </article>
         <article className="settings-card">
           <div className="settings-card-head"><div><h2>浏览器运行时</h2><p>签名可信 ≠ 指纹支持；指纹加载检测通过 ≠ 完整 anti-detect。</p></div><span className="settings-icon">◉</span></div>

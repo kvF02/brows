@@ -1534,3 +1534,19 @@ pub fn system_native_preset() -> EnvironmentPreset {
 pub fn stable_selector() -> BrowserBuildSelector {
     BrowserBuildSelector::Channel(BrowserChannel::Stable)
 }
+
+#[derive(Debug, Default)]
+pub struct InMemorySettingsRepository(pub Mutex<brows_domain::ManagerSettings>);
+
+impl crate::SettingsRepository for InMemorySettingsRepository {
+    fn load(&self) -> PortResult<brows_domain::ManagerSettings> {
+        Ok(self.0.lock().map_err(|_| unavailable("settings"))?.clone())
+    }
+    fn save(&self, settings: &brows_domain::ManagerSettings) -> PortResult<()> {
+        settings
+            .validate()
+            .map_err(|_| PortError::new(PortErrorKind::InvalidData, "invalid settings"))?;
+        *self.0.lock().map_err(|_| unavailable("settings"))? = settings.clone();
+        Ok(())
+    }
+}

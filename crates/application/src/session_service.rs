@@ -401,6 +401,36 @@ impl SessionApplicationService {
         first_error.map_or(Ok(()), Err)
     }
 
+    /// Commit the preference before admitting more sessions. Persistence failure
+    /// cannot resize the live scheduler or launch any queued browser.
+    pub(crate) fn update_concurrency_limit(
+        &self,
+        limit: usize,
+        persist: impl FnOnce() -> ApplicationResult<()>,
+    ) -> ApplicationResult<()> {
+        let _operation = self.lock_operations()?;
+        {
+            let mut registry = self.lock_registry()?;
+            if registry.shutting_down {
+                return Err(ApplicationError::new(
+                    ErrorCode::InvalidProfileState,
+                    "管理器正在退出",
+                ));
+            }
+            let mut scheduler = registry.scheduler.clone();
+            scheduler.set_limit(limit)?;
+            persist()?;
+            registry.scheduler = scheduler;
+        }
+        loop {
+            let Some(ticket) = self.lock_registry()?.scheduler.promote_next() else {
+                break;
+            };
+            let _ = self.start_one(&ticket.session_id);
+        }
+        Ok(())
+    }
+
     pub fn queue_position(&self, session_id: &SessionId) -> ApplicationResult<Option<usize>> {
         Ok(self.lock_registry()?.scheduler.queue_position(session_id))
     }

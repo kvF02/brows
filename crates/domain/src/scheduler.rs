@@ -51,6 +51,27 @@ impl SessionScheduler {
         self.limit
     }
 
+    /// Change admission capacity without stopping active sessions. Call
+    /// promote_next to fill newly available slots in FIFO order.
+    pub fn set_limit(&mut self, limit: usize) -> Result<(), DomainError> {
+        crate::ManagerSettings {
+            max_concurrent_sessions: limit,
+        }
+        .validate()?;
+        self.limit = limit;
+        Ok(())
+    }
+
+    pub fn promote_next(&mut self) -> Option<LaunchTicket> {
+        if self.active.len() >= self.limit {
+            return None;
+        }
+        let ticket = self.queued.pop_front()?;
+        self.active
+            .insert(ticket.session_id.clone(), ticket.profile_id.clone());
+        Some(ticket)
+    }
+
     pub fn snapshot(&self) -> QueueSnapshot {
         QueueSnapshot {
             limit: self.limit,
@@ -100,11 +121,7 @@ impl SessionScheduler {
         if self.active.remove(session_id).is_none() {
             return Err(DomainError::SessionNotActive);
         }
-        let promoted = self.queued.pop_front();
-        if let Some(ticket) = &promoted {
-            self.active
-                .insert(ticket.session_id.clone(), ticket.profile_id.clone());
-        }
+        let promoted = self.promote_next();
         Ok(promoted)
     }
 

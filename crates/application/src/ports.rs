@@ -396,3 +396,9 @@ pub trait IdGenerator: fmt::Debug + Send + Sync {
     fn next_session_id(&self) -> PortResult<SessionId>;
     fn next_secret_ref(&self) -> PortResult<SecretRef>;
 }
+
+/// Persists only supported manager preferences, never credentials.
+pub trait SettingsRepository: fmt::Debug + Send + Sync {
+    fn load(&self) -> PortResult<brows_domain::ManagerSettings>;
+    fn save(&self, settings: &brows_domain::ManagerSettings) -> PortResult<()>;
+}

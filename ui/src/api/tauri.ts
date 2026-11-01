@@ -1,7 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import {
   ApiError,
-  EMPTY_SETTINGS,
   type ApiClient,
   type BackupJob,
   type BrowserRuntime,
@@ -135,6 +134,8 @@ interface BackupImportResultDto {
 }
 
 const handlers = Object.freeze({
+  settingsGet: "settings_get",
+  settingsUpdate: "settings_update",
   profileList: "profile_list",
   profileGet: "profile_get",
   profileCreate: "profile_create",
@@ -460,10 +461,10 @@ export class TauriApiClient implements ApiClient {
     return this.toProfile(result.profile);
   }
   async getSettings(): Promise<Settings> {
-    return { ...EMPTY_SETTINGS };
+    return this.call<Settings>(handlers.settingsGet);
   }
-  async updateSettings(_changes: Partial<Settings>): Promise<Settings> {
-    return unsupported("设置持久化");
+  async updateSettings(changes: Partial<Settings>): Promise<Settings> {
+    return this.call<Settings>(handlers.settingsUpdate, { request: { changes } });
   }
 
   private async getDto(id: string): Promise<ProfileDto> {
@@ -721,11 +722,5 @@ function normalizeError(error: unknown): ApiError {
   return new ApiError(
     "INTERNAL",
     error instanceof Error ? error.message : "桌面命令执行失败",
-  );
-}
-
-function unsupported<T>(capability: string): Promise<T> {
-  return Promise.reject(
-    new ApiError("CAPABILITY_UNSUPPORTED", `${capability}尚未接入本地适配器`),
   );
 }

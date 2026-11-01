@@ -52,6 +52,19 @@ fn backup_service(state: &AppState) -> IpcResult<&brows_adapters_backup::Encrypt
 }
 
 #[tauri::command]
+pub(crate) fn settings_get(state: State<'_, AppState>) -> IpcResult<brows_contracts::SettingsDto> {
+    ipc(state.settings.get())
+}
+
+#[tauri::command]
+pub(crate) fn settings_update(
+    state: State<'_, AppState>,
+    request: brows_contracts::SettingsUpdateRequest,
+) -> IpcResult<brows_contracts::SettingsDto> {
+    ipc(state.settings.update(request))
+}
+
+#[tauri::command]
 pub(crate) fn backup_list(state: State<'_, AppState>) -> IpcResult<Vec<BackupJobDto>> {
     let entries = backup_service(&state)?
         .list_archives()

@@ -36,6 +36,7 @@ jobs:
       - run: npm ci --prefix ui
       - run: npm run ui:build
       - run: npm run test:fingerprint
+      - run: npm run test:settings
       # Real signed-Chrome probes remain explicit opt-in checks. This suite
       # includes job-object process-tree tests and recovery without Chrome.
       - run: cargo +1.97.1 test --locked --workspace

@@ -177,10 +177,10 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Default permissions for the Brows app — all custom commands.\n#### This default permission set includes:\n\n- `allow-profile-list`\n- `allow-profile-get`\n- `allow-profile-create`\n- `allow-profile-update`\n- `allow-profile-clone`\n- `allow-profile-archive`\n- `allow-profile-restore`\n- `allow-proxy-list`\n- `allow-proxy-save`\n- `allow-proxy-remove`\n- `allow-proxy-test`\n- `allow-diagnostic-run`\n- `allow-diagnostic-list`\n- `allow-legacy-migration-inspect`\n- `allow-legacy-migration-execute`\n- `allow-legacy-migration-rollback`\n- `allow-legacy-migration-list`\n- `allow-morelogin-preview`\n- `allow-morelogin-import`\n- `allow-fingerprint-preview`\n- `allow-list-runtimes`\n- `allow-session-launch`\n- `allow-session-stop`\n- `allow-session-cancel-queued`\n- `allow-session-list`\n- `allow-backup-list`\n- `allow-backup-export`\n- `allow-backup-import`",
+          "description": "Default permissions for the Brows app — all custom commands.\n#### This default permission set includes:\n\n- `allow-settings-get`\n- `allow-settings-update`\n- `allow-profile-list`\n- `allow-profile-get`\n- `allow-profile-create`\n- `allow-profile-update`\n- `allow-profile-clone`\n- `allow-profile-archive`\n- `allow-profile-restore`\n- `allow-proxy-list`\n- `allow-proxy-save`\n- `allow-proxy-remove`\n- `allow-proxy-test`\n- `allow-diagnostic-run`\n- `allow-diagnostic-list`\n- `allow-legacy-migration-inspect`\n- `allow-legacy-migration-execute`\n- `allow-legacy-migration-rollback`\n- `allow-legacy-migration-list`\n- `allow-morelogin-preview`\n- `allow-morelogin-import`\n- `allow-fingerprint-preview`\n- `allow-list-runtimes`\n- `allow-session-launch`\n- `allow-session-stop`\n- `allow-session-cancel-queued`\n- `allow-session-list`\n- `allow-backup-list`\n- `allow-backup-export`\n- `allow-backup-import`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for the Brows app — all custom commands.\n#### This default permission set includes:\n\n- `allow-profile-list`\n- `allow-profile-get`\n- `allow-profile-create`\n- `allow-profile-update`\n- `allow-profile-clone`\n- `allow-profile-archive`\n- `allow-profile-restore`\n- `allow-proxy-list`\n- `allow-proxy-save`\n- `allow-proxy-remove`\n- `allow-proxy-test`\n- `allow-diagnostic-run`\n- `allow-diagnostic-list`\n- `allow-legacy-migration-inspect`\n- `allow-legacy-migration-execute`\n- `allow-legacy-migration-rollback`\n- `allow-legacy-migration-list`\n- `allow-morelogin-preview`\n- `allow-morelogin-import`\n- `allow-fingerprint-preview`\n- `allow-list-runtimes`\n- `allow-session-launch`\n- `allow-session-stop`\n- `allow-session-cancel-queued`\n- `allow-session-list`\n- `allow-backup-list`\n- `allow-backup-export`\n- `allow-backup-import`"
+          "markdownDescription": "Default permissions for the Brows app — all custom commands.\n#### This default permission set includes:\n\n- `allow-settings-get`\n- `allow-settings-update`\n- `allow-profile-list`\n- `allow-profile-get`\n- `allow-profile-create`\n- `allow-profile-update`\n- `allow-profile-clone`\n- `allow-profile-archive`\n- `allow-profile-restore`\n- `allow-proxy-list`\n- `allow-proxy-save`\n- `allow-proxy-remove`\n- `allow-proxy-test`\n- `allow-diagnostic-run`\n- `allow-diagnostic-list`\n- `allow-legacy-migration-inspect`\n- `allow-legacy-migration-execute`\n- `allow-legacy-migration-rollback`\n- `allow-legacy-migration-list`\n- `allow-morelogin-preview`\n- `allow-morelogin-import`\n- `allow-fingerprint-preview`\n- `allow-list-runtimes`\n- `allow-session-launch`\n- `allow-session-stop`\n- `allow-session-cancel-queued`\n- `allow-session-list`\n- `allow-backup-list`\n- `allow-backup-export`\n- `allow-backup-import`"
         },
         {
           "description": "Enables the backup_export command without any pre-configured scope.",
@@ -349,6 +349,18 @@
           "type": "string",
           "const": "allow-session-stop",
           "markdownDescription": "Enables the session_stop command without any pre-configured scope."
+        },
+        {
+          "description": "Read manager settings.",
+          "type": "string",
+          "const": "allow-settings-get",
+          "markdownDescription": "Read manager settings."
+        },
+        {
+          "description": "Update supported manager preferences.",
+          "type": "string",
+          "const": "allow-settings-update",
+          "markdownDescription": "Update supported manager preferences."
         },
         {
           "description": "Default core plugins set.\n#### This default permission set includes:\n\n- `core:path:default`\n- `core:event:default`\n- `core:window:default`\n- `core:webview:default`\n- `core:app:default`\n- `core:image:default`\n- `core:resources:default`\n- `core:menu:default`\n- `core:tray:default`",

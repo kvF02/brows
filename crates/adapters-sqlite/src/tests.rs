@@ -1,4 +1,5 @@
 use super::*;
+use brows_application::SettingsRepository;
 use brows_application::{PortErrorKind, ProfileQuery, ProfileRepository, ProxyRepository};
 use brows_domain::{
     BrowserBuildId, BrowserBuildSelector, BrowserChannel, DeviceMemoryGb, DnsMode,
@@ -16,6 +17,70 @@ use std::{
 };
 
 static NEXT_DATABASE: AtomicU64 = AtomicU64::new(1);
+
+#[test]
+fn manager_settings_persist_and_invalid_writes_do_not_replace_them() {
+    let database = TemporaryDatabase::new("settings-persist");
+    let repository = SqliteSettingsRepository::open(database.path()).unwrap();
+    assert_eq!(repository.load().unwrap().max_concurrent_sessions, 10);
+    repository
+        .save(&brows_domain::ManagerSettings {
+            max_concurrent_sessions: 3,
+        })
+        .unwrap();
+    for limit in [0, 11, usize::MAX] {
+        assert!(repository
+            .save(&brows_domain::ManagerSettings {
+                max_concurrent_sessions: limit
+            })
+            .is_err());
+    }
+    drop(repository);
+    let reopened = SqliteSettingsRepository::open(database.path()).unwrap();
+    assert_eq!(reopened.load().unwrap().max_concurrent_sessions, 3);
+}
+
+#[test]
+fn settings_migration_upgrades_v5_without_modifying_existing_profiles() {
+    let database = TemporaryDatabase::new("settings-upgrade");
+    let profiles = SqliteProfileRepository::open(database.path()).unwrap();
+    let original = profile("retained", "Retained profile");
+    profiles.create(original.clone()).unwrap();
+    drop(profiles);
+    {
+        let connection = Connection::open(database.path()).unwrap();
+        connection
+            .execute_batch("DROP TABLE manager_settings; PRAGMA user_version = 5;")
+            .unwrap();
+    }
+    let settings = SqliteSettingsRepository::open(database.path()).unwrap();
+    assert_eq!(settings.load().unwrap().max_concurrent_sessions, 10);
+    let profiles = SqliteProfileRepository::open(database.path()).unwrap();
+    assert_eq!(profiles.get(&original.id).unwrap(), original);
+    assert_eq!(profiles.schema_version().unwrap(), CURRENT_SCHEMA_VERSION);
+}
+
+#[test]
+fn missing_or_invalid_settings_are_reported_instead_of_resetting_user_preferences() {
+    for missing in [true, false] {
+        let database = TemporaryDatabase::new("settings-corrupt");
+        let settings = SqliteSettingsRepository::open(database.path()).unwrap();
+        let connection = Connection::open(database.path()).unwrap();
+        if missing {
+            connection
+                .execute("DELETE FROM manager_settings", [])
+                .unwrap();
+        } else {
+            connection.execute_batch("PRAGMA ignore_check_constraints = ON; UPDATE manager_settings SET max_concurrent_sessions = 42;").unwrap();
+        }
+        assert!(settings.load().is_err());
+        if missing {
+            assert!(settings
+                .save(&brows_domain::ManagerSettings::default())
+                .is_err());
+        }
+    }
+}
 
 #[derive(Debug)]
 struct TemporaryDatabase {
