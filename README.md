@@ -38,6 +38,8 @@ The repository contains the first implementation milestone:
 - an explicit official Chrome for Testing stable installer with fixed HTTPS
   origins, Windows publisher/version checks, immutable packages, full file hashes,
   restart admission and automatic local fingerprint probing;
+- immutable per-profile fingerprint extensions with atomic directory publication,
+  OS file locks, owned staging recovery and integrity checks before browser launch;
 - a local two-profile observation report with synchronized sampling, normal-exit
   restart checks and explicit uncovered fields, plus a Windows CI JSON artifact;
 - a Chromium runtime adapter that confines paths, verifies the Windows

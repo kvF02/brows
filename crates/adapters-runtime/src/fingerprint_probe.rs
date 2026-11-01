@@ -183,6 +183,16 @@ pub(super) fn run(build: &BrowserBuild, profile_root: &Path) -> PortResult<Obser
             .stdin(Stdio::null())
             .stdout(Stdio::from(output))
             .stderr(Stdio::null());
+        // Reuse verifies the immutable artifact again immediately before spawn;
+        // a changed or incomplete directory is never repaired in place.
+        if brows_application::memory::materialize_fingerprint_probe(
+            &directory.path.join("extensions"),
+            &profile_id,
+            &build.version,
+        )? != extension
+        {
+            return Err(invalid_data("probe extension identity changed"));
+        }
         let mut browser = super::BrowserChild::spawn(&mut command).map_err(|_| {
             PortError::new(
                 PortErrorKind::Unavailable,

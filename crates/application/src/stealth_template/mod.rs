@@ -11,7 +11,8 @@ pub const BACKGROUND_TEMPLATE: &str = include_str!("background.template.js");
 
 /// Renders `manifest.template.json` for the given profile id.
 pub fn render_manifest(profile_id: &str) -> String {
-    MANIFEST_TEMPLATE.replace("{{profile_id}}", profile_id)
+    let escaped = serde_json::to_string(profile_id).expect("strings serialize as JSON");
+    MANIFEST_TEMPLATE.replace("{{profile_id}}", &escaped[1..escaped.len() - 1])
 }
 
 /// Renders `content.template.js` for the given persona, escaping the JSON value

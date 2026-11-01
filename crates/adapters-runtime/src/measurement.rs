@@ -110,6 +110,7 @@ impl LocalFingerprintMeasurement {
                 }
                 let data = self.runtime.prepare_profile(&plan)?;
                 let args = ManagedChromiumRuntime::render_arguments(&plan, &data)?;
+                ManagedChromiumRuntime::verify_plan_extension(&plan)?;
                 let child = BrowserChild::spawn(
                     Command::new(&verified.executable_path)
                         .args(args)

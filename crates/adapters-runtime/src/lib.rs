@@ -277,9 +277,38 @@ impl ManagedChromiumRuntime {
     }
 
     fn prepare_profile(&self, plan: &ResolvedLaunchPlan) -> PortResult<PathBuf> {
+        Self::verify_plan_extension(plan)?;
         let user_data_dir = create_confined_directory(&self.profile_root, &plan.user_data_dir)?;
         write_preferences(&user_data_dir, plan)?;
         Ok(user_data_dir)
+    }
+
+    fn verify_plan_extension(plan: &ResolvedLaunchPlan) -> PortResult<()> {
+        let extensions = plan
+            .arguments
+            .iter()
+            .filter_map(|arg| match arg {
+                LaunchArgument::LoadExtension(path) => Some(path),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if extensions.is_empty() {
+            return Ok(());
+        }
+        let agents = plan
+            .arguments
+            .iter()
+            .filter_map(|arg| match arg {
+                LaunchArgument::UserAgentOverride(ua) => Some(ua),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        if extensions.len() != 1 || agents.len() != 1 {
+            return Err(invalid_data(
+                "fingerprint plan requires exactly one extension and user agent",
+            ));
+        }
+        brows_application::verify_fingerprint_extension(&plan.profile_id, extensions[0], agents[0])
     }
 
     fn render_arguments(
@@ -349,6 +378,9 @@ impl ManagedChromiumRuntime {
                     )));
                 }
                 LaunchArgument::LoadExtension(path) => {
+                    argument
+                        .validate()
+                        .map_err(|error| invalid_data(error.to_string()))?;
                     rendered.push(OsString::from(format!(
                         "--load-extension={}",
                         path.display()
@@ -493,6 +525,7 @@ impl BrowserRuntime for ManagedChromiumRuntime {
             ));
         }
 
+        Self::verify_plan_extension(plan)?;
         let child = BrowserChild::spawn(
             Command::new(&build.executable_path)
                 .args(arguments)
@@ -1280,6 +1313,24 @@ mod tests {
             text.contains(&format!("--load-extension={}", ext_path.display())),
             "missing load-extension arg: {text}"
         );
+    }
+
+    #[test]
+    fn extension_paths_cannot_expand_to_a_comma_separated_list() {
+        let root = temp_root("extension-comma");
+        let path = root.join("first,second");
+        let argument = LaunchArgument::LoadExtension(path);
+        assert!(argument.validate().is_err());
+        let plan = seedable_plan(&root, vec![argument]);
+        assert!(ManagedChromiumRuntime::render_arguments(&plan, &plan.user_data_dir).is_err());
+        assert!(brows_application::memory::materialize_fingerprint_probe(
+            &root.join("extensions,other"),
+            &plan.profile_id,
+            "156.0.8078.80"
+        )
+        .is_err());
+        assert!(!root.join("extensions,other").exists());
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

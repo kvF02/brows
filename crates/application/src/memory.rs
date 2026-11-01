@@ -12,9 +12,10 @@ use brows_domain::{
     ProxyLaunchBinding, ProxySpec, ResolvedLaunchPlan, Revision, SecretRef, SeedableNoisePersona,
     SessionId, WindowConfig,
 };
+#[cfg(test)]
+use std::fs;
 use std::{
     collections::BTreeMap,
-    fs,
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering},
@@ -574,7 +575,6 @@ impl SeedableNoiseFingerprintRuntime {
         fp: &PersonaFingerprint,
         locale: &LocaleConfig,
     ) -> PortResult<PathBuf> {
-        let profile_hash = digest_hex(profile_id.as_str().as_bytes());
         let persona_json = serde_json::json!({
             "seed": persona.seed,
             "platform": persona.platform_string_for_js(),
@@ -600,77 +600,14 @@ impl SeedableNoiseFingerprintRuntime {
         let content = stealth_template::render_content(&persona_json);
         let manifest = stealth_template::render_manifest(profile_id.as_str());
         let background = stealth_template::render_background();
-        let artifact_hash = digest_hex(
-            format!("{manifest}\0{content}\0{background}\0{}", fp.user_agent,).as_bytes(),
-        );
-        let dir = self.extension_root.join(profile_hash).join(artifact_hash);
-        fs::create_dir_all(&dir).map_err(|error| {
-            PortError::new(
-                PortErrorKind::Internal,
-                format!("failed to create extension directory: {error}"),
-            )
-        })?;
-        // Never overwrite a loaded artifact. Existence alone cannot certify
-        // integrity: a damaged file must fail closed, not silently be reused.
-        for (name, expected) in [
-            ("manifest.json", manifest),
-            ("content.js", content),
-            ("background.js", background),
-        ] {
-            let path = dir.join(name);
-            match fs::OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&path)
-            {
-                Ok(mut file) => {
-                    use std::io::Write;
-                    file.write_all(expected.as_bytes()).map_err(|error| {
-                        PortError::new(
-                            PortErrorKind::Internal,
-                            format!("failed to materialize {name}: {error}"),
-                        )
-                    })?;
-                }
-                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                    let metadata = fs::symlink_metadata(&path).map_err(|error| {
-                        PortError::new(
-                            PortErrorKind::InvalidData,
-                            format!("cannot inspect fingerprint artifact: {error}"),
-                        )
-                    })?;
-                    #[cfg(windows)]
-                    let linked = {
-                        use std::os::windows::fs::MetadataExt;
-                        metadata.file_attributes() & 0x400 != 0
-                    };
-                    #[cfg(not(windows))]
-                    let linked = metadata.file_type().is_symlink();
-                    if linked
-                        || !metadata.is_file()
-                        || metadata.len() != expected.len() as u64
-                        || fs::read(&path).map_err(|error| {
-                            PortError::new(
-                                PortErrorKind::InvalidData,
-                                format!("cannot verify fingerprint artifact: {error}"),
-                            )
-                        })? != expected.as_bytes()
-                    {
-                        return Err(PortError::new(
-                            PortErrorKind::InvalidData,
-                            "指纹扩展产物完整性检查失败，请检查本地扩展目录；不会覆盖现有文件",
-                        ));
-                    }
-                }
-                Err(error) => {
-                    return Err(PortError::new(
-                        PortErrorKind::Internal,
-                        format!("failed to create fingerprint artifact: {error}"),
-                    ))
-                }
-            }
-        }
-        Ok(dir)
+        crate::fingerprint_artifact::publish_extension(
+            &self.extension_root,
+            profile_id,
+            &manifest,
+            &content,
+            &background,
+            &fp.user_agent,
+        )
     }
 }
 

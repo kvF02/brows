@@ -569,6 +569,109 @@ fn samples_use_production_compiler_preferences_and_disjoint_owned_directories() 
 }
 
 #[test]
+fn launch_rejects_changed_extensions_and_identity_mismatches_before_profile_writes_or_spawn() {
+    for change in [
+        "content",
+        "background",
+        "missing",
+        "extra",
+        "profile",
+        "ua",
+        "duplicate_extension",
+        "duplicate_ua",
+        "missing_ua",
+    ] {
+        let (runtime, build, root) = runtime_fixture();
+        runtime
+            .set_fingerprint_support(&build.id, FingerprintSupport::Supported)
+            .unwrap();
+        let catalog = Arc::new(brows_application::memory::InMemoryPresetCatalog::default());
+        catalog
+            .insert(brows_application::memory::system_native_preset())
+            .unwrap();
+        let compiler = LaunchPlanCompiler::new(
+            catalog,
+            runtime.clone(),
+            Arc::new(NoProxy),
+            Arc::new(
+                brows_application::memory::FingerprintRuntimeRouter::new(root.join("extensions"))
+                    .unwrap(),
+            ),
+            runtime.profile_root.clone(),
+        )
+        .unwrap();
+        let profile = sample(&build, TOKEN, "a").unwrap();
+        let mut plan = compiler
+            .compile(&profile, &SessionId::new("artifact-admission").unwrap())
+            .unwrap()
+            .plan;
+        ManagedChromiumRuntime::verify_plan_extension(&plan).unwrap();
+        let extension = plan
+            .arguments
+            .iter()
+            .find_map(|arg| match arg {
+                LaunchArgument::LoadExtension(path) => Some(path.clone()),
+                _ => None,
+            })
+            .unwrap();
+        let before = if change == "content" {
+            let data = runtime.prepare_profile(&plan).unwrap();
+            Some(fs::read(data.join("Default/Preferences")).unwrap())
+        } else {
+            None
+        };
+        plan.preferences.accept_languages = vec!["en-US".into()];
+        match change {
+            "content" => {
+                fs::write(extension.join("content.js"), b"changed after compilation").unwrap();
+            }
+            "background" => {
+                fs::write(extension.join("background.js"), b"unexpected worker").unwrap();
+            }
+            "missing" => {
+                fs::remove_file(extension.join("manifest.json")).unwrap();
+            }
+            "extra" => {
+                fs::write(extension.join("extra.js"), b"unexpected file").unwrap();
+            }
+            "profile" => plan.profile_id = ProfileId::new("wrong-profile").unwrap(),
+            "ua" => {
+                for arg in &mut plan.arguments {
+                    if let LaunchArgument::UserAgentOverride(ua) = arg {
+                        *ua = "different-UA".into();
+                    }
+                }
+            }
+            "duplicate_extension" => plan
+                .arguments
+                .push(LaunchArgument::LoadExtension(extension)),
+            "duplicate_ua" => plan
+                .arguments
+                .push(LaunchArgument::UserAgentOverride("second-UA".into())),
+            "missing_ua" => plan
+                .arguments
+                .retain(|arg| !matches!(arg, LaunchArgument::UserAgentOverride(_))),
+            _ => unreachable!(),
+        }
+        assert_eq!(
+            runtime.launch(&plan).unwrap_err().kind,
+            PortErrorKind::InvalidData,
+            "{change}"
+        );
+        if let Some(before) = before {
+            assert_eq!(
+                fs::read(plan.user_data_dir.join("Default/Preferences")).unwrap(),
+                before
+            );
+        } else {
+            assert!(!plan.user_data_dir.exists());
+        }
+        assert!(runtime.processes.lock().unwrap().is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn first_document_waits_for_the_second_browser_before_sampling() {
     let c = Collector::start(TOKEN).unwrap();
     std::thread::scope(|scope| {

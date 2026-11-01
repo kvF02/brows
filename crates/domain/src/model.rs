@@ -715,7 +715,18 @@ impl LaunchArgument {
                 ))
             }
             Self::ForceDeviceScaleFactor(_) => Ok(()),
-            Self::LoadExtension(path) => validate_path(path),
+            Self::LoadExtension(path) => {
+                validate_path(path)?;
+                // Chromium interprets commas as separators even inside one
+                // --load-extension argument. This variant represents one path.
+                if path.to_string_lossy().contains(',') {
+                    Err(DomainError::InvalidLaunchArgument(
+                        "extension path cannot contain commas".to_owned(),
+                    ))
+                } else {
+                    Ok(())
+                }
+            }
             Self::DisableBlinkFeatures(features) | Self::EnableBlinkFeatures(features) => {
                 if features
                     .iter()
