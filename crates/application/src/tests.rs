@@ -1324,3 +1324,72 @@ fn cancelled_restore_is_journaled_without_creating_a_profile_and_cleanup_can_ret
         assert_eq!(tasks.list(10).unwrap().len(), 1);
     }
 }
+
+#[test]
+fn cloning_fingerprint_profiles_creates_independent_stable_seeds_without_changing_the_source() {
+    use brows_domain::{
+        DeviceMemoryGb, FingerprintPersona, PlatformKind, ScreenConfig, SeedableNoisePersona,
+        WebGLProfile,
+    };
+    let h = Harness::new(2);
+    let source = h.create_profile("Identity source");
+    let source_id: ProfileId = source.id.clone().try_into().unwrap();
+    let mut spec = h.profiles.get(&source_id).unwrap();
+    spec.persona = FingerprintPersona::SeedableNoise(SeedableNoisePersona {
+        seed: "original-stable-identity".into(),
+        platform: PlatformKind::Windows,
+        hardware_concurrency: 4,
+        device_memory: DeviceMemoryGb::Four,
+        touch_points: 0,
+        screen: ScreenConfig {
+            width: 1920,
+            height: 1080,
+            color_depth: 24,
+            device_scale_factor_hundredths: 100,
+        },
+        webgl: WebGLProfile::auto(),
+        spoof_canvas: true,
+        spoof_audio: true,
+    });
+    spec.bump_revision();
+    h.profiles
+        .update(spec.clone(), brows_domain::Revision::FIRST)
+        .unwrap();
+    let clone = h
+        .profile_service
+        .clone_profile(ProfileIdRequest {
+            profile_id: source.id.clone(),
+        })
+        .unwrap();
+    let sibling = h
+        .profile_service
+        .clone_profile(ProfileIdRequest {
+            profile_id: clone.id.clone(),
+        })
+        .unwrap();
+    let restored_clone = h
+        .profiles
+        .get(&clone.id.clone().try_into().unwrap())
+        .unwrap();
+    let sibling_spec = h.profiles.get(&sibling.id.try_into().unwrap()).unwrap();
+    let FingerprintPersona::SeedableNoise(mut clone_persona) = restored_clone.persona.clone()
+    else {
+        panic!("persona changed")
+    };
+    let FingerprintPersona::SeedableNoise(source_persona) = &spec.persona else {
+        unreachable!()
+    };
+    let FingerprintPersona::SeedableNoise(sibling_persona) = sibling_spec.persona else {
+        unreachable!()
+    };
+    assert_ne!(clone_persona.seed, source_persona.seed);
+    assert_ne!(clone_persona.seed, sibling_persona.seed);
+    assert_eq!(h.profiles.get(&source_id).unwrap(), spec);
+    let stable_seed = clone_persona.seed.clone();
+    clone_persona.seed = source_persona.seed.clone();
+    assert_eq!(&clone_persona, source_persona, "only the seed changes");
+    assert!(
+        matches!(h.profile_service.get(ProfileIdRequest { profile_id: clone.id }).unwrap().persona,
+        PersonaDto::SeedableNoise { seed, .. } if seed == stable_seed)
+    );
+}

@@ -669,7 +669,7 @@ function ProfilesView({
                 onLaunch={() => void run(() => api.launchSession(profile.id), "环境已启动。")}
                 onStop={() => void run(() => api.stopSession(profile.id), "环境已停止。")}
                 onEdit={() => onEdit(profile)}
-                onClone={() => void run(() => api.cloneProfile(profile.id), "环境副本已创建。")}
+                onClone={() => void run(() => api.cloneProfile(profile.id), "环境副本已创建；指纹模式已生成新种子。")}
                 onArchive={() => void run(() => api.archiveProfile(profile.id, profile.revision), "环境已归档。")}
                 onRestore={() => void run(() => api.restoreProfile(profile.id, profile.revision), "环境已恢复。")}
               />
@@ -746,7 +746,7 @@ function ProfileCard({
           {canLaunch && <button className="card-action primary" type="button" disabled={fingerprintBlocked} title={fingerprintBlocked ? "SeedableNoise 需要运行时指纹加载检测通过。请到设置执行检测，或编辑为系统原生。" : undefined} onClick={onLaunch}>启动</button>}
           {canStop && <button className="card-action stop" type="button" onClick={onStop}>停止</button>}
           {canEdit && <button className="card-action" type="button" onClick={onEdit}>编辑</button>}
-          <button className="card-action" type="button" onClick={onClone}>克隆</button>
+          <button className="card-action" type="button" title="复制配置并生成新的指纹种子，不复制登录数据" onClick={onClone}>克隆</button>
           {canArchive && <button className="card-action" type="button" onClick={onArchive}>归档</button>}
         </div>
       </div>

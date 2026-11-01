@@ -78,11 +78,15 @@ test("Tauri preview sends the selected runtime and actual locale/window", async 
   assert.equal(request.persona.seedable_noise.screen.deviceScaleFactorHundredths, 125);
 });
 
-test("Mock persists and clones configuration while labeling preview as simulation", async () => {
+test("Mock clones use independent seeds and preserve configuration while labeling preview as simulation", async () => {
   const api = new MockApiClient();
   const created = await api.createProfile({ ...input, runtimeId: "chrome-testing-stable" });
   const cloned = await api.cloneProfile(created.id);
-  assert.deepEqual(plain(cloned.persona), seedable);
+  assert.notEqual(cloned.persona.seedable.seed, seedable.seedable.seed);
+  assert.deepEqual({ ...plain(cloned.persona.seedable), seed: seedable.seedable.seed }, seedable.seedable);
+  cloned.persona.seedable.hardwareConcurrency = 12;
+  assert.equal((await api.getProfile(created.id)).persona.seedable.hardwareConcurrency, 4);
+  assert.equal((await api.getProfile(created.id)).persona.seedable.seed, seedable.seedable.seed);
   assert.deepEqual(plain(cloned.acceptLanguages), ["fr-FR", "fr"]);
   assert.equal(cloned.windowWidth, 1024);
   const preview = await api.fingerprintPreview({ persona: seedable, runtimeId: created.runtimeId, acceptLanguages: input.acceptLanguages, windowWidth: 1024, windowHeight: 768 });

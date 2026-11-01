@@ -14,6 +14,10 @@ Brows 的当前基础能力是多环境数据隔离；`SeedableNoise` 是可选�
 相同 persona 与运行时版本产生相同配置，但不同 seed 可能选中同一个有限 GPU 候选，
 因此 seed 不等于唯一设备身份。
 
+克隆环境默认生成由新环境身份分配的独立 seed，保留其余显式配置，原环境不修改。
+副本保存后重复启动使用同一 seed；备份恢复保留备份内 seed，以延续原配置。
+新 seed 不保证有限 GPU 候选或所有硬件声明均不同，仍需逐字段验证实际运行结果。
+
 语言贯通 Chromium 参数、Preferences 和页面 `navigator.language/languages`。
 窗口大小使用环境的 `window`，不能用声明屏幕大小代替；窗口外框、视口和物理屏幕
 是不同概念。缩放使用 Chromium 的比例参数，`devicePixelRatio` 保留浏览器原生行为，

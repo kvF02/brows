@@ -6,7 +6,9 @@ use brows_contracts::{
     ErrorCode, ProfileCreateRequest, ProfileDto, ProfileIdRequest, ProfileListRequest,
     ProfileRevisionRequest, ProfileUpdateRequest,
 };
-use brows_domain::{ProfileId, ProfileSpec, Revision, RuntimeTrust, MAX_PROFILE_NAME_CHARS};
+use brows_domain::{
+    FingerprintPersona, ProfileId, ProfileSpec, Revision, RuntimeTrust, MAX_PROFILE_NAME_CHARS,
+};
 use std::sync::Arc;
 
 #[derive(Debug)]
@@ -148,6 +150,16 @@ impl ProfileApplicationService {
         let source = self.profiles.get(&source_id)?;
         let mut cloned = source;
         cloned.id = self.ids.next_profile_id()?;
+        // Cloning creates a new identity. Backup restore deliberately keeps
+        // the original seed; metadata cloning must not do so by default.
+        if let FingerprintPersona::SeedableNoise(persona) = &mut cloned.persona {
+            let seed = format!("clone:{}:{}", cloned.id.as_str().len(), cloned.id);
+            persona.seed = if persona.seed == seed {
+                format!("{seed}:new")
+            } else {
+                seed
+            };
+        }
         cloned.name = copy_name(&cloned.name);
         cloned.revision = Revision::FIRST;
         cloned.archived = false;

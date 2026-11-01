@@ -207,7 +207,9 @@ export class MockApiClient implements ApiClient {
       presetId: source.presetId,
       proxyId: source.proxyId,
       runtimeId: source.runtimeId,
-      persona: source.persona,
+      persona: source.persona?.kind === "seedable_noise" && source.persona.seedable
+        ? { ...source.persona, seedable: { ...source.persona.seedable, seed: newId("seed") } }
+        : source.persona ? { ...source.persona } : undefined,
       acceptLanguages: source.acceptLanguages ? [...source.acceptLanguages] : undefined,
       windowWidth: source.windowWidth,
       windowHeight: source.windowHeight,
