@@ -83,6 +83,25 @@ jobs:
           "The archive contains the executable, Chinese test notes, source revision and SHA-256 checksums. Alpha uses its own data namespace." >> $env:GITHUB_STEP_SUMMARY
           "This package does not certify real fingerprint support. Check the separate fingerprint job and the runtime probe on the test PC." >> $env:GITHUB_STEP_SUMMARY
 
+  candidate-runtime:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Verify signed Edge candidate and observe real extension loading
+        shell: pwsh
+        run: ./tools/probe-runtime-candidates.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-runtime-candidate-report
+          path: target/runtime-candidate.json
+          if-no-files-found: warn
+          retention-days: 14
+
   native-browser:
     runs-on: windows-latest
     timeout-minutes: 20
