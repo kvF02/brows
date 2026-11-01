@@ -54,20 +54,6 @@ jobs:
       - name: Source tree status after build
         if: always()
         run: git status --short
-      - name: Real signed Chrome isolation, queue and restart acceptance
-        shell: pwsh
-        run: |
-          $env:TAURI_CONFIG = Get-Content ./crates/desktop/tauri.alpha.conf.json -Raw
-          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target/alpha-build'
-          cargo +1.97.1 test --locked -p brows-desktop --target x86_64-pc-windows-msvc system_native_windows_acceptance -- --ignored --nocapture
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - uses: actions/upload-artifact@v4
-        if: always()
-        with:
-          name: windows-native-browser-acceptance
-          path: target/native-browser-acceptance.json
-          if-no-files-found: warn
-          retention-days: 14
       - uses: actions/cache/save@v4
         if: always() && steps.rust-cache.outputs.cache-hit != 'true'
         continue-on-error: true
@@ -94,6 +80,53 @@ jobs:
           "[Download test build]($env:ALPHA_ARTIFACT_URL)" >> $env:GITHUB_STEP_SUMMARY
           "The archive contains the executable, Chinese test notes, source revision and SHA-256 checksums. Alpha uses its own data namespace." >> $env:GITHUB_STEP_SUMMARY
           "This package does not certify real fingerprint support. Check the separate fingerprint job and the runtime probe on the test PC." >> $env:GITHUB_STEP_SUMMARY
+
+  native-browser:
+    runs-on: windows-latest
+    timeout-minutes: 20
+    env:
+      CARGO_BUILD_JOBS: 4
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+          targets: x86_64-pc-windows-msvc
+      - uses: actions/cache/restore@v4
+        continue-on-error: true
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target/alpha-build
+          key: windows-alpha-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          restore-keys: windows-alpha-${{ hashFiles('Cargo.lock') }}-
+      - name: Build embedded frontend assets for native test harness
+        shell: pwsh
+        run: |
+          npm.cmd ci --prefix ui
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          npm.cmd run ui:build
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Real signed Chrome isolation, queue and restart acceptance
+        shell: pwsh
+        run: |
+          $env:TAURI_CONFIG = Get-Content ./crates/desktop/tauri.alpha.conf.json -Raw
+          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target/alpha-build'
+          cargo +1.97.1 test --locked -p brows-desktop --target x86_64-pc-windows-msvc system_native_windows_acceptance -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-native-browser-acceptance
+          path: target/native-browser-acceptance.json
+          if-no-files-found: warn
+          retention-days: 14
 
   startup:
     needs: package

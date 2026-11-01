@@ -3,12 +3,14 @@
 import { randomBytes } from 'node:crypto';
 import { appendFileSync, realpathSync, writeFileSync, renameSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { basename, dirname, join, resolve } from 'node:path';
+import { basename, dirname, join, resolve, toNamespacedPath } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const target = realpathSync(resolve(dirname(fileURLToPath(import.meta.url)), '../target'));
 const directory = realpathSync(process.argv[2]);
-if (dirname(directory) !== target || !/^native-browser-[0-9a-f-]{36}$/.test(basename(directory))) {
+// Rust canonicalize uses the Windows extended-length prefix; Node's script
+// directory normally has the drive spelling. Compare the same namespace.
+if (toNamespacedPath(dirname(directory)) !== toNamespacedPath(target) || !/^native-browser-[0-9a-f-]{36}$/.test(basename(directory))) {
   throw new Error('Expected a fresh native-browser test directory immediately under target.');
 }
 const token = randomBytes(16).toString('hex');
