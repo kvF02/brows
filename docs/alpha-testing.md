@@ -7,7 +7,7 @@
 1. 从仓库 Actions → **Windows Alpha test build** 的成功 `package` job 下载 `brows-0.1.0-alpha.*-windows-x64-*` artifact，解压后运行 `Brows-Alpha.exe`。
 2. 需要 Windows 11 x64、Microsoft Edge WebView2 Runtime 和微软 Visual C++ 2015–2022 x64 运行库。若提示缺少 `VCRUNTIME140*.dll`，使用[微软官方运行库安装程序](https://aka.ms/vs/17/release/vc_redist.x64.exe)。测试者不需要 Node、Rust 或开发工具。程序内已包含管理界面，不需要启动开发服务器。
 3. 窗口标题为 **Brows Alpha**，数据使用独立的 `%LOCALAPPDATA%\local-brows-desktop-alpha`。它不是把所有数据写在 exe 旁边的便携模式；解压位置变化不会重置测试数据。不要把已有正式目录复制进来，先用全新测试环境。
-4. 没有可用浏览器时，在设置页选择“安装并检测官方运行时”；这一步会访问官方 CFT 目录和 Google 下载站。失败时保存错误文本，环境管理界面仍应可以使用。
+4. 本轮优先使用已安装且签名验证通过的 Google Chrome 测试系统原生多开；未安装时先安装官方 Chrome，再启动 Alpha。2026-11-01 实测 CFT `156.0.8078.80` 主程序没有签名，被安装入口拒绝；这不是已通过的指纹内核。此版本不要依赖 CFT 安装入口完成首次浏览器配置。
 5. 包含 `build-info.json`、`SHA256SUMS.txt` 和这份说明。用以下命令查看 exe 摘要，并与两个文件中的值比较：
 
 ```powershell
@@ -55,6 +55,8 @@ powershell -NoProfile -File .\tools\build-alpha.ps1
 
 GitHub Actions 可手动运行 **Windows Alpha test build**，默认勾选官方运行时验收，也可取消勾选只构建测试包。推送 `alpha/**` 分支会构建测试包，并在独立 job 下载官方 CFT、验证签名和执行 headless 双样本验收。新 workflow 尚未在默认分支注册时，推送包含该文件的 `alpha/**` 分支可启动首次构建。
 
-`package` job 与真实指纹 `fingerprint` job 独立。下载包成功只证明构建及其自动回归通过；需要查看另一 job 的结果和已生成的 JSON，不能把打包成功当成指纹已通过。真实采集失败时可能没有 JSON，错误原因在 job 日志中。artifact 保留 14 天，下载需要仓库访问权限。
+`package` job 与真实指纹 `fingerprint` job 独立。下载包成功只证明构建及其自动回归通过；需要查看另一 job 的结果和已生成的 JSON，不能把打包成功当成指纹已通过。`runtime-acceptance.json` 记录安装/基础探针结果；签名等准入失败时仍有负向报告，`fingerprint-measurement.json` 只在真正完成采集后生成，不能把准入报告当成页面实测。artifact 保留 14 天，下载需要仓库访问权限。
 
 运行状态以对应 commit 的 Actions 记录和 `build-info.json` 为准。首次 Windows 构建耗时取决于依赖下载、编译与 Actions 排队；说明文件本身不证明构建或真机验收已经执行。
+
+已知限制：当前官方 CFT `156.0.8078.80` 缺少 Authenticode 签名，Windows 验收拒绝它，未执行双样本采集。系统 Chrome 的历史扩展探针也曾返回 Unsupported，因此本轮 Alpha 可测试原生多开，但不能宣称指纹独立已经可用。

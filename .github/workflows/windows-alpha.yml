@@ -72,6 +72,8 @@ jobs:
         if: always()
         with:
           name: windows-alpha-fingerprint-report
-          path: target/fingerprint-measurement.json
+          path: |
+            target/runtime-acceptance.json
+            target/fingerprint-measurement.json
           if-no-files-found: warn
           retention-days: 14

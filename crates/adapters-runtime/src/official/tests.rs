@@ -439,15 +439,30 @@ fn installation_preserves_system_channel_and_refuses_catalog_downgrades() {
 fn official_windows_install_and_probe_smoke() {
     let artifact =
         Path::new(env!("CARGO_MANIFEST_DIR")).join("../../target/fingerprint-measurement.json");
-    match fs::remove_file(&artifact) {
-        Ok(()) => {}
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-        Err(error) => panic!("cannot remove earlier measurement report: {error}"),
+    let admission = artifact.with_file_name("runtime-acceptance.json");
+    for path in [&artifact, &admission] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => panic!("cannot remove earlier measurement report: {error}"),
+        }
     }
     let (installer, root) = fixture("official-smoke");
-    let result = installer
-        .install_stable()
-        .expect("official download, signature, version, registration and probe must succeed");
+    let result = installer.install_stable();
+    // Retain a negative admission result too. No API observations are invented
+    // when the browser was rejected before it could be launched.
+    let outcome = match &result {
+        Ok(result) => {
+            serde_json::json!({"runtimeAccepted":true,"runtimeVersion":result.build.version,"runtimeSha256":result.build.sha256,"fingerprintSupport":format!("{:?}",result.build.capabilities.fingerprint_support)})
+        }
+        Err(error) => {
+            serde_json::json!({"runtimeAccepted":false,"errorKind":format!("{:?}",error.kind),"error":error.message})
+        }
+    };
+    fs::create_dir_all(admission.parent().unwrap()).unwrap();
+    fs::write(&admission,serde_json::to_vec_pretty(&serde_json::json!({"schemaVersion":1,"stage":"installation_and_basic_probe","measuredAtMs":now_ms(),"commit":std::env::var("GITHUB_SHA").ok(),"measurementPerformed":false,"outcome":outcome})).unwrap()).unwrap();
+    let result =
+        result.expect("official download, signature, version, registration and probe must succeed");
     assert_eq!(
         result.build.capabilities.fingerprint_support,
         FingerprintSupport::Supported,

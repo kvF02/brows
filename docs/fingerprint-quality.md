@@ -7,15 +7,17 @@
 | 环境数据隔离 | 独立 userdata、会话与进程树、重复启动保护、共享操作锁；已有双环境 Windows 冒烟记录。最新生命周期改造还需十环境压力和强杀验收。 |
 | 克隆指纹身份 | 已修复沿用原 seed 的问题。新副本分配新 seed，保留其他配置，不修改原环境；重复读取保持稳定。备份恢复继续保留备份内 seed。 |
 | 扩展产物隔离 | 已实现同环境 OS 文件锁、完整目录原子发布、下次编译清理自有残留暂存，以及启动前身份/文件集合/摘要复查。Linux 已通过独立写入进程强杀与恢复回归；Windows 对应行为仍待实际执行。 |
-| 指纹扩展真实加载 | 现有探针与双层启动门禁已实现。2026-10-06 的签名 Chrome 154 实测返回 Unsupported，已接入官方 Chrome for Testing 安装与自动探针入口；尚未在本次 Linux 环境新增 Windows 实机通过记录。 |
+| 指纹扩展真实加载 | Chrome 154 的历史实测为 Unsupported。2026-11-01 Windows CI 下载官方 CFT 156.0.8078.80 后因 Authenticode 0x800b0100 被拒绝；归档主程序与 DLL 的 PE 证书表为空。尚无可用的正向指纹运行时记录，继续阻止 SeedableNoise。 |
 | 页面 API 行为 | 已实现双临时样本真实观测入口，对比配置、主页面 / iframe、HTTP 头、Canvas / 离线 Audio 重复与重启稳定性、Cookie / LocalStorage；Windows 真实运行结果尚待执行。 |
 | 全链路一致性 | UA-CH、worker、真实时区、字体和 TLS/HTTP2 尚未统一。不同 seed 也可能选择相同 GPU 候选。 |
 | 网络隔离 | 每会话代理 Broker 和凭据保护已实现；HTTP/SOCKS5 可用。HTTPS 上游代理、DNS/WebRTC 的完整泄漏实测尚待实现。未绑定代理时可共享出口 IP。 |
 
 因此，独立 Cookie 和登录状态、不同 seed、不同配置值、不同物理设备指纹，是需要分别验收的能力。当前已完成前两类的基础与回归；页面实测和完整设备一致性仍有缺口。不承诺检测站通过率。
 
-已实现固定官方来源的 Chrome for Testing 安装、签名/实际版本校验、多版本保存和包文件完整性检查，详见 [运行时安装与验收](runtime-installation.md)。双临时样本观测页与报告已接入设置和 Windows 显式验收入口，详见 [双临时环境指纹实测](fingerprint-measurement.md)。下一步在 Windows 运行实机入口并保存报告，再补可见窗口、十环境压力、强杀和网络出口验收。受支持的观测通过前，继续拒绝 SeedableNoise 启动，不降低沙箱或运行时信任要求。
+已实现固定官方来源的 Chrome for Testing 安装、签名/实际版本校验、多版本保存和包文件完整性检查，详见 [运行时安装与验收](runtime-installation.md)。双临时样本观测页与报告已接入设置和 Windows 显式验收入口，详见 [双临时环境指纹实测](fingerprint-measurement.md)。Windows 实机入口已运行并发现官方 CFT 的签名准入阻塞；下一步先明确满足现有信任规则的运行时方案，再补可见窗口、十环境压力、强杀和网络出口验收。受支持的观测通过前，继续拒绝 SeedableNoise 启动，不降低沙箱或运行时信任要求。
 
-当前环境为 Linux 云工作区。本次验证以 Rust/JavaScript 自动测试和 Windows 目标交叉检查为主，没有新增 Windows 真实浏览器通过记录。覆盖细节见 [指纹设计](fingerprint-design.md)，可靠性进度见 [可靠性里程碑](reliability-milestone.md)。
+管理工作区仍为 Linux；已通过独立测试分支启动 Windows CI。CFT 真实验收在启动浏览器前被签名规则拒绝，不能视为页面指纹实测通过。覆盖细节见 [指纹设计](fingerprint-design.md)，可靠性进度见 [可靠性里程碑](reliability-milestone.md)。
 
 本轮扩展可靠性回归通过 192 项可移植 Rust 与 22 项桌面测试，完整 workspace 严格 Clippy 和运行时 Windows MSVC 目标交叉检查通过。新增测试验证发布/恢复/启动拒绝行为，不改变真实浏览器验收尚未完成的结论。发布与限制见 [指纹设计](fingerprint-design.md#扩展发布恢复与启动检查)。
+
+首次 Windows 打包回归还发现代理停止时五项套接字用例超时，已加入可取消读写检查点；握手使用绝对期限，已建立隧道不设置空闲截止时间，保留正常半关闭。此修复正在 Windows CI 复验；不会跳过失败测试或降低签名规则出包。

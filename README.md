@@ -15,7 +15,9 @@ signals. Extension loading must be verified for each runtime, especially
 official Google Chrome 137+ with `--load-extension` restrictions. Settings offers
 an isolated local capability probe, and SeedableNoise launch is blocked unless
 it passes. The current system Chrome 154 did not load the extension in the
-real-browser smoke test. This is not a complete anti-detect implementation;
+real-browser smoke test. A Windows CI run also rejected official CFT
+156.0.8078.80 because its executable has no verifiable Authenticode signature;
+no positive fingerprint-runtime acceptance is currently recorded. This is not a complete anti-detect implementation;
 no detection-site pass rate is promised. The default `SystemNative` persona
 remains truthful. See the
 current [fingerprint design and acceptance plan](docs/fingerprint-design.md).

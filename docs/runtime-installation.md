@@ -1,6 +1,6 @@
 # 官方运行时安装与验收
 
-设置页提供“安装并检测官方运行时”，下载 Chrome for Testing 当前 Windows 64 位稳定版。安装功能仅在 Windows 桌面版启用，浏览器预览不会执行真实安装。
+设置页提供“安装并检测官方运行时”，下载 Chrome for Testing 当前 Windows 64 位稳定版。**2026-11-01 Windows CI 实测：官方 CFT 156.0.8078.80 未带可验证的 Authenticode 签名，被当前信任规则拒绝；该运行时尚不能作为可用指纹内核。**安装功能仅在 Windows 桌面版启用，浏览器预览不会执行真实安装。
 
 ## 使用与版本选择
 
@@ -41,6 +41,8 @@ cargo +1.97.1 test --locked -p brows-adapters-runtime official_windows_install_a
 
 本轮通过 177 项可移植 Rust、22 项桌面和 35 项 JavaScript 自动测试，前端构建、完整 workspace 严格 Clippy 与运行时的 Windows MSVC 目标交叉 Clippy 通过。真实浏览器验收及 Windows 专用测试需在相应平台显式执行，不计为本次实机通过记录。
 
-GitHub Actions 的 Development checks 增加手动运行入口：选择 `official_runtime=true` 后，独立 Windows job 执行上述验收并上传已生成的 JSON 报告。该 job 尚未在本次会话触发，不能将新增 CI 配置视为测试已经通过。
+GitHub Actions 的 Development checks 增加手动运行入口：选择 `official_runtime=true` 后，独立 Windows job 执行上述验收并上传已生成的 JSON 报告。独立 Alpha 分支的 Windows job 已执行，先修复了归档内 `First Run` 文件名的兼容错误，随后在签名阶段返回 0x800b0100。对同版官方归档的 PE 检查确认 `chrome.exe` 和 `chrome.dll` 的证书表均为空，且没有附带签名目录文件；不会绕过该结果登记运行时。
 
 双样本观测的具体判定与边界见 [实测说明](fingerprint-measurement.md)。真实加载和 headless 观测通过后，仍需执行可见窗口、十环境压力与网络泄漏验收；Worker、UA-CH 和时区等未覆盖项继续明确列示。
+
+显式验收先写 `target/runtime-acceptance.json`，其中记录准入是否成功、错误类型及原因。准入失败时 `measurementPerformed=false`，不产生虚构页面读数；完成双样本后才另写实测报告。CI 失败仍上传已生成的准入报告。

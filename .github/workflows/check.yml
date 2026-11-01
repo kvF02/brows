@@ -69,5 +69,7 @@ jobs:
         if: always()
         with:
           name: windows-fingerprint-measurement
-          path: target/fingerprint-measurement.json
+          path: |
+            target/runtime-acceptance.json
+            target/fingerprint-measurement.json
           if-no-files-found: warn

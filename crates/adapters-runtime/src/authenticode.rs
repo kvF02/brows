@@ -201,7 +201,11 @@ mod platform {
         if status != 0 {
             return Err(PortError::new(
                 PortErrorKind::RuntimeUntrusted,
-                format!("browser executable Authenticode verification failed (0x{status:08x})"),
+                if status as u32 == 0x800b0100 {
+                    "浏览器主程序没有可验证的 Authenticode 签名 (0x800b0100)，已拒绝登记".to_owned()
+                } else {
+                    format!("browser executable Authenticode verification failed (0x{status:08x})")
+                },
             ));
         }
 
@@ -319,5 +323,14 @@ mod tests {
         let error = verify_authenticode_publisher(&file, &["Google LLC"]).unwrap_err();
         assert_eq!(error.kind, PortErrorKind::RuntimeUntrusted);
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn unsigned_portable_executable_is_rejected_with_a_signature_diagnostic() {
+        let file = std::env::current_exe().unwrap();
+        let error = verify_authenticode_publisher(&file, &["Google LLC"]).unwrap_err();
+        assert_eq!(error.kind, PortErrorKind::RuntimeUntrusted);
+        assert!(error.message.contains("0x800b0100"));
     }
 }
