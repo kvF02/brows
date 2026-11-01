@@ -12,11 +12,12 @@ pub use model::{
     BrowserBuild, BrowserBuildSelector, BrowserCapabilities, BrowserChannel, BrowserPreferences,
     DeviceMemoryGb, DiagnosticCheck, DiagnosticOverall, DiagnosticReport, DiagnosticScope,
     DiagnosticStatus, DnsMode, EnvironmentPreset, EnvironmentPresetKind, EnvironmentPresetRef,
-    FingerprintPersona, LaunchArgument, LaunchWarning, LocaleConfig, PersonaKind, PlatformKind,
-    ProfileSpec, ProxyLaunchBinding, ProxyScheme, ProxySpec, ResolvedLaunchPlan, RuntimeTrust,
-    ScreenConfig, SeedableNoisePersona, Session, SessionFailure, SessionState, SystemNativePersona,
-    WebGLProfile, WindowConfig, DEFAULT_MAX_CONCURRENT_SESSIONS, DEFAULT_PROXY_TIMEOUT_MS,
-    MAX_CONCURRENT_SESSIONS, MAX_PROFILE_NAME_CHARS, MAX_QUEUED_SESSIONS, MAX_TAG_CHARS,
+    FingerprintPersona, FingerprintSupport, LaunchArgument, LaunchWarning, LocaleConfig,
+    PersonaKind, PlatformKind, ProfileSpec, ProxyLaunchBinding, ProxyScheme, ProxySpec,
+    ResolvedLaunchPlan, RuntimeTrust, ScreenConfig, SeedableNoisePersona, Session, SessionFailure,
+    SessionState, SystemNativePersona, WebGLProfile, WindowConfig, DEFAULT_MAX_CONCURRENT_SESSIONS,
+    DEFAULT_PROXY_TIMEOUT_MS, MAX_CONCURRENT_SESSIONS, MAX_PROFILE_NAME_CHARS, MAX_QUEUED_SESSIONS,
+    MAX_TAG_CHARS,
 };
 pub use scheduler::{EnqueueOutcome, LaunchTicket, QueueSnapshot, SessionScheduler};
 
@@ -250,8 +251,24 @@ mod tests {
     }
 
     #[test]
-    fn seedable_persona_marks_zero_host_shared_fields() {
+    fn seedable_persona_reports_unmodified_host_surfaces() {
         let p = seedable_profile();
-        assert_eq!(p.persona.host_shared_fields(), &[] as &[&str]);
+        let shared = p.persona.host_shared_fields();
+        for field in [
+            "timezone",
+            "fonts",
+            "gpu",
+            "tls_http2",
+            "client_hints",
+            "workers",
+            "webgl_pixels",
+            "audio_device",
+            "canvas_uncovered_apis",
+        ] {
+            assert!(
+                shared.contains(&field),
+                "missing host-shared field: {field}"
+            );
+        }
     }
 }

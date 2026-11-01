@@ -686,7 +686,9 @@ function ProfileCard({
   const canStop = profile.status === "running" || profile.status === "starting" || profile.status === "queued";
   const canEdit = profile.status === "stopped" || profile.status === "failed";
   const canArchive = profile.status === "stopped" || profile.status === "failed";
-  const scope = scopeMeta[preset?.fingerprintScope ?? "host-shared"];
+  const isSeedable = profile.persona?.kind === "seedable_noise";
+  const fingerprintBlocked = isSeedable && runtime?.fingerprintSupport !== "supported";
+  const scope = scopeMeta[isSeedable ? "configurable" : preset?.fingerprintScope ?? "host-shared"];
 
   return (
     <article className={`profile-card status-${status.tone}`}>
@@ -707,6 +709,7 @@ function ProfileCard({
       <div className="profile-details">
         <DetailRow label="代理" value={proxy ? `${proxy.name} · ${proxy.kind.toUpperCase()}` : "系统网络"} />
         <DetailRow label="浏览器" value={runtime ? `${runtime.name} ${runtime.version}` : "待选择运行时"} />
+        <DetailRow label="指纹" value={isSeedable ? `${fingerprintSupportLabel(runtime)}${fingerprintBlocked ? " · 启动受限，请到设置检测" : " · 非完整 anti-detect"}` : "系统原生 · 不要求指纹扩展"} />
         <DetailRow label="上次使用" value={formatDate(profile.lastUsedAt)} />
       </div>
 
@@ -717,7 +720,7 @@ function ProfileCard({
         </span>
         <div className="card-actions">
           {profile.status === "archived" && <button className="card-action primary" type="button" onClick={onRestore}>恢复</button>}
-          {canLaunch && <button className="card-action primary" type="button" onClick={onLaunch}>启动</button>}
+          {canLaunch && <button className="card-action primary" type="button" disabled={fingerprintBlocked} title={fingerprintBlocked ? "SeedableNoise 需要运行时指纹加载检测通过。请到设置执行检测，或编辑为系统原生。" : undefined} onClick={onLaunch}>启动</button>}
           {canStop && <button className="card-action stop" type="button" onClick={onStop}>停止</button>}
           {canEdit && <button className="card-action" type="button" onClick={onEdit}>编辑</button>}
           <button className="card-action" type="button" onClick={onClone}>克隆</button>
@@ -755,7 +758,12 @@ function ProfileModal({
   const [proxyId, setProxyId] = useState(initial?.proxyId ?? "");
   const [runtimeId, setRuntimeId] = useState(initial?.runtimeId ?? runtimes.find((runtime) => runtime.active)?.id ?? runtimes[0]?.id ?? "");
   const [persona, setPersona] = useState<PersonaConfig>(initial?.persona ?? { kind: "system_native" });
+  const [languagesText, setLanguagesText] = useState((initial?.acceptLanguages ?? ["zh-CN", "zh"]).join(", "));
+  const [windowWidth, setWindowWidth] = useState(initial?.windowWidth ?? 1280);
+  const [windowHeight, setWindowHeight] = useState(initial?.windowHeight ?? 800);
   const [formError, setFormError] = useState("");
+  const acceptLanguages = useMemo(() => languagesText.split(",").map((language) => language.trim()).filter(Boolean), [languagesText]);
+  const selectedRuntime = runtimes.find((runtime) => runtime.id === runtimeId);
 
   // Runtime discovery is asynchronous. Keep the form selection in sync when
   // the list arrives after the modal has already been mounted, while
@@ -776,9 +784,16 @@ function ProfileModal({
       setFormError("名称长度需要在 1 到 64 个字符之间。");
       return;
     }
-    const selectedRuntime = runtimes.find((runtime) => runtime.id === runtimeId);
     if (!selectedRuntime || !selectedRuntime.trusted) {
       setFormError("请先安装或选择一个可信的浏览器运行时。");
+      return;
+    }
+    if (acceptLanguages.length === 0 || acceptLanguages.some((language) => language.length > 32 || !/^[A-Za-z]{2,8}(?:-[A-Za-z0-9]{1,8})*$/.test(language))) {
+      setFormError("请输入逗号分隔的语言标签，例如 zh-CN, zh 或 en-US, en。");
+      return;
+    }
+    if (!Number.isInteger(windowWidth) || !Number.isInteger(windowHeight) || windowWidth < 320 || windowHeight < 240 || windowWidth > 0xffffffff || windowHeight > 0xffffffff) {
+      setFormError("窗口尺寸必须为整数，且宽度至少 320、高度至少 240。");
       return;
     }
     setFormError("");
@@ -788,7 +803,10 @@ function ProfileModal({
       presetId,
       proxyId: proxyId || undefined,
       runtimeId,
-      persona: persona.kind === "seedable_noise" ? persona : undefined,
+      persona,
+      acceptLanguages: [...acceptLanguages],
+      windowWidth,
+      windowHeight,
     });
   };
 
@@ -829,7 +847,25 @@ function ProfileModal({
             {runtimes.map((runtime) => <option value={runtime.id} key={runtime.id} disabled={!runtime.trusted}>{runtime.name} {runtime.version}{runtime.trusted ? "" : " · 未验证"}</option>)}
           </select>
 
-          <PersonaEditor value={persona} onChange={setPersona} api={api} />
+          <label className="field-label" htmlFor="profile-languages">语言（按优先级，用逗号分隔）</label>
+          <input id="profile-languages" className="text-input" required value={languagesText} onChange={(event) => setLanguagesText(event.target.value)} placeholder="zh-CN, zh" />
+          <div className="form-grid">
+            <div><label className="field-label" htmlFor="profile-window-w">启动窗口宽度</label><input id="profile-window-w" className="text-input" type="number" required min={320} max={0xffffffff} step={1} value={windowWidth} onChange={(event) => setWindowWidth(Number(event.target.value))} /></div>
+            <div><label className="field-label" htmlFor="profile-window-h">启动窗口高度</label><input id="profile-window-h" className="text-input" type="number" required min={240} max={0xffffffff} step={1} value={windowHeight} onChange={(event) => setWindowHeight(Number(event.target.value))} /></div>
+          </div>
+
+          <PersonaEditor value={persona} onChange={setPersona} api={api} runtimeId={runtimeId} acceptLanguages={acceptLanguages} windowWidth={windowWidth} windowHeight={windowHeight} />
+
+          <div className="form-info" role="status">
+            <span aria-hidden="true">i</span>
+            <div>运行时指纹支持：{fingerprintSupportLabel(selectedRuntime)}。签名可信不代表指纹支持。
+              {persona.kind === "seedable_noise"
+                ? selectedRuntime?.fingerprintSupport === "supported"
+                  ? " 加载检测通过仅说明本地探针可注入，仍非完整 anti-detect。"
+                  : " 可保存指纹草稿，但启动前必须在设置中通过加载检测；也可改为系统原生。"
+                : " 系统原生不受指纹扩展支持限制。"}
+            </div>
+          </div>
 
           {formError && <div className="form-error" role="alert">{formError}</div>}
           <div className="modal-actions"><button className="secondary-button" type="button" onClick={onClose}>取消</button><button className="primary-button" type="submit">{initial ? "保存修改" : "创建环境"}</button></div>
@@ -845,11 +881,21 @@ function PersonaEditor({
   value,
   onChange,
   api,
+  runtimeId,
+  acceptLanguages,
+  windowWidth,
+  windowHeight,
 }: {
   value: PersonaConfig;
   onChange(next: PersonaConfig): void;
   api: ApiClient;
+  runtimeId: string;
+  acceptLanguages: string[];
+  windowWidth: number;
+  windowHeight: number;
 }) {
+  const lastSeedable = useRef<SeedableNoisePersonaConfig | undefined>(value.seedable);
+  if (value.kind === "seedable_noise" && value.seedable) lastSeedable.current = value.seedable;
   return (
     <fieldset className="persona-editor">
       <legend className="field-label">指纹 Persona</legend>
@@ -859,7 +905,7 @@ function PersonaEditor({
           role="tab"
           aria-selected={value.kind === "system_native"}
           className={`persona-tab ${value.kind === "system_native" ? "active" : ""}`}
-          onClick={() => onChange({ kind: "system_native" })}
+          onClick={() => value.kind !== "system_native" && onChange({ kind: "system_native" })}
         >
           系统原生
           <small>v0.1 · 主机共享</small>
@@ -869,12 +915,13 @@ function PersonaEditor({
           role="tab"
           aria-selected={value.kind === "seedable_noise"}
           className={`persona-tab ${value.kind === "seedable_noise" ? "active" : ""}`}
-          onClick={() =>
+          onClick={() => {
+            if (value.kind === "seedable_noise") return;
             onChange({
               kind: "seedable_noise",
-              seedable: { ...DEFAULT_SEEDABLE, seed: randomSeed() },
-            })
-          }
+              seedable: lastSeedable.current ?? { ...DEFAULT_SEEDABLE, seed: randomSeed() },
+            });
+          }}
         >
           SeedableNoise
           <small>v0.2 · 可配置</small>
@@ -886,6 +933,10 @@ function PersonaEditor({
           value={value.seedable}
           onChange={(seedable) => onChange({ kind: "seedable_noise", seedable })}
           api={api}
+          runtimeId={runtimeId}
+          acceptLanguages={acceptLanguages}
+          windowWidth={windowWidth}
+          windowHeight={windowHeight}
         />
       )}
     </fieldset>
@@ -896,17 +947,41 @@ function SeedableNoiseFields({
   value,
   onChange,
   api,
+  runtimeId,
+  acceptLanguages,
+  windowWidth,
+  windowHeight,
 }: {
   value: SeedableNoisePersonaConfig;
   onChange(next: SeedableNoisePersonaConfig): void;
   api: ApiClient;
+  runtimeId: string;
+  acceptLanguages: string[];
+  windowWidth: number;
+  windowHeight: number;
 }) {
-  const [preview, setPreview] = useState<FingerprintPreview | undefined>();
+  const [preview, setPreview] = useState<{ key: string; result: FingerprintPreview } | undefined>();
   const [previewError, setPreviewError] = useState("");
   const [previewing, setPreviewing] = useState(false);
+  const previewKey = JSON.stringify({ value, runtimeId, acceptLanguages, windowWidth, windowHeight });
+  const currentKey = useRef(previewKey);
+  currentKey.current = previewKey;
+  const requestSequence = useRef(0);
+
+  useEffect(() => {
+    requestSequence.current += 1;
+    setPreview(undefined);
+    setPreviewError("");
+    setPreviewing(false);
+    return () => { requestSequence.current += 1; };
+  }, [api, previewKey]);
 
   const requestPreview = useCallback(async () => {
+    const sequence = ++requestSequence.current;
+    const key = previewKey;
+    const isCurrent = () => sequence === requestSequence.current && key === currentKey.current;
     setPreviewing(true);
+    setPreview(undefined);
     setPreviewError("");
     try {
       const result = await api.fingerprintPreview({
@@ -914,24 +989,25 @@ function SeedableNoiseFields({
           kind: "seedable_noise",
           seedable: value,
         },
-        acceptLanguages: ["en-US", "en"],
-        windowWidth: value.screenWidth,
-        windowHeight: value.screenHeight,
+        runtimeId,
+        acceptLanguages: [...acceptLanguages],
+        windowWidth,
+        windowHeight,
       });
-      setPreview(result);
+      if (isCurrent()) setPreview({ key, result });
     } catch (error) {
-      setPreviewError(getErrorMessage(error));
+      if (isCurrent()) setPreviewError(getErrorMessage(error));
     } finally {
-      setPreviewing(false);
+      if (isCurrent()) setPreviewing(false);
     }
-  }, [api, value]);
+  }, [api, value, runtimeId, acceptLanguages, windowWidth, windowHeight, previewKey]);
 
   return (
     <div className="seedable-noise-fields">
       <div className="form-info">
         <span aria-hidden="true">⚠</span>
-        本能力通过 MV3 扩展注入确定性钩子。Canvas / Audio 目前仅有弱覆盖，
-        Client Hints 等信号也未完整对齐；高强度检测仍可识别，请勿将其视为完整 anti-detect。
+        此配置依赖浏览器支持加载 MV3 扩展，生成预览不代表注入已生效。
+        Canvas 读取 / 导出与离线 Audio 渲染可进行种子微扰；Client Hints、字体、真实 GPU 和 worker 等仍未完整覆盖，不代表完整 anti-detect。
       </div>
 
       <label className="field-label" htmlFor="persona-seed">种子</label>
@@ -941,7 +1017,7 @@ function SeedableNoiseFields({
           className="text-input"
           value={value.seed}
           onChange={(event) => onChange({ ...value, seed: event.target.value })}
-          placeholder="任意字符串 · 相同 seed → 相同指纹"
+          placeholder="相同种子、配置和内核 → 相同派生结果"
           maxLength={128}
         />
         <button
@@ -1100,8 +1176,8 @@ function SeedableNoiseFields({
             onChange={(event) => onChange({ ...value, spoofCanvas: event.target.checked })}
           />
           <span>
-            声明修改 Canvas
-            <small>JS 层像素扰动，CreepJS 可识别</small>
+            Canvas 读取 / 导出扰动
+            <small>确定性像素微扰，不修改原始画布；仍可被检测</small>
           </span>
         </label>
         <label className="toggle-row">
@@ -1111,14 +1187,14 @@ function SeedableNoiseFields({
             onChange={(event) => onChange({ ...value, spoofAudio: event.target.checked })}
           />
           <span>
-            声明修改 AudioContext
-            <small>采样率稳定化，高强度检测仍可识别</small>
+            离线 Audio 渲染微扰
+            <small>只微扰离线 buffer，不改变真实采样率或实时音频</small>
           </span>
         </label>
       </div>
 
       <FingerprintPreviewPanel
-        preview={preview}
+        preview={preview?.key === previewKey ? preview.result : undefined}
         error={previewError}
         loading={previewing}
         onRequest={requestPreview}
@@ -1144,8 +1220,8 @@ function FingerprintPreviewPanel({
     <div className="fingerprint-preview">
       <div className="preview-head">
         <div>
-          <div className="eyebrow">实时指纹预览</div>
-          <small>不启动浏览器，仅根据 seed 派生有效属性</small>
+          <div className="eyebrow">指纹配置预览（未观测）</div>
+          <small>不启动浏览器；按所选内核和配置派生，实际覆盖需验证扩展加载</small>
         </div>
         <button
           type="button"
@@ -1161,6 +1237,14 @@ function FingerprintPreviewPanel({
 
       {preview && (
         <div className="preview-body">
+          <div className="preview-row">
+            <span className="preview-label">内核</span>
+            <code className="preview-value">{preview.runtimeId} · {preview.runtimeVersion}</code>
+          </div>
+          <div className="preview-row">
+            <span className="preview-label">语言</span>
+            <code className="preview-value">{preview.effectiveLanguages.join(", ")}</code>
+          </div>
           <div className="preview-row">
             <span className="preview-label">User-Agent</span>
             <code className="preview-value">{preview.effectiveUserAgent}</code>
@@ -1181,10 +1265,12 @@ function FingerprintPreviewPanel({
             <span>CPU <strong>{preview.hardwareConcurrency}</strong> 核</span>
             <span>内存 <strong>{preview.deviceMemoryGb}</strong> GB</span>
             <span>窗口 <strong>{preview.effectiveWindowWidth}×{preview.effectiveWindowHeight}</strong></span>
+            <span>屏幕 <strong>{preview.effectiveScreenWidth}×{preview.effectiveScreenHeight}</strong></span>
+            <span>启动缩放 <strong>{preview.deviceScaleFactorHundredths / 100}×</strong></span>
           </div>
           {preview.declaredOnlyFields.length > 0 && (
             <div className="preview-warning">
-              <strong>声明修改（像素层不可改）</strong>
+              <strong>页面读取覆盖（需验证注入，非完整设备替换）</strong>
               <ul>
                 {preview.declaredOnlyFields.map((field) => (
                   <li key={field}>{field}</li>
@@ -1194,12 +1280,18 @@ function FingerprintPreviewPanel({
           )}
           {preview.hostSharedFields.length > 0 && (
             <div className="preview-warning">
-              <strong>主机共享</strong>
+              <strong>仍依赖主机 / 内核的信号</strong>
               <ul>
                 {preview.hostSharedFields.map((field) => (
                   <li key={field}>{field}</li>
                 ))}
               </ul>
+            </div>
+          )}
+          {preview.runtimeWarnings.length > 0 && (
+            <div className="preview-warning">
+              <strong>兼容性与覆盖限制</strong>
+              <ul>{preview.runtimeWarnings.map((warning, index) => <li key={`${index}:${warning}`}>{warning}</li>)}</ul>
             </div>
           )}
         </div>
@@ -1531,6 +1623,69 @@ function BackupsView({
   return <section className="view-section"><div className="page-heading"><div><div className="eyebrow">ENCRYPTED ARCHIVES</div><h1>备份与恢复</h1><p>使用恢复口令加密完整 Chromium Profile。恢复会生成新的环境 UUID，不覆盖现有环境。</p></div></div><div className="backup-panel"><div className="backup-panel-head"><div><h2>导出完整环境</h2><p>包含 Cookie、缓存和站点存储；代理密码不会写入归档。</p></div><span className="vault-badge">Argon2id · XChaCha20</span></div><div className="form-grid"><div><label className="field-label" htmlFor="backup-profile">选择环境</label><select id="backup-profile" className="text-input" value={profileId} onChange={(e) => setProfileId(e.target.value)}><option value="">请选择</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select></div><div><label className="field-label" htmlFor="backup-name">备份文件名</label><input id="backup-name" className="text-input" value={destinationName} onChange={(e) => setDestinationName(e.target.value)} /></div><div><label className="field-label" htmlFor="backup-password">恢复口令（至少 12 个字符）</label><input id="backup-password" className="text-input" type="password" autoComplete="new-password" value={password} onChange={(e) => setPassword(e.target.value)} /></div><div><label className="field-label" htmlFor="backup-password-confirm">确认恢复口令</label><input id="backup-password-confirm" className="text-input" type="password" autoComplete="new-password" value={passwordConfirm} onChange={(e) => setPasswordConfirm(e.target.value)} /></div></div><div className="backup-warning"><span aria-hidden="true">i</span> Chromium 的 DPAPI / App-Bound Encryption 可能让登录态无法跨 Windows 设备直接使用。备份恢复配置成功不代表免登录。</div><button className="primary-button" type="button" disabled={!profileId || !password || !passwordConfirm} onClick={() => void exportBackup()}>导出加密备份</button></div><div className="backup-panel"><div className="backup-panel-head"><div><h2>恢复加密归档</h2><p>输入应用备份目录中的文件名；恢复将创建新的环境并安装隔离 userdata。</p></div></div><div className="form-grid"><div><label className="field-label" htmlFor="restore-name">归档文件名</label><input id="restore-name" className="text-input" placeholder="profile-backup.browsbak" value={importName} onChange={(e) => setImportName(e.target.value)} /></div><div><label className="field-label" htmlFor="restore-password">恢复口令</label><input id="restore-password" className="text-input" type="password" autoComplete="current-password" value={importPassword} onChange={(e) => setImportPassword(e.target.value)} /></div></div><button className="secondary-button" type="button" disabled={!importName || !importPassword} onClick={() => void importBackup()}>恢复为新环境</button></div><div className="subsection-heading"><div><h2>最近任务</h2><span>本地任务记录</span></div></div>{backups.length === 0 ? <div className="empty-state compact"><div className="empty-icon">↥</div><strong>还没有备份任务</strong><span>完成的归档会显示在这里。</span></div> : <div className="data-table-wrap"><table className="data-table"><thead><tr><th>环境</th><th>状态</th><th>创建时间</th><th>备注</th></tr></thead><tbody>{backups.map((backup) => <tr key={backup.id}><td><strong>{backup.profileName}</strong></td><td><span className={`status-pill ${backup.status === "completed" ? "green" : backup.status === "failed" ? "red" : "blue"}`}>{backup.status === "completed" ? "已完成" : backup.status}</span></td><td>{formatDate(backup.createdAt)}</td><td>{backup.note ?? "—"}</td></tr>)}</tbody></table></div>}</section>;
 }
 
+function fingerprintSupportLabel(runtime?: BrowserRuntime): string {
+  switch (runtime?.fingerprintSupport) {
+    case "supported": return "指纹加载检测通过";
+    case "unsupported": return "指纹加载检测未通过";
+    default: return "指纹支持未验证";
+  }
+}
+
+function RuntimeFingerprintRow({ api, runtime, onRefresh, onError, onNotice }: {
+  api: ApiClient;
+  runtime: BrowserRuntime;
+  onRefresh(): Promise<void>;
+  onError(message: string): void;
+  onNotice(message: string): void;
+}) {
+  const [probing, setProbing] = useState(false);
+  const [detail, setDetail] = useState("");
+  const [probeError, setProbeError] = useState("");
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  const probe = async () => {
+    if (probing || !runtime.trusted) return;
+    setProbing(true);
+    setDetail("");
+    setProbeError("");
+    try {
+      const result = await api.probeRuntimeFingerprint(runtime.id);
+      if (mounted.current) setDetail(result.detail);
+      await onRefresh();
+      if (mounted.current) onNotice(`${runtime.name}：${fingerprintSupportLabel(result.runtime)}。探针结果不代表完整 anti-detect。`);
+    } catch (cause) {
+      const message = getErrorMessage(cause);
+      if (mounted.current) {
+        setProbeError(message);
+        onError(message);
+      }
+      // A failed re-probe clears prior backend readiness. Refresh even on
+      // transport/timeout failure so an old "supported" badge cannot linger.
+      await onRefresh();
+    } finally {
+      if (mounted.current) setProbing(false);
+    }
+  };
+
+  return (
+    <div>
+      <div className="runtime-row">
+        <span className="runtime-logo" aria-hidden="true">C</span>
+        <div><strong>{runtime.name}</strong><small>{runtime.version} · {runtime.channel}</small><small>{fingerprintSupportLabel(runtime)}</small></div>
+        <span className={`runtime-trust ${runtime.trusted ? "trusted" : "untrusted"}`}>{runtime.trusted ? "签名已校验" : "未登记"}</span>
+      </div>
+      {runtime.trusted && <button className="secondary-button full" type="button" disabled={probing} aria-busy={probing} onClick={() => void probe()}>{probing ? "正在检测指纹加载…" : `检测 ${runtime.name} 指纹支持`}</button>}
+      {probing && <div className="form-info" role="status">正在启动独立临时浏览器进行本地探针检测，不使用已保存环境或访问外部检测站。</div>}
+      {detail && <div className="form-info" role="status">{detail}</div>}
+      {probeError && <div className="form-error" role="alert">{probeError}</div>}
+    </div>
+  );
+}
+
 function SettingsView({
   api,
   settings,
@@ -1552,7 +1707,32 @@ function SettingsView({
     setSaving(true);
     try { await api.updateSettings(changes); await onRefresh(); onNotice("设置已保存。"); } catch (cause) { onError(getErrorMessage(cause)); } finally { setSaving(false); }
   };
-  return <section className="view-section"><div className="page-heading"><div><div className="eyebrow">LOCAL CONTROL PLANE</div><h1>设置</h1><p>管理本地运行时、并发资源和安全默认值。</p></div></div><div className="settings-grid"><article className="settings-card"><div className="settings-card-head"><div><h2>会话调度</h2><p>同一环境只允许一个活动会话。</p></div><span className="settings-icon">↯</span></div><label className="field-label" htmlFor="max-concurrent">最大并发环境</label><div className="number-control"><input id="max-concurrent" className="text-input" type="number" min="1" max="10" value={settings.maxConcurrentSessions} disabled={saving} onChange={(e) => void save({ maxConcurrentSessions: Number(e.target.value) })} /><span>个</span></div><label className="switch-row"><input type="checkbox" checked={settings.stopSessionsOnExit} disabled={saving} onChange={(e) => void save({ stopSessionsOnExit: e.target.checked })} /><span className="switch-ui" /><span><strong>退出管理器时停止会话</strong><small>避免遗留浏览器和代理进程。</small></span></label></article><article className="settings-card"><div className="settings-card-head"><div><h2>浏览器运行时</h2><p>启动时验证签名并登记摘要，每次启动前重新核对。</p></div><span className="settings-icon">◉</span></div>{runtimes.map((runtime) => <div className="runtime-row" key={runtime.id}><span className="runtime-logo">C</span><div><strong>{runtime.name}</strong><small>{runtime.version} · {runtime.channel}</small></div><span className={`runtime-trust ${runtime.trusted ? "trusted" : "untrusted"}`}>{runtime.trusted ? "签名与完整性已校验" : "未登记"}</span></div>)}<button className="secondary-button full" type="button" onClick={() => onNotice("启动时验证 Windows Authenticode 信任链与 Google LLC 发行者，并在每次浏览器启动前重新核对 SHA-256。")}>管理运行时</button></article><article className="settings-card"><div className="settings-card-head"><div><h2>隐私与审计</h2><p>默认不向任何远程服务发送数据。</p></div><span className="settings-icon">⌁</span></div><div className="privacy-row"><span className="privacy-check">✓</span><div><strong>遥测已关闭</strong><small>此设置由产品安全基线锁定。</small></div><span className="locked-label">锁定</span></div><div className="privacy-row"><span className="privacy-check">✓</span><div><strong>日志自动脱敏</strong><small>不记录 Cookie、Token、密码或完整代理 URL。</small></div><span className="locked-label">默认</span></div><button className="text-button" type="button" onClick={() => onNotice("Profile 与会话操作的脱敏审计记录保存在本机 SQLite；不记录 Cookie、Token、密码或代理 URL。")}>查看安全说明 →</button></article></div></section>;
+  return (
+    <section className="view-section">
+      <div className="page-heading"><div><div className="eyebrow">LOCAL CONTROL PLANE</div><h1>设置</h1><p>管理本地运行时、并发资源和安全默认值。</p></div></div>
+      <div className="settings-grid">
+        <article className="settings-card">
+          <div className="settings-card-head"><div><h2>会话调度</h2><p>同一环境只允许一个活动会话。</p></div><span className="settings-icon">↯</span></div>
+          <label className="field-label" htmlFor="max-concurrent">最大并发环境</label>
+          <div className="number-control"><input id="max-concurrent" className="text-input" type="number" min="1" max="10" value={settings.maxConcurrentSessions} disabled={saving} onChange={(e) => void save({ maxConcurrentSessions: Number(e.target.value) })} /><span>个</span></div>
+          <label className="switch-row"><input type="checkbox" checked={settings.stopSessionsOnExit} disabled={saving} onChange={(e) => void save({ stopSessionsOnExit: e.target.checked })} /><span className="switch-ui" /><span><strong>退出管理器时停止会话</strong><small>避免遗留浏览器和代理进程。</small></span></label>
+        </article>
+        <article className="settings-card">
+          <div className="settings-card-head"><div><h2>浏览器运行时</h2><p>签名可信 ≠ 指纹支持；指纹加载检测通过 ≠ 完整 anti-detect。</p></div><span className="settings-icon">◉</span></div>
+          {runtimes.length === 0 && <div className="form-info">没有可信浏览器运行时，请先安装受支持的浏览器并刷新。</div>}
+          {runtimes.map((runtime) => <RuntimeFingerprintRow key={`${runtime.id}:${runtime.version}`} api={api} runtime={runtime} onRefresh={onRefresh} onError={onError} onNotice={onNotice} />)}
+          <div className="form-info">检测会创建独立临时环境，仅验证本地扩展注入。SeedableNoise 启动前必须通过；系统原生不受此限制。</div>
+          <button className="text-button" type="button" onClick={() => onNotice("启动时验证 Windows Authenticode 信任链与 Google LLC 发行者，并在每次浏览器启动前重新核对 SHA-256。")}>查看运行时信任说明 →</button>
+        </article>
+        <article className="settings-card">
+          <div className="settings-card-head"><div><h2>隐私与审计</h2><p>默认不向任何远程服务发送数据。</p></div><span className="settings-icon">⌁</span></div>
+          <div className="privacy-row"><span className="privacy-check">✓</span><div><strong>遥测已关闭</strong><small>此设置由产品安全基线锁定。</small></div><span className="locked-label">锁定</span></div>
+          <div className="privacy-row"><span className="privacy-check">✓</span><div><strong>日志自动脱敏</strong><small>不记录 Cookie、Token、密码或完整代理 URL。</small></div><span className="locked-label">默认</span></div>
+          <button className="text-button" type="button" onClick={() => onNotice("Profile 与会话操作的脱敏审计记录保存在本机 SQLite；不记录 Cookie、Token、密码或代理 URL。")}>查看安全说明 →</button>
+        </article>
+      </div>
+    </section>
+  );
 }
 
 export default App;

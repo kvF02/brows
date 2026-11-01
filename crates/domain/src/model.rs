@@ -72,11 +72,23 @@ pub enum RuntimeTrust {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum FingerprintSupport {
+    /// Publisher trust alone is not evidence that MAIN-world hooks load.
+    #[default]
+    Unverified,
+    /// A bounded local probe observed document-start hooks.
+    Supported,
+    /// The local probe completed but did not observe the required hooks.
+    Unsupported,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct BrowserCapabilities {
     pub supports_language: bool,
     pub supports_proxy: bool,
     pub supports_webrtc_policy: bool,
     pub supports_devtools_pipe: bool,
+    pub fingerprint_support: FingerprintSupport,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -336,9 +348,9 @@ pub struct SeedableNoisePersona {
     pub screen: ScreenConfig,
     /// Empty = auto-derive from platform using the PRNG seed.
     pub webgl: WebGLProfile,
-    /// Spoof canvas read values with a stable PRNG (pixel-level, detectable by CreepJS).
+    /// Perturb supported page-level canvas reads/exports deterministically.
     pub spoof_canvas: bool,
-    /// Spoof AudioContext output with a stable PRNG (detectable by CreepJS).
+    /// Perturb offline rendered audio buffers; live audio remains native.
     pub spoof_audio: bool,
 }
 
@@ -417,9 +429,9 @@ impl FingerprintPersona {
         }
     }
 
-    pub fn host_shared_fields(&self) -> &'static [&'static str] {
-        match self {
-            Self::SystemNative(_) => &[
+    pub fn host_shared_fields(&self) -> Vec<&'static str> {
+        let mut fields = match self {
+            Self::SystemNative(_) => vec![
                 "timezone",
                 "canvas",
                 "webgl",
@@ -429,9 +441,28 @@ impl FingerprintPersona {
                 "cpu",
                 "tls_http2",
             ],
-            // SeedableNoise configures all of these; none are unconditionally shared.
-            Self::SeedableNoise(_) => &[],
+            // JS hooks do not replace the rendering engine or host devices.
+            Self::SeedableNoise(_) => vec![
+                "timezone",
+                "fonts",
+                "gpu",
+                "tls_http2",
+                "client_hints",
+                "workers",
+                "webgl_pixels",
+                "audio_device",
+                "canvas_uncovered_apis",
+            ],
+        };
+        if let Self::SeedableNoise(persona) = self {
+            if !persona.spoof_canvas {
+                fields.push("canvas");
+            }
+            if !persona.spoof_audio {
+                fields.push("audio");
+            }
         }
+        fields
     }
 }
 

@@ -8,10 +8,10 @@ use brows_contracts::SessionStateDto;
 use commands::{
     backup_export, backup_import, backup_list, diagnostic_list, diagnostic_run,
     fingerprint_preview, legacy_migration_execute, legacy_migration_inspect, legacy_migration_list,
-    legacy_migration_rollback, list_runtimes, morelogin_import, morelogin_preview, profile_archive,
-    profile_clone, profile_create, profile_get, profile_list, profile_restore, profile_update,
-    proxy_list, proxy_remove, proxy_save, proxy_test, session_cancel_queued, session_launch,
-    session_list, session_stop,
+    legacy_migration_rollback, list_runtimes, morelogin_import, morelogin_preview,
+    probe_runtime_fingerprint, profile_archive, profile_clone, profile_create, profile_get,
+    profile_list, profile_restore, profile_update, proxy_list, proxy_remove, proxy_save,
+    proxy_test, session_cancel_queued, session_launch, session_list, session_stop,
 };
 use state::AppState;
 use tauri::{Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder};
@@ -71,6 +71,7 @@ pub fn run() {
             session_cancel_queued,
             session_list,
             fingerprint_preview,
+            probe_runtime_fingerprint,
             list_runtimes,
             backup_list,
             backup_export,

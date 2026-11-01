@@ -1,8 +1,8 @@
 use brows_domain::{
-    BrowserBuild, BrowserBuildSelector, BrowserPreferences, DiagnosticReport, EnvironmentPreset,
-    EnvironmentPresetRef, FingerprintPersona, LaunchArgument, LaunchWarning, ProfileId,
-    ProfileSpec, ProxyId, ProxyLaunchBinding, ProxySpec, ResolvedLaunchPlan, Revision, SecretRef,
-    SessionId,
+    BrowserBuild, BrowserBuildId, BrowserBuildSelector, BrowserPreferences, DiagnosticReport,
+    EnvironmentPreset, EnvironmentPresetRef, FingerprintPersona, LaunchArgument, LaunchWarning,
+    ProfileId, ProfileSpec, ProxyId, ProxyLaunchBinding, ProxySpec, ResolvedLaunchPlan, Revision,
+    SecretRef, SessionId,
 };
 use std::{fmt, path::PathBuf};
 
@@ -140,6 +140,17 @@ pub struct BrowserProcess {
 }
 
 pub trait BrowserRuntime: fmt::Debug + Send + Sync {
+    /// Explicit, isolated, local-only probe. Never tests in a user's profile.
+    fn probe_fingerprint_support(
+        &self,
+        _build_id: &BrowserBuildId,
+    ) -> PortResult<FingerprintProbeResult> {
+        Err(PortError::new(
+            PortErrorKind::CapabilityUnsupported,
+            "this runtime cannot probe fingerprint support",
+        ))
+    }
+
     fn resolve_build(&self, selector: &BrowserBuildSelector) -> PortResult<BrowserBuild>;
     /// Returns the locally registered builds for management/diagnostic views.
     /// Runtime adapters that cannot enumerate builds may keep the default.
@@ -149,6 +160,12 @@ pub trait BrowserRuntime: fmt::Debug + Send + Sync {
     fn launch(&self, plan: &ResolvedLaunchPlan) -> PortResult<BrowserProcess>;
     fn stop(&self, session_id: &SessionId) -> PortResult<()>;
     fn is_running(&self, session_id: &SessionId) -> PortResult<bool>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FingerprintProbeResult {
+    pub build: BrowserBuild,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -175,6 +192,15 @@ pub struct FingerprintContribution {
 }
 
 pub trait FingerprintRuntime: fmt::Debug + Send + Sync {
+    /// Compiles locale and window settings together with the persona.
+    fn compile_profile(
+        &self,
+        profile: &ProfileSpec,
+        build: &BrowserBuild,
+    ) -> PortResult<FingerprintContribution> {
+        self.compile_for_profile(&profile.id, &profile.persona, build)
+    }
+
     fn compile(
         &self,
         persona: &FingerprintPersona,

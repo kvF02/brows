@@ -59,7 +59,14 @@ export interface BrowserRuntime {
   channel: "stable" | "beta" | "dev" | "custom";
   trusted: boolean;
   active: boolean;
+  /** Signature trust and MAIN-world fingerprint extension support are separate checks. */
+  fingerprintSupport: "unverified" | "supported" | "unsupported";
   sha256?: string;
+}
+
+export interface RuntimeFingerprintProbeResult {
+  runtime: BrowserRuntime;
+  detail: string;
 }
 
 export interface DiagnosticSummary {
@@ -81,6 +88,9 @@ export interface Profile {
   lastUsedAt?: string;
   diagnostic: DiagnosticSummary;
   persona?: PersonaConfig;
+  acceptLanguages?: string[];
+  windowWidth?: number;
+  windowHeight?: number;
 }
 
 export interface ProfileInput {
@@ -91,6 +101,9 @@ export interface ProfileInput {
   runtimeId: string;
   /** v0.2: optional SeedableNoise persona. If omitted, SystemNative is used. */
   persona?: PersonaConfig;
+  acceptLanguages?: string[];
+  windowWidth?: number;
+  windowHeight?: number;
 }
 
 // ── v0.2 Fingerprint Persona (SeedableNoise) ────────────────────────────────
@@ -123,17 +136,31 @@ export interface PersonaConfig {
 }
 
 export interface FingerprintPreview {
+  runtimeId: string;
+  runtimeVersion: string;
   effectiveUserAgent: string;
   effectivePlatform: string;
   effectiveLanguages: string[];
   effectiveWindowWidth: number;
   effectiveWindowHeight: number;
+  effectiveScreenWidth: number;
+  effectiveScreenHeight: number;
+  deviceScaleFactorHundredths: number;
   effectiveWebglVendor: string;
   effectiveWebglRenderer: string;
   hardwareConcurrency: number;
   deviceMemoryGb: string;
   declaredOnlyFields: string[];
   hostSharedFields: string[];
+  runtimeWarnings: string[];
+}
+
+export interface FingerprintPreviewInput {
+  persona: PersonaConfig;
+  runtimeId: string;
+  acceptLanguages: string[];
+  windowWidth: number;
+  windowHeight: number;
 }
 
 export interface MoreLoginCandidate {
@@ -272,13 +299,10 @@ export type CommandParams<Name extends CommandName> = CommandMap[Name]["params"]
 export type CommandResult<Name extends CommandName> = CommandMap[Name]["result"];
 
 export interface ApiClient {
-  /** v0.2: derive the effective SeedableNoise fingerprint for a draft persona (no browser launch). */
-  fingerprintPreview(input: {
-    persona: PersonaConfig;
-    acceptLanguages: string[];
-    windowWidth: number;
-    windowHeight: number;
-  }): Promise<FingerprintPreview>;
+  /** Derive a draft configuration for the selected runtime; this is not a browser observation. */
+  fingerprintPreview(input: FingerprintPreviewInput): Promise<FingerprintPreview>;
+  /** Launch an isolated local probe to check extension injection; not an anti-detect guarantee. */
+  probeRuntimeFingerprint(runtimeId: string): Promise<RuntimeFingerprintProbeResult>;
   /** List registered browser runtimes (auto-detected from the local system). */
   listRuntimes(): Promise<BrowserRuntime[]>;
   previewMoreLogin(sourcePath: string): Promise<MoreLoginPreview>;

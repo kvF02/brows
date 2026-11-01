@@ -308,16 +308,21 @@ impl From<domain::ScreenConfig> for ScreenConfigDto {
     }
 }
 
-/// Preview of the effective fingerprint properties compiled for a SeedableNoise profile.
-/// Returned by `fingerprint.preview` — never launches a browser.
+/// Configuration preview for a SeedableNoise profile and its selected runtime.
+/// These are intended values, not observations: this command never launches a browser.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct FingerprintPreviewDto {
+    pub runtime_id: String,
+    pub runtime_version: String,
     pub effective_user_agent: String,
     pub effective_platform: String,
     pub effective_languages: Vec<String>,
     pub effective_window_width: u32,
     pub effective_window_height: u32,
+    pub effective_screen_width: u32,
+    pub effective_screen_height: u32,
+    pub device_scale_factor_hundredths: u16,
     pub effective_webgl_vendor: String,
     pub effective_webgl_renderer: String,
     pub hardware_concurrency: u8,
@@ -327,6 +332,8 @@ pub struct FingerprintPreviewDto {
     pub declared_only_fields: Vec<String>,
     /// Fields still reported at host-system values.
     pub host_shared_fields: Vec<String>,
+    /// Runtime limitations and the distinction between configuration and observation.
+    pub runtime_warnings: Vec<String>,
 }
 
 impl Default for PersonaDto {
@@ -1161,6 +1168,32 @@ pub struct BrowserRuntimeDto {
     pub provider: String,
     pub publisher: String,
     pub executable_path: String,
+    pub fingerprint_support: FingerprintSupportDto,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FingerprintSupportDto {
+    Unverified,
+    Supported,
+    Unsupported,
+}
+
+impl From<domain::FingerprintSupport> for FingerprintSupportDto {
+    fn from(value: domain::FingerprintSupport) -> Self {
+        match value {
+            domain::FingerprintSupport::Unverified => Self::Unverified,
+            domain::FingerprintSupport::Supported => Self::Supported,
+            domain::FingerprintSupport::Unsupported => Self::Unsupported,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FingerprintProbeResultDto {
+    pub runtime: BrowserRuntimeDto,
+    pub detail: String,
 }
 
 impl From<&domain::BrowserBuild> for BrowserRuntimeDto {
@@ -1175,6 +1208,7 @@ impl From<&domain::BrowserBuild> for BrowserRuntimeDto {
             provider: value.provider.clone(),
             publisher: value.publisher.clone(),
             executable_path: value.executable_path.to_string_lossy().into_owned(),
+            fingerprint_support: value.capabilities.fingerprint_support.into(),
         }
     }
 }
@@ -1567,6 +1601,24 @@ mod tests {
     }
 
     #[test]
+    fn fingerprint_support_is_serialized_independently_of_publisher_trust() {
+        for (support, expected) in [
+            (domain::FingerprintSupport::Unverified, "unverified"),
+            (domain::FingerprintSupport::Supported, "supported"),
+            (domain::FingerprintSupport::Unsupported, "unsupported"),
+        ] {
+            assert_eq!(
+                serde_json::to_value(FingerprintSupportDto::from(support)).unwrap(),
+                expected
+            );
+        }
+        assert_eq!(
+            domain::BrowserCapabilities::default().fingerprint_support,
+            domain::FingerprintSupport::Unverified
+        );
+    }
+
+    #[test]
     fn command_envelope_is_versioned_and_does_not_expose_secret_in_debug() {
         let secret = SecretInput::new("super-secret").unwrap();
         assert!(!format!("{secret:?}").contains("super-secret"));
@@ -1608,6 +1660,39 @@ mod tests {
             include_archived: false,
         };
         assert!(request.validate().is_err());
+    }
+
+    #[test]
+    fn fingerprint_preview_wire_format_keeps_runtime_and_scale_explicit() {
+        let preview = FingerprintPreviewDto {
+            runtime_id: "selected-chrome".to_owned(),
+            runtime_version: "150.0.1.2".to_owned(),
+            effective_user_agent: "Chrome/150.0.0.0".to_owned(),
+            effective_platform: "Win32".to_owned(),
+            effective_languages: vec!["zh-CN".to_owned()],
+            effective_window_width: 1280,
+            effective_window_height: 800,
+            effective_screen_width: 1920,
+            effective_screen_height: 1080,
+            device_scale_factor_hundredths: 125,
+            effective_webgl_vendor: "Google Inc. (Intel)".to_owned(),
+            effective_webgl_renderer: "ANGLE (Intel)".to_owned(),
+            hardware_concurrency: 8,
+            device_memory_gb: "8".to_owned(),
+            declared_only_fields: vec!["navigator".to_owned()],
+            host_shared_fields: vec!["workers".to_owned()],
+            runtime_warnings: vec!["configuration only".to_owned()],
+        };
+        let value = serde_json::to_value(&preview).unwrap();
+        assert_eq!(value["runtimeId"], "selected-chrome");
+        assert_eq!(value["runtimeVersion"], "150.0.1.2");
+        assert_eq!(value["deviceScaleFactorHundredths"], 125);
+        assert_eq!(value["effectiveScreenWidth"], 1920);
+        assert_eq!(value["runtimeWarnings"][0], "configuration only");
+        assert_eq!(
+            serde_json::from_value::<FingerprintPreviewDto>(value).unwrap(),
+            preview
+        );
     }
 
     #[test]

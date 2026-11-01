@@ -154,6 +154,7 @@ pub(crate) fn backup_import(
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FingerprintPreviewRequest {
+    runtime_id: String,
     persona: PersonaDto,
     accept_languages: Vec<String>,
     window_width: u32,
@@ -169,12 +170,53 @@ pub(crate) fn list_runtimes(state: State<'_, AppState>) -> IpcResult<Vec<Browser
     Ok(builds.iter().map(Into::into).collect())
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FingerprintProbeRequest {
+    runtime_id: String,
+}
+
+#[tauri::command]
+pub(crate) async fn probe_runtime_fingerprint(
+    state: State<'_, AppState>,
+    request: FingerprintProbeRequest,
+) -> IpcResult<brows_contracts::FingerprintProbeResultDto> {
+    let id =
+        brows_domain::BrowserBuildId::new(request.runtime_id).map_err(ErrorDto::from_domain)?;
+    let browsers = state.browsers.clone();
+    let result =
+        tauri::async_runtime::spawn_blocking(move || browsers.probe_fingerprint_support(&id))
+            .await
+            .map_err(|_| ErrorDto {
+                code: ErrorCode::Internal,
+                message: "指纹能力检测任务未能完成".to_owned(),
+                violations: Vec::new(),
+            })?
+            .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
+    Ok(brows_contracts::FingerprintProbeResultDto {
+        runtime: (&result.build).into(),
+        detail: result.detail,
+    })
+}
+
 #[tauri::command]
 pub(crate) fn fingerprint_preview(
     state: State<'_, AppState>,
     request: FingerprintPreviewRequest,
 ) -> IpcResult<FingerprintPreviewDto> {
+    preview_fingerprint(state.browsers.as_ref(), request)
+}
+
+fn preview_fingerprint(
+    browsers: &dyn brows_application::BrowserRuntime,
+    request: FingerprintPreviewRequest,
+) -> IpcResult<FingerprintPreviewDto> {
     let persona = fingerprint_persona(request.persona)?;
+    let host_shared_fields = persona
+        .host_shared_fields()
+        .iter()
+        .map(|field| (*field).to_owned())
+        .collect::<Vec<_>>();
     let brows_domain::FingerprintPersona::SeedableNoise(seedable) = persona else {
         return Err(ErrorDto {
             code: ErrorCode::ValidationFailed,
@@ -187,41 +229,96 @@ pub(crate) fn fingerprint_preview(
         message: error.to_string(),
         violations: Vec::new(),
     })?;
-    let fingerprint = PersonaFingerprint::derive(&seedable).map_err(|error| ErrorDto {
-        code: ErrorCode::ValidationFailed,
-        message: error.to_string(),
-        violations: Vec::new(),
-    })?;
-    let build = state
-        .browsers
-        .list_builds()
-        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?
-        .into_iter()
-        .max_by_key(|build| build.installed_at_ms)
-        .ok_or_else(|| ErrorDto {
-            code: ErrorCode::CapabilityUnsupported,
-            message: "fingerprint preview requires an installed browser runtime".to_owned(),
+    brows_domain::LocaleConfig {
+        accept_languages: request.accept_languages.clone(),
+        timezone: None,
+    }
+    .validate()
+    .map_err(ErrorDto::from_domain)?;
+    brows_domain::LaunchArgument::AcceptLanguages(request.accept_languages.clone())
+        .validate()
+        .map_err(ErrorDto::from_domain)?;
+    brows_domain::WindowConfig {
+        width: request.window_width,
+        height: request.window_height,
+        start_maximized: false,
+    }
+    .validate()
+    .map_err(ErrorDto::from_domain)?;
+    let runtime_id =
+        brows_domain::BrowserBuildId::new(request.runtime_id).map_err(ErrorDto::from_domain)?;
+    let build = browsers
+        .resolve_build(&brows_domain::BrowserBuildSelector::Pinned(
+            runtime_id.clone(),
+        ))
+        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
+    build.validate().map_err(ErrorDto::from_domain)?;
+    if build.id != runtime_id {
+        return Err(ErrorDto {
+            code: ErrorCode::RuntimeUntrusted,
+            message: "browser runtime returned a different build than requested".to_owned(),
             violations: Vec::new(),
-        })?;
-    let mut declared_only_fields = Vec::new();
+        });
+    }
+    if build.trust != brows_domain::RuntimeTrust::Verified {
+        return Err(ErrorDto {
+            code: ErrorCode::RuntimeUntrusted,
+            message: "the selected browser runtime is not verified".to_owned(),
+            violations: Vec::new(),
+        });
+    }
+    let fingerprint =
+        PersonaFingerprint::derive(&seedable, &build.version).map_err(ErrorDto::from_domain)?;
+    let mut declared_only_fields = vec![
+        "navigator".to_owned(),
+        "screen".to_owned(),
+        "webgl".to_owned(),
+    ];
     if seedable.spoof_canvas {
         declared_only_fields.push("canvas".to_owned());
     }
     if seedable.spoof_audio {
         declared_only_fields.push("audio".to_owned());
     }
+    let mut runtime_warnings = vec![
+        "配置预览未启动浏览器，未观测页面实际指纹。".to_owned(),
+        "MV3 扩展载入及各 API 覆盖尚未在所选运行时实测；生成配置不等于已生效。".to_owned(),
+        "官方 Google Chrome 137+ 的 --load-extension 支持存在兼容限制；须验证运行时扩展加载能力。"
+            .to_owned(),
+    ];
+    match build.capabilities.fingerprint_support {
+        brows_domain::FingerprintSupport::Unverified => runtime_warnings.push(
+            "运行时指纹能力未验证：可保存配置，但 SeedableNoise 启动前必须在设置中检测通过。".to_owned(),
+        ),
+        brows_domain::FingerprintSupport::Unsupported => runtime_warnings.push(
+            "运行时指纹能力检测未通过：SeedableNoise 已阻止启动；请切换系统原生或检测通过的可信运行时。".to_owned(),
+        ),
+        brows_domain::FingerprintSupport::Supported => runtime_warnings.push(
+            "运行时仅通过本地 document_start 样本检测，不代表所有 API、frame 或检测站均已通过。".to_owned(),
+        ),
+    }
+    if !build.capabilities.supports_language {
+        runtime_warnings
+            .push("所选运行时未声明支持语言启动参数，网络请求语言可能与配置不同。".to_owned());
+    }
     Ok(FingerprintPreviewDto {
-        effective_user_agent: fingerprint.user_agent_for_chromium(&build.version),
+        runtime_id: build.id.as_str().to_owned(),
+        runtime_version: build.version,
+        effective_user_agent: fingerprint.user_agent,
         effective_platform: fingerprint.platform_string.to_owned(),
         effective_languages: request.accept_languages,
         effective_window_width: request.window_width,
         effective_window_height: request.window_height,
+        effective_screen_width: seedable.screen.width,
+        effective_screen_height: seedable.screen.height,
+        device_scale_factor_hundredths: seedable.screen.device_scale_factor_hundredths,
         effective_webgl_vendor: fingerprint.webgl_vendor,
         effective_webgl_renderer: fingerprint.webgl_renderer,
         hardware_concurrency: fingerprint.hardware_concurrency,
         device_memory_gb: fingerprint.device_memory_gb,
         declared_only_fields,
-        host_shared_fields: Vec::new(),
+        host_shared_fields,
+        runtime_warnings,
     })
 }
 
@@ -680,7 +777,174 @@ pub(crate) fn session_list(state: State<'_, AppState>) -> IpcResult<Vec<SessionD
 #[cfg(test)]
 mod tests {
     use super::*;
+    use brows_application::memory::{InMemoryBrowserRuntime, ManualClock};
     use brows_contracts::{ErrorCode, ProfileListRequest};
+    use std::{path::PathBuf, sync::Arc};
+
+    fn preview_request() -> FingerprintPreviewRequest {
+        FingerprintPreviewRequest {
+            runtime_id: "chosen-runtime".to_owned(),
+            persona: PersonaDto::SeedableNoise {
+                seed: "preview-stable-seed".to_owned(),
+                platform: brows_contracts::PlatformDto::Windows,
+                hardware_concurrency: 8,
+                device_memory: brows_contracts::DeviceMemoryDto::Half,
+                touch_points: 0,
+                screen: brows_contracts::ScreenConfigDto {
+                    width: 1920,
+                    height: 1080,
+                    color_depth: 24,
+                    device_scale_factor_hundredths: 125,
+                },
+                webgl_vendor: String::new(),
+                webgl_renderer: String::new(),
+                spoof_canvas: true,
+                spoof_audio: false,
+            },
+            accept_languages: vec!["de-DE".to_owned(), "de".to_owned()],
+            window_width: 1200,
+            window_height: 800,
+        }
+    }
+
+    fn preview_build(id: &str, version: &str, installed_at_ms: u64) -> brows_domain::BrowserBuild {
+        brows_domain::BrowserBuild {
+            id: brows_domain::BrowserBuildId::new(id).unwrap(),
+            provider: "Google Chrome".to_owned(),
+            version: version.to_owned(),
+            channel: brows_domain::BrowserChannel::Stable,
+            executable_path: PathBuf::from("C:\\Brows\\chrome.exe"),
+            sha256: "a".repeat(64),
+            publisher: "Google LLC".to_owned(),
+            trust: brows_domain::RuntimeTrust::Verified,
+            capabilities: brows_domain::BrowserCapabilities {
+                supports_language: true,
+                ..brows_domain::BrowserCapabilities::default()
+            },
+            installed_at_ms,
+        }
+    }
+
+    fn preview_runtime() -> InMemoryBrowserRuntime {
+        let runtime = InMemoryBrowserRuntime::new(Arc::new(ManualClock::new(100)));
+        runtime
+            .insert_build(preview_build("chosen-runtime", "149.0.1.2", 1))
+            .unwrap();
+        runtime
+            .insert_build(preview_build("newer-runtime", "150.0.9.9", 99))
+            .unwrap();
+        runtime
+    }
+
+    #[test]
+    fn fingerprint_preview_uses_selected_runtime_and_actual_profile_settings() {
+        let runtime = preview_runtime();
+        let preview = preview_fingerprint(&runtime, preview_request()).unwrap();
+        assert_eq!(preview.runtime_id, "chosen-runtime");
+        assert_eq!(preview.runtime_version, "149.0.1.2");
+        assert!(preview.effective_user_agent.contains("Chrome/149.0.0.0"));
+        assert_eq!(preview.effective_languages, ["de-DE", "de"]);
+        assert_eq!(
+            (
+                preview.effective_window_width,
+                preview.effective_window_height
+            ),
+            (1200, 800)
+        );
+        assert_eq!(
+            (
+                preview.effective_screen_width,
+                preview.effective_screen_height
+            ),
+            (1920, 1080)
+        );
+        assert_eq!(preview.device_scale_factor_hundredths, 125);
+        assert_eq!(preview.device_memory_gb, "0.5");
+        assert_eq!(
+            preview,
+            preview_fingerprint(&runtime, preview_request()).unwrap()
+        );
+        assert!(runtime.running_plans().unwrap().is_empty());
+    }
+
+    #[test]
+    fn fingerprint_preview_exposes_partial_coverage_and_runtime_limitations() {
+        let runtime = preview_runtime();
+        let preview = preview_fingerprint(&runtime, preview_request()).unwrap();
+        for field in ["navigator", "screen", "webgl", "canvas"] {
+            assert!(preview
+                .declared_only_fields
+                .iter()
+                .any(|value| value == field));
+        }
+        assert!(!preview
+            .declared_only_fields
+            .iter()
+            .any(|value| value == "audio"));
+        for field in [
+            "timezone",
+            "client_hints",
+            "workers",
+            "webgl_pixels",
+            "audio",
+        ] {
+            assert!(preview
+                .host_shared_fields
+                .iter()
+                .any(|value| value == field));
+        }
+        assert!(preview
+            .runtime_warnings
+            .iter()
+            .any(|warning| warning.contains("未观测")));
+        assert!(preview
+            .runtime_warnings
+            .iter()
+            .any(|warning| warning.contains("137+")));
+    }
+
+    #[test]
+    fn fingerprint_preview_rejects_invalid_locale_window_and_missing_runtime() {
+        let runtime = preview_runtime();
+        let mut request = preview_request();
+        request.accept_languages = Vec::new();
+        assert_eq!(
+            preview_fingerprint(&runtime, request).unwrap_err().code,
+            ErrorCode::ValidationFailed
+        );
+        let mut request = preview_request();
+        request.window_width = 100;
+        assert_eq!(
+            preview_fingerprint(&runtime, request).unwrap_err().code,
+            ErrorCode::ValidationFailed
+        );
+        let mut request = preview_request();
+        request.runtime_id = "unknown-runtime".to_owned();
+        assert!(preview_fingerprint(&runtime, request).is_err());
+    }
+
+    #[test]
+    fn fingerprint_preview_rejects_untrusted_and_non_numeric_runtimes() {
+        let runtime = preview_runtime();
+        let mut build = preview_build("chosen-runtime", "149.0.1.2", 1);
+        build.trust = brows_domain::RuntimeTrust::Revoked;
+        runtime.insert_build(build).unwrap();
+        assert_eq!(
+            preview_fingerprint(&runtime, preview_request())
+                .unwrap_err()
+                .code,
+            ErrorCode::RuntimeUntrusted
+        );
+        runtime
+            .insert_build(preview_build("chosen-runtime", "installed", 1))
+            .unwrap();
+        assert_eq!(
+            preview_fingerprint(&runtime, preview_request())
+                .unwrap_err()
+                .code,
+            ErrorCode::ValidationFailed
+        );
+    }
 
     #[test]
     fn application_errors_are_exposed_as_stable_contract_errors() {

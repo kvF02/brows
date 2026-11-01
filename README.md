@@ -5,11 +5,20 @@ release focuses on reliable multi-session isolation: each profile has its own
 Chromium user-data directory, cookies, storage, cache and optional proxy.
 
 Brows supports a conservative `SeedableNoise` persona that applies typed
-Chromium flags, preferences and an MV3 JavaScript hook. This is not a complete
-anti-detect implementation: Canvas and Audio coverage is weak, Client Hints
-are not fully aligned, and high-strength fingerprint tests can still identify
-the browser. The default `SystemNative` persona remains truthful and reports
-host-level signals as shared.
+Chromium flags, preferences and an MV3 JavaScript hook. Its configuration
+preview uses the selected runtime version, profile languages and window size;
+it is not a measurement of a running browser. Supported page reads include
+navigator/screen/WebGL declarations, stable Canvas read/export perturbation
+and opt-in offline Audio output perturbation. Client Hints, workers, fonts,
+actual GPU rendering, live audio and the network stack remain host/runtime
+signals. Extension loading must be verified for each runtime, especially
+official Google Chrome 137+ with `--load-extension` restrictions. Settings offers
+an isolated local capability probe, and SeedableNoise launch is blocked unless
+it passes. The current system Chrome 154 did not load the extension in the
+real-browser smoke test. This is not a complete anti-detect implementation;
+no detection-site pass rate is promised. The default `SystemNative` persona
+remains truthful. See the
+current [fingerprint design and acceptance plan](docs/fingerprint-design.md).
 
 ## Current Status
 

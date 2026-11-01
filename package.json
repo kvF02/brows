@@ -3,6 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
+    "test:fingerprint": "node --test tools/fingerprint-hook.test.mjs && node --experimental-vm-modules --test ui/tests/fingerprint-api.test.mjs",
     "ui:dev": "npm --prefix ui run dev",
     "ui:typecheck": "npm --prefix ui run typecheck",
     "ui:build": "npm --prefix ui run build",

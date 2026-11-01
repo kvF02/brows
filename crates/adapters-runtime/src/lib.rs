@@ -7,15 +7,17 @@
 //! invokes a shell, never accepts arbitrary flags, and verifies the selected
 //! executable against the registered SHA-256 digest before every launch.
 
-use brows_application::{BrowserProcess, BrowserRuntime, PortError, PortErrorKind, PortResult};
+use brows_application::{
+    BrowserProcess, BrowserRuntime, FingerprintProbeResult, PortError, PortErrorKind, PortResult,
+};
 use brows_domain::{
-    BrowserBuild, BrowserBuildId, BrowserBuildSelector, BrowserChannel, LaunchArgument,
-    ResolvedLaunchPlan, RuntimeTrust, SessionId,
+    BrowserBuild, BrowserBuildId, BrowserBuildSelector, BrowserChannel, FingerprintSupport,
+    LaunchArgument, ResolvedLaunchPlan, RuntimeTrust, SessionId,
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     ffi::OsString,
     fs::{self, File},
     io::{BufReader, Read},
@@ -26,6 +28,7 @@ use std::{
 };
 
 mod authenticode;
+mod fingerprint_probe;
 
 pub use authenticode::verify_authenticode_publisher;
 
@@ -44,6 +47,7 @@ pub struct ManagedChromiumRuntime {
     profile_root: PathBuf,
     builds: RwLock<BuildRegistry>,
     processes: Mutex<HashMap<SessionId, Child>>,
+    probing: Mutex<HashSet<BrowserBuildId>>,
 }
 
 impl ManagedChromiumRuntime {
@@ -58,6 +62,7 @@ impl ManagedChromiumRuntime {
             profile_root,
             builds: RwLock::new(BuildRegistry::default()),
             processes: Mutex::new(HashMap::new()),
+            probing: Mutex::new(HashSet::new()),
         })
     }
 
@@ -77,6 +82,9 @@ impl ManagedChromiumRuntime {
         ensure_within(&executable, &self.runtime_root, "browser executable")?;
         verify_digest(&executable, &build.sha256)?;
         build.executable_path = executable;
+        // Publisher admission is not proof of extension support. Only the
+        // adapter's own bounded observation may set Supported.
+        build.capabilities.fingerprint_support = FingerprintSupport::Unverified;
 
         self.insert_registered_build(build, activate)
     }
@@ -149,6 +157,23 @@ impl ManagedChromiumRuntime {
             .read()
             .map_err(|_| internal("browser build registry lock is poisoned"))?;
         Ok(registry.by_id.values().cloned().collect())
+    }
+
+    fn set_fingerprint_support(
+        &self,
+        build_id: &BrowserBuildId,
+        support: FingerprintSupport,
+    ) -> PortResult<BrowserBuild> {
+        let mut registry = self
+            .builds
+            .write()
+            .map_err(|_| internal("browser build registry lock is poisoned"))?;
+        let build = registry
+            .by_id
+            .get_mut(build_id)
+            .ok_or_else(|| PortError::not_found("browser build"))?;
+        build.capabilities.fingerprint_support = support;
+        Ok(build.clone())
     }
 
     fn verified_build_for_plan(&self, plan: &ResolvedLaunchPlan) -> PortResult<BrowserBuild> {
@@ -288,6 +313,43 @@ impl ManagedChromiumRuntime {
 }
 
 impl BrowserRuntime for ManagedChromiumRuntime {
+    fn probe_fingerprint_support(
+        &self,
+        build_id: &BrowserBuildId,
+    ) -> PortResult<FingerprintProbeResult> {
+        let _slot = fingerprint_probe::ProbeSlot::acquire(&self.probing, build_id)?;
+        // Clear earlier success before any operation which can fail, including
+        // digest checks or process creation. A failed recheck never keeps it.
+        let build = self.set_fingerprint_support(build_id, FingerprintSupport::Unverified)?;
+        let observation = (|| {
+            if build.trust != RuntimeTrust::Verified {
+                return Err(PortError::new(
+                    PortErrorKind::RuntimeUntrusted,
+                    "browser runtime trust was revoked",
+                ));
+            }
+            verify_digest(&build.executable_path, &build.sha256)?;
+            let result = fingerprint_probe::run(&build, &self.profile_root);
+            // Recheck even when browser execution failed; a changing binary
+            // must never gain a capability result from an older executable.
+            verify_digest(&build.executable_path, &build.sha256)?;
+            result
+        })();
+        match observation {
+            Ok(observation) => {
+                let build = self.set_fingerprint_support(build_id, observation.support)?;
+                Ok(FingerprintProbeResult {
+                    build,
+                    detail: observation.detail,
+                })
+            }
+            Err(error) => {
+                self.set_fingerprint_support(build_id, FingerprintSupport::Unsupported)?;
+                Err(error)
+            }
+        }
+    }
+
     fn list_builds(&self) -> PortResult<Vec<BrowserBuild>> {
         self.installed_builds()
     }
@@ -314,7 +376,35 @@ impl BrowserRuntime for ManagedChromiumRuntime {
     fn launch(&self, plan: &ResolvedLaunchPlan) -> PortResult<BrowserProcess> {
         plan.validate()
             .map_err(|error| invalid_data(error.to_string()))?;
+        let loads_extension = plan
+            .arguments
+            .iter()
+            .any(|argument| matches!(argument, LaunchArgument::LoadExtension(_)));
+        // Serialize the short admission/spawn step against probe admission,
+        // so a Supported snapshot cannot outlive a concurrent re-probe.
+        let fingerprint_gate = if loads_extension {
+            Some(
+                self.probing
+                    .lock()
+                    .map_err(|_| internal("fingerprint probe lock is poisoned"))?,
+            )
+        } else {
+            None
+        };
         let build = self.verified_build_for_plan(plan)?;
+        // A stale or caller-forged launch-plan capability cannot bypass the
+        // registry. Fail before touching the persisted profile's Preferences.
+        if loads_extension
+            && (build.capabilities.fingerprint_support != FingerprintSupport::Supported
+                || fingerprint_gate
+                    .as_ref()
+                    .is_some_and(|active| active.contains(&build.id)))
+        {
+            return Err(PortError::new(
+                PortErrorKind::CapabilityUnsupported,
+                "所选运行时未通过指纹扩展检测；可使用系统原生模式，不能启动 SeedableNoise",
+            ));
+        }
         let user_data_dir = self.prepare_profile(plan)?;
         let arguments = Self::render_arguments(plan, &user_data_dir)?;
 
@@ -693,6 +783,7 @@ mod tests {
                 supports_proxy: true,
                 supports_webrtc_policy: false,
                 supports_devtools_pipe: false,
+                fingerprint_support: FingerprintSupport::Unverified,
             },
             warnings: Vec::new(),
             plan_hash: "a".repeat(64),
@@ -861,6 +952,178 @@ mod tests {
                 .id,
             second_id
         );
+    }
+
+    #[test]
+    fn registration_cannot_claim_fingerprint_support_without_an_observation() {
+        let root = temp_root("fake-support");
+        let runtime_dir = root.join("runtime");
+        let profile_dir = root.join("profiles");
+        fs::create_dir(&runtime_dir).unwrap();
+        let executable = runtime_dir.join("chrome.exe");
+        let contents = b"test runtime, never executed";
+        fs::write(&executable, contents).unwrap();
+        let runtime = ManagedChromiumRuntime::new(&runtime_dir, &profile_dir).unwrap();
+        let mut build = sample_build("build-1", executable, contents, BrowserChannel::Stable);
+        build.capabilities.fingerprint_support = FingerprintSupport::Supported;
+        runtime.register_build(build, true).unwrap();
+        let registered = runtime
+            .resolve_build(&BrowserBuildSelector::Channel(BrowserChannel::Stable))
+            .unwrap();
+        assert_eq!(
+            registered.capabilities.fingerprint_support,
+            FingerprintSupport::Unverified
+        );
+    }
+
+    #[test]
+    fn unsupported_extension_launch_fails_before_profile_writes_even_with_forged_plan_support() {
+        let root = temp_root("extension-gate");
+        let runtime_dir = root.join("runtime");
+        let profile_dir = root.join("profiles");
+        fs::create_dir(&runtime_dir).unwrap();
+        let executable = runtime_dir.join("chrome.exe");
+        let contents = b"test runtime, never executed";
+        fs::write(&executable, contents).unwrap();
+        let runtime = ManagedChromiumRuntime::new(&runtime_dir, &profile_dir).unwrap();
+        runtime
+            .register_build(
+                sample_build(
+                    "build-1",
+                    executable.clone(),
+                    contents,
+                    BrowserChannel::Stable,
+                ),
+                true,
+            )
+            .unwrap();
+        let mut plan = sample_plan(executable, &profile_dir.canonicalize().unwrap());
+        plan.capabilities.fingerprint_support = FingerprintSupport::Supported;
+        plan.arguments
+            .push(LaunchArgument::LoadExtension(root.join("extensions")));
+        for state in [
+            FingerprintSupport::Unverified,
+            FingerprintSupport::Unsupported,
+        ] {
+            runtime
+                .set_fingerprint_support(&BrowserBuildId::new("build-1").unwrap(), state)
+                .unwrap();
+            assert_eq!(
+                runtime.launch(&plan).unwrap_err().kind,
+                PortErrorKind::CapabilityUnsupported
+            );
+            assert!(!plan.user_data_dir.exists());
+            assert!(runtime.processes.lock().unwrap().is_empty());
+        }
+        let id = BrowserBuildId::new("build-1").unwrap();
+        runtime
+            .set_fingerprint_support(&id, FingerprintSupport::Supported)
+            .unwrap();
+        runtime.probing.lock().unwrap().insert(id.clone());
+        assert_eq!(
+            runtime.launch(&plan).unwrap_err().kind,
+            PortErrorKind::CapabilityUnsupported
+        );
+        assert!(!plan.user_data_dir.exists());
+        runtime.probing.lock().unwrap().remove(&id);
+    }
+
+    #[test]
+    fn failed_probe_clears_previous_success_and_does_not_keep_a_busy_slot() {
+        let root = temp_root("probe-digest");
+        let runtime_dir = root.join("runtime");
+        let profile_dir = root.join("profiles");
+        fs::create_dir(&runtime_dir).unwrap();
+        let executable = runtime_dir.join("chrome.exe");
+        let contents = b"test runtime, never executed";
+        fs::write(&executable, contents).unwrap();
+        let runtime = ManagedChromiumRuntime::new(&runtime_dir, &profile_dir).unwrap();
+        let build = sample_build(
+            "build-1",
+            executable.clone(),
+            contents,
+            BrowserChannel::Stable,
+        );
+        let id = build.id.clone();
+        runtime.register_build(build, true).unwrap();
+        runtime
+            .set_fingerprint_support(&id, FingerprintSupport::Supported)
+            .unwrap();
+        fs::write(&executable, b"changed after registration").unwrap();
+        assert_eq!(
+            runtime.probe_fingerprint_support(&id).unwrap_err().kind,
+            PortErrorKind::RuntimeUntrusted
+        );
+        let build = runtime
+            .resolve_build(&BrowserBuildSelector::Pinned(id.clone()))
+            .unwrap();
+        assert_eq!(
+            build.capabilities.fingerprint_support,
+            FingerprintSupport::Unsupported
+        );
+        assert!(runtime.probing.lock().unwrap().is_empty());
+        assert!(fs::read_dir(&profile_dir).unwrap().next().is_none());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "starts an isolated signed headless Chrome against localhost"]
+    fn real_signed_chrome_fingerprint_probe() {
+        let executable = PathBuf::from(r"C:\Program Files\Google\Chrome\Application\chrome.exe");
+        let runtime_root = executable.parent().unwrap();
+        let publisher = verify_authenticode_publisher(&executable, &["Google LLC"]).unwrap();
+        let version = fs::read_dir(runtime_root)
+            .unwrap()
+            .filter_map(Result::ok)
+            .filter_map(|entry| entry.file_name().into_string().ok())
+            .filter_map(|name| {
+                let key = name
+                    .split('.')
+                    .map(str::parse::<u32>)
+                    .collect::<Result<Vec<_>, _>>()
+                    .ok()?;
+                (key.len() == 4).then_some((key, name))
+            })
+            .max_by(|left, right| left.0.cmp(&right.0))
+            .unwrap()
+            .1;
+        let scratch = temp_root("real-fingerprint-probe");
+        let profiles = scratch.join("profiles");
+        let runtime = ManagedChromiumRuntime::new(runtime_root, &profiles).unwrap();
+        let id = BrowserBuildId::new("real-chrome-probe").unwrap();
+        runtime
+            .register_build_with_current_digest(
+                BrowserBuild {
+                    id: id.clone(),
+                    provider: "Google Chrome".to_owned(),
+                    version,
+                    channel: BrowserChannel::Stable,
+                    executable_path: executable,
+                    sha256: "0".repeat(64),
+                    publisher,
+                    trust: RuntimeTrust::Verified,
+                    capabilities: BrowserCapabilities::default(),
+                    installed_at_ms: now_ms(),
+                },
+                true,
+            )
+            .unwrap();
+        let result = runtime.probe_fingerprint_support(&id).unwrap();
+        println!(
+            "fingerprint support: {:?}; {}",
+            result.build.capabilities.fingerprint_support, result.detail
+        );
+        assert_ne!(
+            result.build.capabilities.fingerprint_support,
+            FingerprintSupport::Unverified
+        );
+        assert_eq!(
+            runtime
+                .resolve_build(&BrowserBuildSelector::Pinned(id))
+                .unwrap(),
+            result.build
+        );
+        assert!(fs::read_dir(profiles).unwrap().next().is_none());
     }
 
     // ── v0.2 SeedableNoise render tests ────────────────────────────────────

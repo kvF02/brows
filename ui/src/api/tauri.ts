@@ -6,6 +6,8 @@ import {
   type BackupJob,
   type BrowserRuntime,
   type DiagnosticReport,
+  type FingerprintPreview,
+  type FingerprintPreviewInput,
   type LegacyMigrationInspection,
   type LegacyMigrationRecord,
   type MoreLoginImportResult,
@@ -16,6 +18,7 @@ import {
   type PersonaConfig,
   type ProxyInput,
   type ProxySummary,
+  type RuntimeFingerprintProbeResult,
   type SessionSummary,
   type Settings,
 } from "../types";
@@ -66,20 +69,6 @@ interface ProfileDraftDto {
   locale: { acceptLanguages: string[]; timezone?: string };
   window: { width: number; height: number; startMaximized: boolean };
   startupUrls: string[];
-}
-
-interface FingerprintPreviewDto {
-  effectiveUserAgent: string;
-  effectivePlatform: string;
-  effectiveLanguages: string[];
-  effectiveWindowWidth: number;
-  effectiveWindowHeight: number;
-  effectiveWebglVendor: string;
-  effectiveWebglRenderer: string;
-  hardwareConcurrency: number;
-  deviceMemoryGb: string;
-  declaredOnlyFields: string[];
-  hostSharedFields: string[];
 }
 
 interface ProfileDto extends ProfileDraftDto {
@@ -171,6 +160,7 @@ const handlers = Object.freeze({
   legacyMigrationList: "legacy_migration_list",
   fingerprintPreview: "fingerprint_preview",
   listRuntimes: "list_runtimes",
+  probeRuntimeFingerprint: "probe_runtime_fingerprint",
   backupList: "backup_list",
   backupExport: "backup_export",
   backupImport: "backup_import",
@@ -183,6 +173,7 @@ const prototypeRuntime: BrowserRuntime = {
   channel: "stable",
   trusted: true,
   active: true,
+  fingerprintSupport: "unverified",
 };
 
 export function isTauriRuntime(): boolean {
@@ -224,13 +215,8 @@ export class TauriApiClient implements ApiClient {
     });
   }
 
-  async fingerprintPreview(input: {
-    persona: import("../types").PersonaConfig;
-    acceptLanguages: string[];
-    windowWidth: number;
-    windowHeight: number;
-  }): Promise<FingerprintPreviewDto> {
-    return this.call<FingerprintPreviewDto>(handlers.fingerprintPreview, {
+  async fingerprintPreview(input: FingerprintPreviewInput): Promise<FingerprintPreview> {
+    return this.call<FingerprintPreview>(handlers.fingerprintPreview, {
       request: {
         ...input,
         persona: buildPersonaDto(input.persona),
@@ -248,6 +234,7 @@ export class TauriApiClient implements ApiClient {
       channel: string;
       trusted: boolean;
       active: boolean;
+      fingerprintSupport?: BrowserRuntime["fingerprintSupport"];
     }>;
     return raw.map((r) => ({
       id: r.id,
@@ -256,7 +243,14 @@ export class TauriApiClient implements ApiClient {
       channel: r.channel as BrowserRuntime["channel"],
       trusted: r.trusted,
       active: r.active,
+      fingerprintSupport: r.fingerprintSupport ?? "unverified",
     }));
+  }
+
+  async probeRuntimeFingerprint(runtimeId: string): Promise<RuntimeFingerprintProbeResult> {
+    return this.call<RuntimeFingerprintProbeResult>(handlers.probeRuntimeFingerprint, {
+      request: { runtimeId },
+    });
   }
 
   async inspectLegacyMigration(profileId: string, sourceProfileId: string): Promise<LegacyMigrationInspection> {
@@ -512,6 +506,9 @@ export class TauriApiClient implements ApiClient {
       lastUsedAt: session ? new Date(session.updatedAtMs).toISOString() : undefined,
       diagnostic: { overall: "not-run", issueCount: 0 },
       persona: personaFromDto(dto.persona),
+      acceptLanguages: [...dto.locale.acceptLanguages],
+      windowWidth: dto.window.width,
+      windowHeight: dto.window.height,
     };
   }
 
@@ -593,8 +590,8 @@ function draftFromInput(input: ProfileInput): ProfileDraftDto {
     proxyId: input.proxyId,
     browser: { mode: "pinned", value: { buildId: input.runtimeId } },
     persona: buildPersonaDto(input.persona) as ProfileDraftDto extends never ? never : ProfileDraftDto["persona"],
-    locale: { acceptLanguages: ["zh-CN", "zh"] },
-    window: { width: 1280, height: 800, startMaximized: false },
+    locale: { acceptLanguages: [...(input.acceptLanguages ?? ["zh-CN", "zh"])] },
+    window: { width: input.windowWidth ?? 1280, height: input.windowHeight ?? 800, startMaximized: false },
     startupUrls: [],
   };
 }
@@ -665,9 +662,18 @@ function mergeDraft(dto: ProfileDto, changes: Partial<ProfileInput>): ProfileDra
     browser: changes.runtimeId
       ? { mode: "pinned", value: { buildId: changes.runtimeId } }
       : dto.browser,
-    persona: changes.persona ? buildPersonaDto(changes.persona) : dto.persona,
-    locale: dto.locale,
-    window: dto.window,
+    persona: Object.prototype.hasOwnProperty.call(changes, "persona")
+      ? buildPersonaDto(changes.persona)
+      : dto.persona,
+    locale: {
+      ...dto.locale,
+      acceptLanguages: [...(changes.acceptLanguages ?? dto.locale.acceptLanguages)],
+    },
+    window: {
+      ...dto.window,
+      width: changes.windowWidth ?? dto.window.width,
+      height: changes.windowHeight ?? dto.window.height,
+    },
     startupUrls: [...dto.startupUrls],
   };
 }

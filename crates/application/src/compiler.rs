@@ -4,8 +4,8 @@ use crate::{
 };
 use brows_contracts::ErrorCode;
 use brows_domain::{
-    BrowserPreferences, LaunchArgument, LaunchWarning, ProfileSpec, ProxyLaunchBinding,
-    ProxyScheme, ResolvedLaunchPlan, RuntimeTrust, SessionId,
+    BrowserPreferences, FingerprintPersona, FingerprintSupport, LaunchArgument, LaunchWarning,
+    ProfileSpec, ProxyLaunchBinding, ProxyScheme, ResolvedLaunchPlan, RuntimeTrust, SessionId,
 };
 use std::{path::PathBuf, sync::Arc};
 
@@ -60,6 +60,12 @@ impl LaunchPlanCompiler {
         session_id: &SessionId,
     ) -> ApplicationResult<PreparedLaunch> {
         profile.validate()?;
+        if profile.locale.timezone.is_some() {
+            return Err(ApplicationError::new(
+                ErrorCode::CapabilityUnsupported,
+                "timezone override is not implemented; use the host timezone",
+            ));
+        }
         if profile.archived {
             return Err(ApplicationError::new(
                 ErrorCode::InvalidProfileState,
@@ -86,9 +92,18 @@ impl LaunchPlanCompiler {
             ));
         }
 
-        let fingerprint =
-            self.fingerprints
-                .compile_for_profile(&profile.id, &profile.persona, &build)?;
+        if matches!(profile.persona, FingerprintPersona::SeedableNoise(_))
+            && build.capabilities.fingerprint_support != FingerprintSupport::Supported
+        {
+            return Err(ApplicationError::new(
+                ErrorCode::CapabilityUnsupported,
+                match build.capabilities.fingerprint_support {
+                    FingerprintSupport::Unsupported => "所选浏览器未能加载指纹扩展，SeedableNoise 已阻止启动。可切换系统原生，或选择通过指纹能力检测的可信运行时。",
+                    _ => "所选浏览器的指纹能力尚未验证。请先在设置中检测指纹能力；系统原生环境不受此限制。",
+                },
+            ));
+        }
+        let fingerprint = self.fingerprints.compile_profile(profile, &build)?;
         // v0.1: fingerprint arguments must be empty.
         // v0.2+: accept typed fingerprint arguments from SeedableNoiseFingerprintRuntime.
         // All LaunchArgument variants are allowlisted in the domain, so this is safe.

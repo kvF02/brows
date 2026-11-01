@@ -7,9 +7,10 @@ use crate::{persona_fingerprint::PersonaFingerprint, stealth_template};
 use brows_domain::{
     BrowserBuild, BrowserBuildId, BrowserBuildSelector, BrowserChannel, BrowserPreferences,
     DiagnosticCheck, DiagnosticOverall, DiagnosticReport, DiagnosticScope, DiagnosticStatus,
-    EnvironmentPreset, EnvironmentPresetRef, FingerprintPersona, LaunchArgument, LaunchWarning,
-    PresetId, ProfileId, ProfileSpec, ProxyId, ProxyLaunchBinding, ProxySpec, ResolvedLaunchPlan,
-    Revision, SecretRef, SeedableNoisePersona, SessionId,
+    EnvironmentPreset, EnvironmentPresetRef, FingerprintPersona, FingerprintSupport,
+    LaunchArgument, LaunchWarning, LocaleConfig, PresetId, ProfileId, ProfileSpec, ProxyId,
+    ProxyLaunchBinding, ProxySpec, ResolvedLaunchPlan, Revision, SecretRef, SeedableNoisePersona,
+    SessionId, WindowConfig,
 };
 use std::{
     collections::BTreeMap,
@@ -483,6 +484,45 @@ pub struct SeedableNoiseFingerprintRuntime {
     profile_id: ProfileId,
 }
 
+/// Creates the production MAIN-world script for a bounded local capability
+/// probe. Sentinels intentionally differ from normal physical devices; this
+/// never changes a persisted profile and never claims a real device identity.
+pub fn materialize_fingerprint_probe(
+    extension_root: &std::path::Path,
+    profile_id: &ProfileId,
+    runtime_version: &str,
+) -> PortResult<PathBuf> {
+    let persona = SeedableNoisePersona {
+        seed: "brows-local-fingerprint-probe-v1".to_owned(),
+        platform: brows_domain::PlatformKind::Windows,
+        hardware_concurrency: 3,
+        device_memory: brows_domain::DeviceMemoryGb::Half,
+        touch_points: 0,
+        screen: brows_domain::ScreenConfig {
+            width: 1777,
+            height: 1111,
+            color_depth: 24,
+            device_scale_factor_hundredths: 100,
+        },
+        webgl: brows_domain::WebGLProfile {
+            vendor: "Google Inc. (Intel)".to_owned(),
+            unmasked_renderer:
+                "ANGLE (Intel, Intel(R) UHD Graphics 630 Direct3D11 vs_5_0 ps_5_0, D3D11)"
+                    .to_owned(),
+        },
+        spoof_canvas: true,
+        spoof_audio: true,
+    };
+    let fp = PersonaFingerprint::derive(&persona, runtime_version)
+        .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
+    let locale = LocaleConfig {
+        accept_languages: vec!["pl-PL".to_owned(), "pl".to_owned()],
+        timezone: None,
+    };
+    SeedableNoiseFingerprintRuntime::new(extension_root, profile_id.clone())?
+        .materialize_extension(profile_id, &persona, &fp, &locale)
+}
+
 impl SeedableNoiseFingerprintRuntime {
     pub fn new(extension_root: impl Into<PathBuf>, profile_id: ProfileId) -> PortResult<Self> {
         let extension_root = extension_root.into();
@@ -512,24 +552,15 @@ impl SeedableNoiseFingerprintRuntime {
         profile_id: &ProfileId,
         persona: &SeedableNoisePersona,
         fp: &PersonaFingerprint,
+        locale: &LocaleConfig,
     ) -> PortResult<PathBuf> {
-        let seed_hash = digest_hex(persona.seed.as_bytes());
         let profile_hash = digest_hex(profile_id.as_str().as_bytes());
-        let dir = self
-            .extension_root
-            .join(&profile_hash[..16])
-            .join(&seed_hash[..16]);
-        fs::create_dir_all(&dir).map_err(|error| {
-            PortError::new(
-                PortErrorKind::Internal,
-                format!("failed to create extension directory: {error}"),
-            )
-        })?;
         let persona_json = serde_json::json!({
             "seed": persona.seed,
             "platform": persona.platform_string_for_js(),
             "hardware_concurrency": fp.hardware_concurrency,
-            "device_memory": fp.device_memory_gb,
+            "device_memory": fp.device_memory_number(),
+            "languages": locale.accept_languages,
             "touch_points": fp.touch_points,
             "screen_width": persona.screen.width,
             "screen_height": persona.screen.height,
@@ -546,36 +577,79 @@ impl SeedableNoiseFingerprintRuntime {
             "webrtc_policy": "none",
         })
         .to_string();
-        fs::write(
-            dir.join("manifest.json"),
-            stealth_template::render_manifest(profile_id.as_str()),
-        )
-        .map_err(|error| {
+        let content = stealth_template::render_content(&persona_json);
+        let manifest = stealth_template::render_manifest(profile_id.as_str());
+        let background = stealth_template::render_background();
+        let artifact_hash = digest_hex(
+            format!("{manifest}\0{content}\0{background}\0{}", fp.user_agent,).as_bytes(),
+        );
+        let dir = self.extension_root.join(profile_hash).join(artifact_hash);
+        fs::create_dir_all(&dir).map_err(|error| {
             PortError::new(
                 PortErrorKind::Internal,
-                format!("failed to write manifest: {error}"),
+                format!("failed to create extension directory: {error}"),
             )
         })?;
-        fs::write(
-            dir.join("content.js"),
-            stealth_template::render_content(&persona_json),
-        )
-        .map_err(|error| {
-            PortError::new(
-                PortErrorKind::Internal,
-                format!("failed to write content.js: {error}"),
-            )
-        })?;
-        fs::write(
-            dir.join("background.js"),
-            stealth_template::render_background(),
-        )
-        .map_err(|error| {
-            PortError::new(
-                PortErrorKind::Internal,
-                format!("failed to write background.js: {error}"),
-            )
-        })?;
+        // Never overwrite a loaded artifact. Existence alone cannot certify
+        // integrity: a damaged file must fail closed, not silently be reused.
+        for (name, expected) in [
+            ("manifest.json", manifest),
+            ("content.js", content),
+            ("background.js", background),
+        ] {
+            let path = dir.join(name);
+            match fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    file.write_all(expected.as_bytes()).map_err(|error| {
+                        PortError::new(
+                            PortErrorKind::Internal,
+                            format!("failed to materialize {name}: {error}"),
+                        )
+                    })?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                    let metadata = fs::symlink_metadata(&path).map_err(|error| {
+                        PortError::new(
+                            PortErrorKind::InvalidData,
+                            format!("cannot inspect fingerprint artifact: {error}"),
+                        )
+                    })?;
+                    #[cfg(windows)]
+                    let linked = {
+                        use std::os::windows::fs::MetadataExt;
+                        metadata.file_attributes() & 0x400 != 0
+                    };
+                    #[cfg(not(windows))]
+                    let linked = metadata.file_type().is_symlink();
+                    if linked
+                        || !metadata.is_file()
+                        || metadata.len() != expected.len() as u64
+                        || fs::read(&path).map_err(|error| {
+                            PortError::new(
+                                PortErrorKind::InvalidData,
+                                format!("cannot verify fingerprint artifact: {error}"),
+                            )
+                        })? != expected.as_bytes()
+                    {
+                        return Err(PortError::new(
+                            PortErrorKind::InvalidData,
+                            "指纹扩展产物完整性检查失败，请检查本地扩展目录；不会覆盖现有文件",
+                        ));
+                    }
+                }
+                Err(error) => {
+                    return Err(PortError::new(
+                        PortErrorKind::Internal,
+                        format!("failed to create fingerprint artifact: {error}"),
+                    ))
+                }
+            }
+        }
         Ok(dir)
     }
 }
@@ -596,6 +670,19 @@ impl FingerprintRuntimeRouter {
 }
 
 impl FingerprintRuntime for FingerprintRuntimeRouter {
+    fn compile_profile(
+        &self,
+        profile: &ProfileSpec,
+        build: &BrowserBuild,
+    ) -> PortResult<FingerprintContribution> {
+        match &profile.persona {
+            FingerprintPersona::SystemNative(_) => {
+                SystemNativeFingerprintRuntime.compile_profile(profile, build)
+            }
+            FingerprintPersona::SeedableNoise(_) => self.seedable.compile_profile(profile, build),
+        }
+    }
+
     fn compile(
         &self,
         persona: &FingerprintPersona,
@@ -627,12 +714,32 @@ impl FingerprintRuntime for FingerprintRuntimeRouter {
 }
 
 impl FingerprintRuntime for SeedableNoiseFingerprintRuntime {
+    fn compile_profile(
+        &self,
+        profile: &ProfileSpec,
+        build: &BrowserBuild,
+    ) -> PortResult<FingerprintContribution> {
+        self.compile_inner(
+            &profile.id,
+            &profile.persona,
+            build,
+            &profile.locale,
+            &profile.window,
+        )
+    }
+
     fn compile(
         &self,
         persona: &FingerprintPersona,
         build: &BrowserBuild,
     ) -> PortResult<FingerprintContribution> {
-        self.compile_inner(&self.profile_id, persona, build)
+        self.compile_inner(
+            &self.profile_id,
+            persona,
+            build,
+            &LocaleConfig::default(),
+            &WindowConfig::default(),
+        )
     }
 
     fn compile_for_profile(
@@ -641,7 +748,13 @@ impl FingerprintRuntime for SeedableNoiseFingerprintRuntime {
         persona: &FingerprintPersona,
         build: &BrowserBuild,
     ) -> PortResult<FingerprintContribution> {
-        self.compile_inner(profile_id, persona, build)
+        self.compile_inner(
+            profile_id,
+            persona,
+            build,
+            &LocaleConfig::default(),
+            &WindowConfig::default(),
+        )
     }
 }
 
@@ -651,6 +764,8 @@ impl SeedableNoiseFingerprintRuntime {
         profile_id: &ProfileId,
         persona: &FingerprintPersona,
         build: &BrowserBuild,
+        locale: &LocaleConfig,
+        window: &WindowConfig,
     ) -> PortResult<FingerprintContribution> {
         let FingerprintPersona::SeedableNoise(p) = persona else {
             return Err(PortError::new(
@@ -658,21 +773,38 @@ impl SeedableNoiseFingerprintRuntime {
                 "SeedableNoiseFingerprintRuntime requires a SeedableNoise persona",
             ));
         };
-        let fp = PersonaFingerprint::derive(p)
+        if build.capabilities.fingerprint_support != FingerprintSupport::Supported {
+            return Err(PortError::new(
+                PortErrorKind::CapabilityUnsupported,
+                "所选运行时尚未通过指纹扩展能力检测，不能启动 SeedableNoise",
+            ));
+        }
+        locale
+            .validate()
+            .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
+        window
+            .validate()
+            .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
+        if locale.timezone.is_some() {
+            return Err(PortError::new(
+                PortErrorKind::CapabilityUnsupported,
+                "timezone override is not implemented",
+            ));
+        }
+        let fp = PersonaFingerprint::derive(p, &build.version)
             .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
         // Keep the UA major aligned with the concrete Chromium binary. A
         // random major from a global pool would be trivially inconsistent with
         // the runtime selected by the profile.
-        let user_agent = fp.user_agent_for_chromium(&build.version);
-        let ext_dir = self.materialize_extension(profile_id, p, &fp)?;
+        let ext_dir = self.materialize_extension(profile_id, p, &fp, locale)?;
 
         let mut warnings = Vec::new();
         let arguments = vec![
-            LaunchArgument::UserAgentOverride(user_agent),
+            LaunchArgument::UserAgentOverride(fp.user_agent),
             LaunchArgument::ForceDeviceScaleFactor(p.screen.device_scale_factor_hundredths),
             LaunchArgument::WindowSize {
-                width: p.screen.width,
-                height: p.screen.height,
+                width: window.width,
+                height: window.height,
             },
             LaunchArgument::DisableBlinkFeatures(vec!["AutomationControlled".to_owned()]),
             LaunchArgument::LoadExtension(ext_dir),
@@ -682,15 +814,14 @@ impl SeedableNoiseFingerprintRuntime {
         if p.spoof_canvas {
             warnings.push(LaunchWarning::DeclaredFingerprintOnly {
                 field: "canvas".to_owned(),
-                reason:
-                    "JS-level read perturbation only; pixel-level canvas hash detectable by CreepJS"
-                        .to_owned(),
+                reason: "JS read/export perturbation only; not native rendering or worker coverage"
+                    .to_owned(),
             });
         }
         if p.spoof_audio {
             warnings.push(LaunchWarning::DeclaredFingerprintOnly {
                 field: "audio".to_owned(),
-                reason: "JS-level AudioContext stub only; sample-rate hash detectable by CreepJS"
+                reason: "offline rendered-buffer perturbation only; audio devices and sample rate remain native"
                     .to_owned(),
             });
         }
@@ -730,7 +861,10 @@ mod seedable_noise_tests {
             sha256: "0".repeat(64),
             publisher: "Google LLC".to_owned(),
             trust: RuntimeTrust::Verified,
-            capabilities: Default::default(),
+            capabilities: brows_domain::BrowserCapabilities {
+                fingerprint_support: FingerprintSupport::Supported,
+                ..Default::default()
+            },
             installed_at_ms: 1,
         }
     }
@@ -915,6 +1049,196 @@ mod seedable_noise_tests {
         assert!(rendered.contains("\"seed\":\"hello\""));
         assert!(rendered.contains("platform"));
         assert!(!rendered.contains("{{PERSONA_JSON}}"));
+    }
+
+    #[test]
+    fn profile_configuration_reaches_extension_and_window_arguments() {
+        let runtime = SeedableNoiseFingerprintRuntime::new(
+            std::env::temp_dir().join("brows-fingerprint-test"),
+            ProfileId::new("configuration").unwrap(),
+        )
+        .unwrap();
+        let persona = FingerprintPersona::SeedableNoise(sample_persona("shared-config"));
+        let locale = LocaleConfig {
+            accept_languages: vec!["zh-CN".to_owned(), "zh".to_owned()],
+            timezone: None,
+        };
+        let window = WindowConfig {
+            width: 1280,
+            height: 800,
+            start_maximized: false,
+        };
+        let out = runtime
+            .compile_inner(
+                &runtime.profile_id,
+                &persona,
+                &verified_build(),
+                &locale,
+                &window,
+            )
+            .unwrap();
+        assert!(out.arguments.contains(&LaunchArgument::WindowSize {
+            width: 1280,
+            height: 800
+        }));
+        assert!(!out.arguments.contains(&LaunchArgument::WindowSize {
+            width: 1920,
+            height: 1080
+        }));
+        let dir = out
+            .arguments
+            .iter()
+            .find_map(|arg| match arg {
+                LaunchArgument::LoadExtension(dir) => Some(dir),
+                _ => None,
+            })
+            .unwrap();
+        let content = fs::read_to_string(dir.join("content.js")).unwrap();
+        assert!(content.contains(r#""device_memory":8.0"#));
+        assert!(!content.contains(r#""device_memory":"8""#));
+        assert!(content.contains(r#""languages":["zh-CN","zh"]"#));
+    }
+
+    #[test]
+    fn changing_configuration_or_runtime_never_overwrites_previous_extension() {
+        let runtime = SeedableNoiseFingerprintRuntime::new(
+            std::env::temp_dir().join("brows-fingerprint-test"),
+            ProfileId::new("immutable-config").unwrap(),
+        )
+        .unwrap();
+        let mut persona = FingerprintPersona::SeedableNoise(sample_persona("unchanged-seed"));
+        let extension = |out: FingerprintContribution| {
+            out.arguments
+                .into_iter()
+                .find_map(|arg| match arg {
+                    LaunchArgument::LoadExtension(dir) => Some(dir),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        let first = extension(runtime.compile(&persona, &verified_build()).unwrap());
+        let first_content = fs::read_to_string(first.join("content.js")).unwrap();
+        if let FingerprintPersona::SeedableNoise(ref mut p) = persona {
+            p.hardware_concurrency = 4;
+        }
+        let changed = extension(runtime.compile(&persona, &verified_build()).unwrap());
+        assert_ne!(first, changed);
+        assert_eq!(
+            first_content,
+            fs::read_to_string(first.join("content.js")).unwrap()
+        );
+        let mut build = verified_build();
+        build.version = "151.1.2.3".to_owned();
+        let newer = extension(runtime.compile(&persona, &build).unwrap());
+        assert_ne!(changed, newer);
+        assert_eq!(newer, extension(runtime.compile(&persona, &build).unwrap()));
+        let locale = LocaleConfig {
+            accept_languages: vec!["ja-JP".to_owned()],
+            timezone: None,
+        };
+        let localized = extension(
+            runtime
+                .compile_inner(
+                    &runtime.profile_id,
+                    &persona,
+                    &build,
+                    &locale,
+                    &WindowConfig::default(),
+                )
+                .unwrap(),
+        );
+        assert_ne!(localized, newer);
+    }
+
+    #[test]
+    fn unsupported_timezone_and_invalid_version_fail_explicitly() {
+        let runtime = SeedableNoiseFingerprintRuntime::new(
+            std::env::temp_dir(),
+            ProfileId::new("validation").unwrap(),
+        )
+        .unwrap();
+        let persona = FingerprintPersona::SeedableNoise(sample_persona("valid"));
+        let locale = LocaleConfig {
+            accept_languages: vec!["en".to_owned()],
+            timezone: Some("Europe/London".to_owned()),
+        };
+        assert_eq!(
+            runtime
+                .compile_inner(
+                    &runtime.profile_id,
+                    &persona,
+                    &verified_build(),
+                    &locale,
+                    &WindowConfig::default()
+                )
+                .unwrap_err()
+                .kind,
+            PortErrorKind::CapabilityUnsupported
+        );
+        let mut build = verified_build();
+        build.version = "installed".to_owned();
+        assert_eq!(
+            runtime.compile(&persona, &build).unwrap_err().kind,
+            PortErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn seedable_requires_observed_runtime_support_not_publisher_trust() {
+        let runtime = SeedableNoiseFingerprintRuntime::new(
+            std::env::temp_dir(),
+            ProfileId::new("capability-gate").unwrap(),
+        )
+        .unwrap();
+        let persona = FingerprintPersona::SeedableNoise(sample_persona("gate"));
+        for support in [
+            FingerprintSupport::Unverified,
+            FingerprintSupport::Unsupported,
+        ] {
+            let mut build = verified_build();
+            build.capabilities.fingerprint_support = support;
+            assert_eq!(build.trust, RuntimeTrust::Verified);
+            assert_eq!(
+                runtime.compile(&persona, &build).unwrap_err().kind,
+                PortErrorKind::CapabilityUnsupported
+            );
+        }
+    }
+
+    #[test]
+    fn materialization_rejects_corrupted_artifacts_without_overwriting_them() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "brows-artifact-integrity-{}-{unique}",
+            std::process::id()
+        ));
+        let runtime =
+            SeedableNoiseFingerprintRuntime::new(&root, ProfileId::new("integrity").unwrap())
+                .unwrap();
+        let persona = FingerprintPersona::SeedableNoise(sample_persona("integrity"));
+        let out = runtime.compile(&persona, &verified_build()).unwrap();
+        let dir = out
+            .arguments
+            .iter()
+            .find_map(|arg| match arg {
+                LaunchArgument::LoadExtension(dir) => Some(dir),
+                _ => None,
+            })
+            .unwrap();
+        let damaged = dir.join("content.js");
+        fs::write(&damaged, b"damaged").unwrap();
+        assert_eq!(
+            runtime
+                .compile(&persona, &verified_build())
+                .unwrap_err()
+                .kind,
+            PortErrorKind::InvalidData
+        );
+        assert_eq!(fs::read(&damaged).unwrap(), b"damaged");
+        fs::remove_dir_all(root).unwrap();
     }
 }
 

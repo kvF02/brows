@@ -6,6 +6,8 @@ import {
   type BackupJob,
   type BrowserRuntime,
   type DiagnosticReport,
+  type FingerprintPreview,
+  type FingerprintPreviewInput,
   type LegacyMigrationInspection,
   type LegacyMigrationRecord,
   type MoreLoginImportResult,
@@ -14,6 +16,7 @@ import {
   type ProfileInput,
   type ProxyInput,
   type ProxySummary,
+  type RuntimeFingerprintProbeResult,
   type Settings,
   type SessionSummary,
 } from "../types";
@@ -35,6 +38,7 @@ const runtimes: BrowserRuntime[] = [
     channel: "stable",
     trusted: true,
     active: true,
+    fingerprintSupport: "unverified",
     sha256: "演示数据：接入运行时管理器后显示",
   },
 ];
@@ -68,6 +72,10 @@ function makeProfile(
     revision: 1,
     createdAt: now(),
     diagnostic: { overall: "not-run", issueCount: 0 },
+    persona: { kind: "system_native" },
+    acceptLanguages: ["zh-CN", "zh"],
+    windowWidth: 1280,
+    windowHeight: 800,
   };
 }
 
@@ -88,39 +96,34 @@ export class MockApiClient implements ApiClient {
     throw new ApiError("CAPABILITY_UNSUPPORTED", "MoreLogin 导入仅在桌面版中可用");
   }
 
-  async fingerprintPreview(input: {
-    persona: { kind?: string; seedable?: { seed?: string } };
-    acceptLanguages: string[];
-    windowWidth: number;
-    windowHeight: number;
-  }): Promise<{
-    effectiveUserAgent: string;
-    effectivePlatform: string;
-    effectiveLanguages: string[];
-    effectiveWindowWidth: number;
-    effectiveWindowHeight: number;
-    effectiveWebglVendor: string;
-    effectiveWebglRenderer: string;
-    hardwareConcurrency: number;
-    deviceMemoryGb: string;
-    declaredOnlyFields: string[];
-    hostSharedFields: string[];
-  }> {
-    // Browser-only preview: mock returns a deterministic but clearly fake result.
-    const seed = input.persona.seedable?.seed ?? "mock";
+  async fingerprintPreview(input: FingerprintPreviewInput): Promise<FingerprintPreview> {
+    // Browser-only preview is simulation, never evidence of effective injection.
+    const runtime = runtimes.find((candidate) => candidate.id === input.runtimeId);
+    if (!runtime) throw new ApiError("VALIDATION_FAILED", "请选择模拟运行时");
+    const config = input.persona.seedable;
     return {
-      effectiveUserAgent: `Mozilla/5.0 (mock) Chrome/150.0.0.0 Safari/537.36 (seed=${seed})`,
+      runtimeId: runtime.id,
+      runtimeVersion: runtime.version,
+      effectiveUserAgent: "模拟数据：不代表浏览器 User-Agent",
       effectivePlatform: "mock",
-      effectiveLanguages: input.acceptLanguages,
+      effectiveLanguages: [...input.acceptLanguages],
       effectiveWindowWidth: input.windowWidth,
       effectiveWindowHeight: input.windowHeight,
+      effectiveScreenWidth: config?.screenWidth ?? 1920,
+      effectiveScreenHeight: config?.screenHeight ?? 1080,
+      deviceScaleFactorHundredths: Math.round((config?.deviceScaleFactor ?? 1) * 100),
       effectiveWebglVendor: "Mock GPU",
       effectiveWebglRenderer: "Mock Renderer",
-      hardwareConcurrency: 8,
-      deviceMemoryGb: "8",
-      declaredOnlyFields: [],
-      hostSharedFields: [],
+      hardwareConcurrency: config?.hardwareConcurrency ?? 8,
+      deviceMemoryGb: config?.deviceMemory ?? "8",
+      declaredOnlyFields: ["模拟预览，未验证任何覆盖"],
+      hostSharedFields: ["未观测，不能判定主机共享范围"],
+      runtimeWarnings: ["当前为网页版模拟数据，未启动浏览器或加载指纹扩展。请在桌面版验证内核兼容性和页面实际读取结果。"],
     };
+  }
+
+  async probeRuntimeFingerprint(_runtimeId: string): Promise<RuntimeFingerprintProbeResult> {
+    throw new ApiError("CAPABILITY_UNSUPPORTED", "网页版为模拟数据，不能实测浏览器指纹扩展支持。请在桌面版设置中执行检测。");
   }
 
   async importMoreLogin(_sourcePath: string, _rowNumbers: number[] = []): Promise<MoreLoginImportResult> {
@@ -171,6 +174,10 @@ export class MockApiClient implements ApiClient {
       revision: 1,
       createdAt: now(),
       diagnostic: { overall: "not-run", issueCount: 0 },
+      persona: input.persona ?? { kind: "system_native" },
+      acceptLanguages: [...(input.acceptLanguages ?? ["zh-CN", "zh"])],
+      windowWidth: input.windowWidth ?? 1280,
+      windowHeight: input.windowHeight ?? 800,
     };
     this.profiles = [profile, ...this.profiles];
     return { ...profile, tags: [...profile.tags] };
@@ -200,6 +207,10 @@ export class MockApiClient implements ApiClient {
       presetId: source.presetId,
       proxyId: source.proxyId,
       runtimeId: source.runtimeId,
+      persona: source.persona,
+      acceptLanguages: source.acceptLanguages ? [...source.acceptLanguages] : undefined,
+      windowWidth: source.windowWidth,
+      windowHeight: source.windowHeight,
     });
   }
 

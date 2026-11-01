@@ -312,6 +312,7 @@ fn discovered_chrome_build(browser_root: &std::path::Path) -> ApplicationResult<
             supports_proxy: true,
             supports_webrtc_policy: true,
             supports_devtools_pipe: true,
+            fingerprint_support: brows_domain::FingerprintSupport::Unverified,
         },
         installed_at_ms: unix_time_ms(),
     })
@@ -358,6 +359,7 @@ fn prototype_browser_build(data_root: &std::path::Path) -> ApplicationResult<Bro
             supports_proxy: true,
             supports_webrtc_policy: true,
             supports_devtools_pipe: true,
+            fingerprint_support: brows_domain::FingerprintSupport::Unverified,
         },
         installed_at_ms: unix_time_ms(),
     })
@@ -411,6 +413,67 @@ mod tests {
     fn chrome_versions_are_compared_numerically() {
         assert!(chrome_version_key("150.0.1").unwrap() > chrome_version_key("99.9.9").unwrap());
         assert!(chrome_version_key("150.preview").is_none());
+    }
+
+    #[test]
+    #[ignore = "launches an isolated headless signed Chrome capability probe"]
+    fn fingerprint_runtime_real_probe_smoke_test() {
+        let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .canonicalize()
+            .unwrap();
+        let data_root = target.join(format!(
+            "fingerprint-runtime-smoke-{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir(&data_root).unwrap();
+        let state = AppState::production(data_root.clone()).unwrap();
+        let builds = state.browsers.list_builds().unwrap();
+        let build = builds.first().unwrap();
+        assert_eq!(
+            build.capabilities.fingerprint_support,
+            brows_domain::FingerprintSupport::Unverified
+        );
+        let result = state.browsers.probe_fingerprint_support(&build.id).unwrap();
+        assert_ne!(
+            result.build.capabilities.fingerprint_support,
+            brows_domain::FingerprintSupport::Unverified
+        );
+        println!(
+            "{} {}: {:?}; {}",
+            result.build.provider,
+            result.build.version,
+            result.build.capabilities.fingerprint_support,
+            result.detail
+        );
+        assert_eq!(
+            state.browsers.list_builds().unwrap()[0]
+                .capabilities
+                .fingerprint_support,
+            result.build.capabilities.fingerprint_support
+        );
+        assert!(state
+            .profiles
+            .list(ProfileListRequest::default())
+            .unwrap()
+            .is_empty());
+        assert!(state.sessions.list().unwrap().is_empty());
+        assert!(std::fs::read_dir(data_root.join("profiles"))
+            .unwrap()
+            .next()
+            .is_none());
+        drop(state);
+        // Only this test's freshly created, exact workspace-owned directory.
+        let resolved = data_root.canonicalize().unwrap();
+        assert_eq!(resolved.parent(), Some(target.as_path()));
+        let metadata = std::fs::symlink_metadata(&resolved).unwrap();
+        assert!(metadata.is_dir() && !metadata.file_type().is_symlink());
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            assert_eq!(metadata.file_attributes() & 0x400, 0);
+        }
+        std::fs::remove_dir_all(resolved).unwrap();
     }
 
     #[test]

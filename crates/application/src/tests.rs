@@ -100,6 +100,7 @@ fn verified_build() -> BrowserBuild {
             supports_proxy: true,
             supports_webrtc_policy: true,
             supports_devtools_pipe: true,
+            fingerprint_support: brows_domain::FingerprintSupport::Supported,
         },
         installed_at_ms: 1,
     }
@@ -273,6 +274,100 @@ fn session_capacity_queues_and_stop_promotes_fifo() {
     assert_eq!(
         plans[0].profile_id.as_str(),
         second_profile_id(&sessions, &second_session)
+    );
+}
+
+#[test]
+fn compiler_passes_the_whole_profile_to_fingerprint_runtime() {
+    use brows_domain::{
+        DeviceMemoryGb, FingerprintPersona, LaunchArgument, PlatformKind, ScreenConfig,
+        SeedableNoisePersona, WebGLProfile,
+    };
+    let harness = Harness::new(1);
+    let created = harness.create_profile("Fingerprint");
+    let id: ProfileId = created.id.try_into().unwrap();
+    let mut profile = harness.profiles.get(&id).unwrap();
+    profile.locale.accept_languages = vec!["ja-JP".to_owned(), "ja".to_owned()];
+    profile.window.width = 1200;
+    profile.window.height = 700;
+    profile.persona = FingerprintPersona::SeedableNoise(SeedableNoisePersona {
+        seed: "compiler-flow".to_owned(),
+        platform: PlatformKind::Windows,
+        hardware_concurrency: 4,
+        device_memory: DeviceMemoryGb::Four,
+        touch_points: 0,
+        screen: ScreenConfig {
+            width: 1920,
+            height: 1080,
+            color_depth: 24,
+            device_scale_factor_hundredths: 125,
+        },
+        webgl: WebGLProfile::auto(),
+        spoof_canvas: false,
+        spoof_audio: false,
+    });
+    let presets = Arc::new(InMemoryPresetCatalog::default());
+    presets.insert(system_native_preset()).unwrap();
+    let compiler = LaunchPlanCompiler::new(
+        presets,
+        harness.browsers.clone(),
+        harness.proxies.clone(),
+        Arc::new(
+            FingerprintRuntimeRouter::new(
+                std::env::temp_dir().join("brows-fingerprint-compiler-test"),
+            )
+            .unwrap(),
+        ),
+        PathBuf::from("C:\\BrowsData\\profiles"),
+    )
+    .unwrap();
+    let plan = compiler
+        .compile(&profile, &SessionId::new("fingerprint-flow").unwrap())
+        .unwrap()
+        .plan;
+    assert!(plan.arguments.contains(&LaunchArgument::WindowSize {
+        width: 1200,
+        height: 700
+    }));
+    assert_eq!(
+        plan.preferences.accept_languages,
+        profile.locale.accept_languages
+    );
+    let dir = plan
+        .arguments
+        .iter()
+        .find_map(|arg| match arg {
+            LaunchArgument::LoadExtension(dir) => Some(dir),
+            _ => None,
+        })
+        .unwrap();
+    assert!(std::fs::read_to_string(dir.join("content.js"))
+        .unwrap()
+        .contains(r#""languages":["ja-JP","ja"]"#));
+    for support in [
+        brows_domain::FingerprintSupport::Unverified,
+        brows_domain::FingerprintSupport::Unsupported,
+    ] {
+        let mut build = verified_build();
+        build.capabilities.fingerprint_support = support;
+        harness.browsers.insert_build(build).unwrap();
+        assert_eq!(
+            compiler
+                .compile(&profile, &SessionId::new("unsupported-flow").unwrap())
+                .unwrap_err()
+                .code(),
+            &ErrorCode::CapabilityUnsupported
+        );
+        assert!(harness.browsers.running_plans().unwrap().is_empty());
+    }
+    harness.browsers.insert_build(verified_build()).unwrap();
+    profile.locale.timezone = Some("Asia/Tokyo".to_owned());
+    assert_eq!(
+        compiler
+            .compile(&profile, &SessionId::new("timezone-flow").unwrap())
+            .unwrap_err()
+            .code(),
+        &ErrorCode::CapabilityUnsupported
     );
 }
 

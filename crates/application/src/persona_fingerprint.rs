@@ -1,7 +1,7 @@
 //! Deterministic fingerprint derivation for the SeedableNoise persona.
 //!
-//! All output is a pure function of the seed — same seed always produces the
-//! same reported properties.  No randomness is introduced at runtime.
+//! Output is a pure function of the persona and selected Chromium version.
+//! Browser versions must come from the actual runtime, never a random pool.
 
 use brows_domain::{DeviceMemoryGb, DomainError, PlatformKind, SeedableNoisePersona, WebGLProfile};
 
@@ -18,20 +18,29 @@ pub struct PersonaFingerprint {
     /// Display string for device memory: "0.25", "0.5", "1", "2", "4", "8".
     pub device_memory_gb: String,
     pub touch_points: u8,
-    pub chrome_version: &'static str,
+    pub chrome_version: String,
 }
 
 impl PersonaFingerprint {
     /// Derives a `PersonaFingerprint` from the given `SeedableNoisePersona`.
     /// The derivation is deterministic: equal seeds produce equal output.
-    pub fn derive(p: &SeedableNoisePersona) -> Result<Self, DomainError> {
+    pub fn derive(p: &SeedableNoisePersona, runtime_version: &str) -> Result<Self, DomainError> {
+        p.validate()?;
+        let major = runtime_version.split('.').next().unwrap_or_default();
+        if runtime_version
+            .split('.')
+            .any(|part| part.is_empty() || !part.bytes().all(|byte| byte.is_ascii_digit()))
+            || !major.parse::<u16>().is_ok_and(|value| value > 0)
+        {
+            return Err(DomainError::InconsistentConfiguration(
+                "fingerprint requires a numeric Chromium runtime version".to_owned(),
+            ));
+        }
+        let chrome_version = major.to_owned();
         let mut rng = Splitmix64::from_seed(&p.seed);
 
-        // ── Chrome version pool ──────────────────────────────────────────────
-        // Only include versions still within Chrome's active support window.
-        // Update this list when new Chrome majors ship.
-        const CHROME_VERSIONS: &[&str] = &["136", "137", "138", "139", "150"];
-        let chrome_version = CHROME_VERSIONS[rng.next_usize(CHROME_VERSIONS.len())];
+        // Preserve the old draw position so existing seeds keep their GPU.
+        let _ = rng.next_u64();
 
         // ── Platform token for UA string ─────────────────────────────────────
         let (platform_token, platform_string) = match p.platform {
@@ -59,19 +68,11 @@ impl PersonaFingerprint {
         })
     }
 
-    /// Returns a UA whose Chrome major matches the selected runtime. If the
-    /// runtime does not expose a numeric major, the deterministic fallback UA
-    /// is preserved.
-    pub fn user_agent_for_chromium(&self, runtime_version: &str) -> String {
-        let runtime_major = runtime_version.split('.').next().unwrap_or_default();
-        if runtime_major.is_empty() || !runtime_major.chars().all(|ch| ch.is_ascii_digit()) {
-            return self.user_agent.clone();
-        }
-        self.user_agent.replacen(
-            &format!("Chrome/{}.0.0.0", self.chrome_version),
-            &format!("Chrome/{runtime_major}.0.0.0"),
-            1,
-        )
+    /// JavaScript navigator.deviceMemory is numeric, unlike the display DTO.
+    pub fn device_memory_number(&self) -> f64 {
+        self.device_memory_gb
+            .parse()
+            .expect("derived memory is a valid numeric enum")
     }
 }
 
@@ -209,23 +210,24 @@ mod tests {
     #[test]
     fn derive_is_deterministic_for_same_seed() {
         let p = sample_persona("stable-seed");
-        let a = PersonaFingerprint::derive(&p).unwrap();
-        let b = PersonaFingerprint::derive(&p).unwrap();
+        let a = PersonaFingerprint::derive(&p, "150.0.0.0").unwrap();
+        let b = PersonaFingerprint::derive(&p, "150.0.0.0").unwrap();
         assert_eq!(a, b);
     }
 
     #[test]
     fn derive_produces_different_output_for_different_seeds() {
-        let a = PersonaFingerprint::derive(&sample_persona("seed-alpha")).unwrap();
-        let b = PersonaFingerprint::derive(&sample_persona("seed-beta")).unwrap();
-        // It's astronomically unlikely they collide on all fields simultaneously.
-        assert!(a.user_agent != b.user_agent || a.webgl_vendor != b.webgl_vendor);
+        let a = PersonaFingerprint::derive(&sample_persona("seed-alpha"), "150").unwrap();
+        let b = PersonaFingerprint::derive(&sample_persona("seed-beta"), "150").unwrap();
+        // Different seeds can collide in the small GPU pool; these fixtures do not.
+        assert_ne!(a.webgl_renderer, b.webgl_renderer);
+        assert_eq!(a.user_agent, b.user_agent);
     }
 
     #[test]
     fn windows_persona_picks_windows_webgl() {
         for seed in ["a", "b", "c", "d", "e", "f", "g", "h"] {
-            let fp = PersonaFingerprint::derive(&sample_persona(seed)).unwrap();
+            let fp = PersonaFingerprint::derive(&sample_persona(seed), "150").unwrap();
             assert!(
                 fp.webgl_vendor.contains("NVIDIA")
                     || fp.webgl_vendor.contains("Intel")
@@ -238,10 +240,11 @@ mod tests {
 
     #[test]
     fn user_agent_uses_the_selected_runtime_major() {
-        let fp = PersonaFingerprint::derive(&sample_persona("runtime-major")).unwrap();
-        assert!(fp
-            .user_agent_for_chromium("151.0.8123.9")
-            .contains("Chrome/151.0.0.0"));
-        assert_eq!(fp.user_agent_for_chromium("installed"), fp.user_agent);
+        let persona = sample_persona("runtime-major");
+        let fp = PersonaFingerprint::derive(&persona, "151.0.8123.9").unwrap();
+        assert!(fp.user_agent.contains("Chrome/151.0.0.0"));
+        for invalid in ["installed", "", "0.0", "151.bad", "151..0"] {
+            assert!(PersonaFingerprint::derive(&persona, invalid).is_err());
+        }
     }
 }
