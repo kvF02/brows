@@ -1131,6 +1131,10 @@ mod tests {
                 ))
             };
             drop(AppState::production_with_runtime(root.clone(), missing()).unwrap());
+            // Production imports allocate staging below a canonical root. On
+            // Windows that includes the verbatim path prefix; keep the manual
+            // crash fixture consistent with the path returned by the importer.
+            let root = root.canonicalize().unwrap();
             let database = root.join("profiles.sqlite3");
             let profiles = SqliteProfileRepository::open(&database).unwrap();
             let original = draft("Existing")
