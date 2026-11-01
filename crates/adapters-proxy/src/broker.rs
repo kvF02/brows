@@ -9,7 +9,9 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod cancellable_io;
 mod lifecycle;
+use cancellable_io::{CancellableIo, IO_POLL_INTERVAL};
 use lifecycle::{BrokerShutdown, ConnectionGate, SocketRegistration, Workers};
 
 #[cfg(test)]
@@ -140,6 +142,7 @@ fn handle_with_failure_response(
             return;
         }
         if let Some(mut client) = fallback {
+            let _ = client.set_write_timeout(Some(IO_POLL_INTERVAL));
             let (status, reason) = if error.kind == PortErrorKind::ProxyAuth {
                 (
                     "407 Proxy Authentication Required",
@@ -166,17 +169,17 @@ impl Drop for BrokerHandle {
 }
 
 fn handle(
-    mut client: TcpStream,
+    client: TcpStream,
     proxy: &ProxySpec,
     secret: Option<&SecretValue>,
     shutdown: &Arc<BrokerShutdown>,
 ) -> PortResult<()> {
-    client
-        .set_nonblocking(false)
-        .map_err(|e| ioerr("configure proxy client socket", e))?;
-    client
-        .set_read_timeout(Some(Duration::from_millis(proxy.connect_timeout_ms.into())))
-        .ok();
+    let mut client = CancellableIo::new(
+        client,
+        shutdown.clone(),
+        Duration::from_millis(proxy.connect_timeout_ms.into()),
+    )
+    .map_err(|error| ioerr("configure proxy client socket", error))?;
     let head = read_head(&mut client)?;
     let line = head.split(|b| *b == b'\n').next().unwrap_or(&[]);
     let line = String::from_utf8_lossy(line);
@@ -317,7 +320,7 @@ fn connect_target(
     secret: Option<&SecretValue>,
     target: &str,
     shutdown: &Arc<BrokerShutdown>,
-) -> PortResult<(TcpStream, SocketRegistration)> {
+) -> PortResult<(CancellableIo, SocketRegistration)> {
     match proxy.scheme {
         ProxyScheme::Http | ProxyScheme::Https => http_connect(proxy, secret, target, shutdown),
         ProxyScheme::Socks5 => socks_connect(proxy, secret, target, shutdown),
@@ -328,7 +331,7 @@ fn http_connect(
     secret: Option<&SecretValue>,
     target: &str,
     shutdown: &Arc<BrokerShutdown>,
-) -> PortResult<(TcpStream, SocketRegistration)> {
+) -> PortResult<(CancellableIo, SocketRegistration)> {
     let (mut s, registration) = connect_upstream(proxy, "connect upstream proxy", shutdown)?;
     let auth = auth_header(proxy, secret)?;
     write!(
@@ -343,7 +346,6 @@ fn http_connect(
             "upstream proxy rejected CONNECT",
         ));
     }
-    clear_transport_timeouts(&s);
     Ok((s, registration))
 }
 fn socks_connect(
@@ -351,7 +353,7 @@ fn socks_connect(
     secret: Option<&SecretValue>,
     target: &str,
     shutdown: &Arc<BrokerShutdown>,
-) -> PortResult<(TcpStream, SocketRegistration)> {
+) -> PortResult<(CancellableIo, SocketRegistration)> {
     let (mut s, registration) = connect_upstream(proxy, "connect SOCKS5 proxy", shutdown)?;
     let auth = proxy.username.is_some();
     s.write_all(if auth { &[5, 1, 2] } else { &[5, 1, 0] })
@@ -460,20 +462,14 @@ fn socks_connect(
     let mut tail = vec![0; n + 2];
     s.read_exact(&mut tail)
         .map_err(|e| ioerr("read SOCKS address", e))?;
-    clear_transport_timeouts(&s);
     Ok((s, registration))
-}
-
-fn clear_transport_timeouts(stream: &TcpStream) {
-    stream.set_read_timeout(None).ok();
-    stream.set_write_timeout(None).ok();
 }
 
 fn connect_upstream(
     proxy: &ProxySpec,
     context: &'static str,
     shutdown: &Arc<BrokerShutdown>,
-) -> PortResult<(TcpStream, SocketRegistration)> {
+) -> PortResult<(CancellableIo, SocketRegistration)> {
     shutdown.check()?;
     let timeout = Duration::from_millis(proxy.connect_timeout_ms.into());
     // System DNS itself is synchronous. Check cancellation again before any connect.
@@ -484,6 +480,8 @@ fn connect_upstream(
         shutdown.check()?;
         if let Ok(stream) = connect_address(address, timeout, shutdown) {
             let registration = shutdown.track(&stream)?;
+            let stream = CancellableIo::new(stream, shutdown.clone(), timeout)
+                .map_err(|error| ioerr("configure upstream proxy I/O", error))?;
             return Ok((stream, registration));
         }
     }
@@ -587,7 +585,7 @@ fn inject_auth(
     out.extend(b"\r\n");
     Ok(out)
 }
-fn read_head(s: &mut TcpStream) -> PortResult<Vec<u8>> {
+fn read_head(s: &mut (impl Read + ?Sized)) -> PortResult<Vec<u8>> {
     let mut out = Vec::new();
     let mut b = [0; 1024];
     while out.len() < 65536 {
@@ -605,9 +603,9 @@ fn read_head(s: &mut TcpStream) -> PortResult<Vec<u8>> {
         "proxy header incomplete or too large",
     ))
 }
-fn tunnel(mut a: TcpStream, mut b: TcpStream) {
-    clear_transport_timeouts(&a);
-    clear_transport_timeouts(&b);
+fn tunnel(mut a: CancellableIo, mut b: CancellableIo) {
+    a.establish();
+    b.establish();
     let (Ok(mut ar), Ok(mut bw)) = (a.try_clone(), b.try_clone()) else {
         let _ = a.shutdown(Shutdown::Both);
         let _ = b.shutdown(Shutdown::Both);
@@ -777,25 +775,6 @@ mod tests {
         )
         .unwrap();
         assert!(rewritten.starts_with(b"GET /a HTTP/1.1\r\n"));
-    }
-
-    #[test]
-    fn established_tunnel_does_not_inherit_handshake_timeouts() {
-        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
-        let port = listener.local_addr().unwrap().port();
-        let accept = std::thread::spawn(move || listener.accept().unwrap().0);
-        let stream = TcpStream::connect(("127.0.0.1", port)).unwrap();
-        let peer = accept.join().unwrap();
-        stream
-            .set_read_timeout(Some(Duration::from_millis(20)))
-            .unwrap();
-        stream
-            .set_write_timeout(Some(Duration::from_millis(20)))
-            .unwrap();
-        clear_transport_timeouts(&stream);
-        assert_eq!(stream.read_timeout().unwrap(), None);
-        assert_eq!(stream.write_timeout().unwrap(), None);
-        drop(peer);
     }
 
     #[test]

@@ -20,7 +20,8 @@ struct SocketRegistry {
     sockets: BTreeMap<u64, TcpStream>,
 }
 
-/// Cloned handles let stop interrupt blocking reads and writes in either direction.
+/// Cloned handles close both directions at stop. Timed I/O checkpoints also
+/// observe cancellation on platforms where shutdown does not wake pending I/O.
 /// Registration and cancellation share a lock, including sockets arriving during stop.
 #[derive(Debug, Default)]
 pub(super) struct BrokerShutdown {
