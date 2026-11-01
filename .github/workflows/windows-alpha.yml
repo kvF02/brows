@@ -158,6 +158,21 @@ jobs:
           $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target/alpha-build'
           cargo +1.97.1 test --locked -p brows-desktop --target x86_64-pc-windows-msvc fingerprint_runtime_real_probe_smoke_test -- --ignored --nocapture
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Production Edge fingerprint probe, pair measurement and visible restart acceptance
+        if: always() && !cancelled()
+        shell: pwsh
+        run: |
+          $env:TAURI_CONFIG = Get-Content ./crates/desktop/tauri.alpha.conf.json -Raw
+          $env:CARGO_TARGET_DIR = Join-Path $env:GITHUB_WORKSPACE 'target/alpha-build'
+          cargo +1.97.1 test --locked -p brows-desktop --target x86_64-pc-windows-msvc system_edge_fingerprint_acceptance -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-edge-fingerprint-acceptance
+          path: target/edge-fingerprint-acceptance.json
+          if-no-files-found: warn
+          retention-days: 14
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -44,7 +44,7 @@ async function indexedStorage(marker) {
   } finally { db.close(); }
 }
 (async()=>{
-  let observation={runId:config.runId,userAgent:navigator.userAgent};
+  let observation={runId:config.runId,userAgent:navigator.userAgent,signals:{language:navigator.language,languages:[...navigator.languages],concurrency:navigator.hardwareConcurrency,memory:navigator.deviceMemory,width:screen.width,height:screen.height}};
   try {
     observation.localBefore=localStorage.getItem(key);observation.cookieBefore=cookie();
     localStorage.setItem(key,config.marker);

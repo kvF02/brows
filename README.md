@@ -78,6 +78,15 @@ implemented; the latest lifecycle changes still require Windows stress and
 forced-termination acceptance. See [reliability status](docs/reliability-milestone.md)
 and the [fingerprint and multi-session quality review](docs/fingerprint-quality.md).
 
+System-runtime discovery and admission now live in the runtime adapter, with
+separate fixed policies for Google Chrome (`Google LLC`) and Microsoft Edge
+(`Microsoft Corporation`). Chrome remains the preferred stable channel; Edge
+is separately selectable. Actual versions come from PE resources. Edge 155's
+candidate extension sample passed on Windows; production probing, two-profile
+measurement and visible-window acceptance have their own CI report and must
+pass before treating those capabilities as available. See the ordered
+[development and acceptance roadmap](docs/development-roadmap.md).
+
 The Windows secret adapter stores only Generic Credentials in the current
 user's Credential Manager namespace. Profile isolation and multi-open behavior
 remain the primary guarantee; optional fingerprint hooks are explicitly

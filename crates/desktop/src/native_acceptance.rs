@@ -21,15 +21,47 @@ impl Drop for ObservationServer {
     }
 }
 
-fn draft(name: &str, url: String) -> ProfileDraftDto {
-    ProfileDraftDto {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AcceptanceCase {
+    ChromeNative,
+    EdgeSeedable,
+}
+impl AcceptanceCase {
+    fn provider(self) -> &'static str {
+        match self {
+            Self::ChromeNative => "Google Chrome",
+            Self::EdgeSeedable => "Microsoft Edge",
+        }
+    }
+    fn filename(self) -> &'static str {
+        match self {
+            Self::ChromeNative => "native-browser-acceptance.json",
+            Self::EdgeSeedable => "edge-fingerprint-acceptance.json",
+        }
+    }
+}
+fn configured(label: &str) -> (u8, DeviceMemoryDto, u32, u32, &'static str) {
+    match label {
+        "A" => (3, DeviceMemoryDto::Half, 1777, 1111, "en-US"),
+        "B" => (5, DeviceMemoryDto::Two, 1440, 900, "pl-PL"),
+        _ => (7, DeviceMemoryDto::Four, 1600, 1000, "fr-FR"),
+    }
+}
+
+fn draft(
+    name: &str,
+    url: String,
+    case: AcceptanceCase,
+    build: &brows_domain::BrowserBuildId,
+) -> ProfileDraftDto {
+    let mut draft = ProfileDraftDto {
         name: format!("Acceptance {name}"),
         tags: vec!["acceptance".into()],
         preset_id: PresetIdDto::new("system-native").unwrap(),
         preset_version: 1,
         proxy_id: None,
-        browser: BrowserSelectorDto::Channel {
-            channel: BrowserChannelDto::Stable,
+        browser: BrowserSelectorDto::Pinned {
+            build_id: build.into(),
         },
         persona: PersonaDto::default(),
         locale: LocaleDto {
@@ -42,7 +74,29 @@ fn draft(name: &str, url: String) -> ProfileDraftDto {
             start_maximized: false,
         },
         startup_urls: vec![url],
+    };
+    if case == AcceptanceCase::EdgeSeedable {
+        let (cpu, memory, width, height, language) = configured(name);
+        draft.locale.accept_languages = vec![language.into()];
+        draft.persona = PersonaDto::SeedableNoise {
+            seed: format!("visible-edge-owned-sample-{name}"),
+            platform: PlatformDto::Windows,
+            hardware_concurrency: cpu,
+            device_memory: memory,
+            touch_points: 0,
+            screen: ScreenConfigDto {
+                width,
+                height,
+                color_depth: 24,
+                device_scale_factor_hundredths: 100,
+            },
+            webgl_vendor: String::new(),
+            webgl_renderer: String::new(),
+            spoof_canvas: true,
+            spoof_audio: true,
+        };
     }
+    draft
 }
 
 fn launch(state: &AppState, profile: &ProfileDto) -> SessionDto {
@@ -92,6 +146,22 @@ fn observe(root: &Path, run: &str, report: &mut Value) -> Value {
                     .push(value.clone());
                 assert!(value.get("error").is_none(), "browser error: {value}");
                 assert!(value["userAgent"].as_str().unwrap().contains("Chrome/"));
+                if report["mode"] == "SeedableNoise" {
+                    let label = run[..1].to_uppercase();
+                    let (cpu, memory, width, height, language) = configured(&label);
+                    assert_eq!(value["signals"]["concurrency"], cpu, "{value}");
+                    assert_eq!(value["signals"]["width"], width, "{value}");
+                    assert_eq!(value["signals"]["height"], height, "{value}");
+                    assert_eq!(value["signals"]["language"], language, "{value}");
+                    assert_eq!(value["signals"]["languages"], json!([language]), "{value}");
+                    let memory = match memory {
+                        DeviceMemoryDto::Half => 0.5,
+                        DeviceMemoryDto::Two => 2.0,
+                        DeviceMemoryDto::Four => 4.0,
+                        _ => unreachable!(),
+                    };
+                    assert_eq!(value["signals"]["memory"].as_f64(), Some(memory), "{value}");
+                }
                 return value;
             }
         }
@@ -158,7 +228,7 @@ fn storage_logs(root: &Path, directory: &Path, depth: usize, logs: &mut Vec<Valu
     }
 }
 
-fn exercise(root: &Path, report: &mut Value) {
+fn exercise(root: &Path, report: &mut Value, case: AcceptanceCase) {
     if !cfg!(windows) {
         panic!("this acceptance requires real Windows Chrome");
     }
@@ -197,10 +267,38 @@ fn exercise(root: &Path, report: &mut Value) {
         state.runtime_issue
     );
     let builds = state.browsers.list_builds().unwrap();
-    assert_eq!(builds.len(), 1);
-    assert_eq!(builds[0].publisher, "Google LLC");
-    report["runtime"] = json!({"version":builds[0].version,"sha256":builds[0].sha256,"publisher":builds[0].publisher,"mode":"SystemNative"});
-    check(report, "signed_system_chrome_admitted");
+    let build = builds
+        .iter()
+        .find(|build| build.provider == case.provider())
+        .expect("signed system browser unavailable");
+    let build_id = build.id.clone();
+    report["runtime"] = json!({"provider":build.provider,"version":build.version,"sha256":build.sha256,"publisher":build.publisher});
+    check(report, "signed_system_browser_admitted");
+    if case == AcceptanceCase::EdgeSeedable {
+        let probe = state.browsers.probe_fingerprint_support(&build_id).unwrap();
+        report["probe"] = json!({"support":format!("{:?}",probe.build.capabilities.fingerprint_support),"detail":probe.detail});
+        assert_eq!(
+            probe.build.capabilities.fingerprint_support,
+            brows_domain::FingerprintSupport::Supported
+        );
+        check(report, "production_fingerprint_probe_passed");
+        let measurement = state
+            .fingerprint_measurement
+            .as_ref()
+            .unwrap()
+            .measure_pair(&build_id)
+            .unwrap();
+        let passed = measurement.covered_checks_passed;
+        report["measurement"] = serde_json::to_value(measurement).unwrap();
+        assert!(
+            passed,
+            "covered fingerprint observations failed; see report"
+        );
+        check(
+            report,
+            "two_profile_headless_fingerprint_and_restart_passed",
+        );
+    }
     state
         .settings
         .update(SettingsUpdateRequest {
@@ -214,7 +312,12 @@ fn exercise(root: &Path, report: &mut Value) {
         state
             .profiles
             .create(ProfileCreateRequest {
-                profile: draft(label, url(&format!("{}0", label.to_lowercase()))),
+                profile: draft(
+                    label,
+                    url(&format!("{}0", label.to_lowercase())),
+                    case,
+                    &build_id,
+                ),
             })
             .unwrap()
     });
@@ -287,6 +390,22 @@ fn exercise(root: &Path, report: &mut Value) {
         3
     );
     assert!(state.sessions.list().unwrap().is_empty());
+    if case == AcceptanceCase::EdgeSeedable {
+        assert_eq!(
+            state
+                .browsers
+                .probe_fingerprint_support(&build_id)
+                .unwrap()
+                .build
+                .capabilities
+                .fingerprint_support,
+            brows_domain::FingerprintSupport::Supported
+        );
+        check(
+            report,
+            "restart_requires_and_passes_fresh_fingerprint_probe",
+        );
+    }
     let profiles = profiles
         .into_iter()
         .enumerate()
@@ -296,7 +415,12 @@ fn exercise(root: &Path, report: &mut Value) {
                 .update(ProfileUpdateRequest {
                     profile_id: profile.id,
                     expected_revision: profile.revision,
-                    profile: draft(["A", "B", "C"][index], url(["a1", "b1", "c1"][index])),
+                    profile: draft(
+                        ["A", "B", "C"][index],
+                        url(["a1", "b1", "c1"][index]),
+                        case,
+                        &build_id,
+                    ),
                 })
                 .unwrap()
         })
@@ -318,14 +442,24 @@ fn exercise(root: &Path, report: &mut Value) {
 #[test]
 #[ignore = "requires Windows, Node 24 and a signed system Chrome; opens real isolated browser windows"]
 fn system_native_windows_acceptance() {
+    acceptance(AcceptanceCase::ChromeNative);
+}
+
+#[test]
+#[ignore = "requires signed Windows Edge; production probe, real pair measurement and visible seeded profiles"]
+fn system_edge_fingerprint_acceptance() {
+    acceptance(AcceptanceCase::EdgeSeedable);
+}
+
+fn acceptance(case: AcceptanceCase) {
     let target = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target");
     fs::create_dir_all(&target).unwrap();
     let target = target.canonicalize().unwrap();
     let root = target.join(format!("native-browser-{}", uuid::Uuid::new_v4()));
     fs::create_dir(&root).unwrap();
-    let mut report = json!({"schemaVersion":1,"scope":"production_services_visible_system_chrome","commit":std::env::var("GITHUB_SHA").ok(),"passed":false,"checks":[],"observations":[],"notCovered":["frontend_clicks","ten_browser_load","fingerprint_independence"]});
+    let mut report = json!({"schemaVersion":1,"scope":"production_services_visible_system_browser","mode":if case==AcceptanceCase::ChromeNative {"SystemNative"}else{"SeedableNoise"},"commit":std::env::var("GITHUB_SHA").ok(),"passed":false,"checks":[],"observations":[],"notCovered":["frontend_clicks","ten_browser_load","complete_device_fingerprint_independence"]});
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        exercise(&root, &mut report);
+        exercise(&root, &mut report, case);
         // Remove only this test's unique root. On Windows this also detects
         // browser database handles remaining open after shutdown.
         fs::remove_dir_all(&root).expect("browser test data remains locked after shutdown");
@@ -343,7 +477,7 @@ fn system_native_windows_acceptance() {
             .unwrap_or("acceptance panicked"));
     }
     fs::write(
-        target.join("native-browser-acceptance.json"),
+        target.join(case.filename()),
         serde_json::to_vec_pretty(&report).unwrap(),
     )
     .unwrap();

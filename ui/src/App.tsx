@@ -1918,7 +1918,7 @@ function SettingsView({
         <article className="settings-card">
           <div className="settings-card-head"><div><h2>浏览器运行时</h2><p>签名可信 ≠ 指纹支持；指纹加载检测通过 ≠ 完整 anti-detect。</p></div><span className="settings-icon">◉</span></div>
           <RuntimeInstallPanel api={api} onRefresh={onRefresh} onError={onError} onNotice={onNotice} />
-          {runtimes.length === 0 && <div className="form-info">没有可信浏览器运行时。可安装官方 Chrome for Testing，或修复系统 Google Chrome 后重启管理器。</div>}
+          {runtimes.length === 0 && <div className="form-info">没有可信浏览器运行时。请安装或修复官方 Google Chrome / Microsoft Edge 后重启管理器。</div>}
           {runtimes.map((runtime) => <RuntimeFingerprintRow key={`${runtime.id}:${runtime.version}`} api={api} runtime={runtime} onRefresh={onRefresh} onError={onError} onNotice={onNotice} />)}
           <div className="form-info">检测会创建独立临时环境，仅验证本地扩展注入。SeedableNoise 启动前必须通过；系统原生不受此限制。</div>
           <button className="text-button" type="button" onClick={() => onNotice("系统 Chrome 验证发行者并核对主程序摘要；官方 Chrome for Testing 还核对实际版本与全部安装文件。指纹支持需要另行实测。")}>查看运行时信任说明 →</button>

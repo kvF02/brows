@@ -149,6 +149,8 @@ v0.1 仅实现 `SystemNativeFingerprintRuntime`，输出实际系统测量和共
 
 描述受信任的浏览器运行时：Provider、版本、通道、安装目录、SHA-256、签名发布者、安装时间和能力集。前端不能传入任意可执行路径。首个 Provider 采用固定版本、官方签名的 Chrome for Testing 稳定版（接口不绑定供应商，后续可增加纯 Chromium/可复现构建）。多个版本并排安装，运行中的版本不原地替换；启动前校验签名、哈希和发布者。
 
+2026-11-01 修订：当前 CFT 包缺少 Authenticode，保持拒绝准入。Runtime Adapter 增加固定的系统 Provider：Google Chrome 仅接受 Google LLC，Microsoft Edge 仅接受 Microsoft Corporation；从系统安装目录发现，不接收 UI 路径或发布者策略。系统版本读取已签名 PE 的实际版本资源，签名前后及登记时核对摘要。保留既有 Chrome 标识和默认通道，Edge 独立列出；仅有 Edge 时才作为稳定通道回退。候选 Edge 155 的扩展读数已通过隔离实测，生产探针、双环境及可见窗口验收分别记录。供应商信任不赋予指纹能力，重启后仍恢复 Unverified。
+
 ### 3.6 ResolvedLaunchPlan
 
 Profile 不直接生成命令行，必须先编译成不可变计划：

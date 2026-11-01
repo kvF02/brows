@@ -30,8 +30,10 @@ use std::{
 mod authenticode;
 mod bundle;
 mod official;
+mod system;
 mod version;
 pub use official::{OfficialRuntimeInstaller, RuntimeInstallStatus};
+pub use system::{discover_system_browsers, SystemBrowserInstallation, SystemBrowserProvider};
 mod fingerprint_probe;
 mod measurement;
 pub use measurement::LocalFingerprintMeasurement;
@@ -68,8 +70,10 @@ impl ManagedChromiumRuntime {
     }
 
     pub fn with_roots(roots: Vec<PathBuf>, profile_root: impl Into<PathBuf>) -> PortResult<Self> {
-        if roots.is_empty() || roots.len() > 2 {
-            return Err(invalid_data("expected one or two controlled runtime roots"));
+        if roots.is_empty() || roots.len() > 8 {
+            return Err(invalid_data(
+                "expected between one and eight controlled runtime roots",
+            ));
         }
         let runtime_roots = roots
             .into_iter()

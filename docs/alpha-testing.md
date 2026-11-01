@@ -7,7 +7,7 @@
 1. 从仓库 Actions → **Windows Alpha test build** 的成功 `package` job 下载 `brows-0.1.0-alpha.*-windows-x64-*` artifact，解压后运行 `Brows-Alpha.exe`。
 2. 需要 Windows 11 x64、Microsoft Edge WebView2 Runtime 和微软 Visual C++ 2015–2022 x64 运行库。若提示缺少 `VCRUNTIME140*.dll`，使用[微软官方运行库安装程序](https://aka.ms/vs/17/release/vc_redist.x64.exe)。测试者不需要 Node、Rust 或开发工具。程序内已包含管理界面，不需要启动开发服务器。
 3. 窗口标题为 **Brows Alpha**，数据使用独立的 `%LOCALAPPDATA%\local-brows-desktop-alpha`。它不是把所有数据写在 exe 旁边的便携模式；解压位置变化不会重置测试数据。不要把已有正式目录复制进来，先用全新测试环境。
-4. 本轮优先使用已安装且签名验证通过的 Google Chrome 测试系统原生多开；未安装时先安装官方 Chrome，再启动 Alpha。2026-11-01 实测 CFT `156.0.8078.80` 主程序没有签名，被安装入口拒绝；这不是已通过的指纹内核。此版本不要依赖 CFT 安装入口完成首次浏览器配置。
+4. 系统原生多开可使用已安装且签名验证通过的 Google Chrome；系统 Microsoft Edge 也作为独立运行时列出。指纹测试需先在设置中检测具体运行时，只有 Supported 才能选择该版本创建 SeedableNoise 环境。2026-11-01 实测 CFT `156.0.8078.80` 主程序没有签名，被安装入口拒绝；此版本不要依赖 CFT 安装入口完成首次浏览器配置。
 5. 包含 `build-info.json`、`SHA256SUMS.txt` 和这份说明。用以下命令查看 exe 摘要，并与两个文件中的值比较：
 
 ```powershell
@@ -60,6 +60,8 @@ GitHub Actions 可手动运行 **Windows Alpha test build**，默认勾选官方
 独立的 `native-browser` job 执行 `system_native_windows_acceptance`：通过生产服务打开已签名的系统 Chrome，让 A/B 环境在同一 localhost 网站分别写入 Cookie、LocalStorage 和 IndexedDB，验证重复启动拦截、并发上限和第三个环境排队补位，再关闭管理服务、重启后读取原有状态。结果保存在 `windows-native-browser-acceptance` artifact；失败也保留已完成步骤和真实页面读数。测试只创建临时环境，不读取已有登录数据。它未覆盖前端点击、十环境压力或指纹独立，相关结果不能从存储隔离测试推断。
 
 同一 job 还对系统 Chrome 执行独立的 headless 指纹能力探针，保存 `windows-system-chrome-fingerprint-probe` 报告。此步骤验证探针执行和状态记录；`fingerprintSupported: false` 仍表示该浏览器不支持当前指纹入口，步骤本身成功不代表指纹验收通过。双环境完整观测需先通过能力探针。
+
+`windows-edge-fingerprint-acceptance` 单独保存 Edge 的生产探针、headless 双环境观测及可见 SeedableNoise 环境的存储/重启读数；任何阶段失败均保留已产生的真实结果。可见窗口检查语言、CPU、内存和屏幕读取，不等于完整设备指纹或检测站验收。
 
 运行状态以对应 commit 的 Actions 记录和 `build-info.json` 为准。首次 Windows 构建耗时取决于依赖下载、编译与 Actions 排队；说明文件本身不证明构建或真机验收已经执行。
 
