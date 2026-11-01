@@ -3,6 +3,8 @@
 
 mod backup_jobs;
 mod commands;
+#[cfg(test)]
+mod native_acceptance;
 mod state;
 mod supervisor;
 
