@@ -44,14 +44,20 @@ pub(super) fn safe_relative(value: &str) -> PortResult<PathBuf> {
             .split('.')
             .next()
             .unwrap_or_default()
+            .trim_end_matches(' ')
             .to_ascii_uppercase();
         if part.is_empty()
             || part == "."
             || part == ".."
             || part.ends_with('.')
+            || part.starts_with(' ')
+            || part.ends_with(' ')
             || !part
                 .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+                // Official CFT includes "First Run". Interior spaces are
+                // ordinary Windows filename characters; edge spaces and
+                // reserved-device aliases must still be rejected.
+                .all(|b| b.is_ascii_alphanumeric() || b" ._-".contains(&b))
             || [
                 "CON", "PRN", "AUX", "NUL", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7",
                 "COM8", "COM9", "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8",

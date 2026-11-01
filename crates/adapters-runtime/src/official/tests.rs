@@ -26,6 +26,7 @@ fn package() -> Vec<u8> {
         ("chrome-win64/chrome_elf.dll", b"elf"),
         ("chrome-win64/resources.pak", b"resources"),
         ("chrome-win64/icudtl.dat", b"data"),
+        ("chrome-win64/First Run", b""),
     ])
 }
 pub(super) fn fixture(label: &str) -> (OfficialRuntimeInstaller, PathBuf) {
@@ -296,6 +297,10 @@ fn malformed_zip_paths_duplicates_links_and_missing_files_are_rejected() {
         "chrome-win64/a\\evil",
         "/chrome-win64/absolute",
         "chrome-win64/dir./file",
+        "chrome-win64/dir /file",
+        "chrome-win64/trailing ",
+        "chrome-win64/ leading",
+        "chrome-win64/CON .txt",
         "other/chrome.exe",
     ] {
         let (installer, root) = fixture("zip-path");
@@ -314,6 +319,10 @@ fn malformed_zip_paths_duplicates_links_and_missing_files_are_rejected() {
             ("chrome-win64/A", b"two".as_slice()),
         ],
         vec![("chrome-win64/chrome.exe", b"only executable".as_slice())],
+        vec![
+            ("chrome-win64/First Run", b"one".as_slice()),
+            ("chrome-win64/first run", b"two".as_slice()),
+        ],
     ] {
         let (installer, root) = fixture("zip-reject");
         assert!(installer
