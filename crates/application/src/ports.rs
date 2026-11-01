@@ -146,6 +146,9 @@ pub struct BrowserExit {
 }
 
 pub trait BrowserRuntime: fmt::Debug + Send + Sync {
+    fn stop_accepting_probes(&self) {}
+    fn wait_for_probes(&self) {}
+
     /// Explicit, isolated, local-only probe. Never tests in a user's profile.
     fn probe_fingerprint_support(
         &self,

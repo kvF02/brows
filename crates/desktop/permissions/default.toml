@@ -163,10 +163,28 @@ identifier = "allow-backup-cancel"
 description = "Request cancellation before a backup operation commits."
 commands = { allow = ["backup_cancel"] }
 
+[[permission]]
+identifier = "allow-runtime-install-official"
+description = "Install the latest stable official Chrome for Testing from fixed HTTPS origins."
+commands = { allow = ["runtime_install_official"] }
+
+[[permission]]
+identifier = "allow-runtime-install-status"
+description = "Read official browser installation progress."
+commands = { allow = ["runtime_install_status"] }
+
+[[permission]]
+identifier = "allow-runtime-install-cancel"
+description = "Cancel an official browser installation before package publication."
+commands = { allow = ["runtime_install_cancel"] }
+
 # Default permission set: auto-allowed for all capabilities.
 [default]
 description = "Default permissions for the Brows app — all custom commands."
 permissions = [
+  "allow-runtime-install-official",
+  "allow-runtime-install-status",
+  "allow-runtime-install-cancel",
   "allow-backup-cancel",
   "allow-backup-cleanup",
   "allow-settings-get",

@@ -23,11 +23,15 @@ use std::{
     io::{BufReader, Read},
     path::{Component, Path, PathBuf},
     process::{Command, Stdio},
-    sync::{Mutex, RwLock},
+    sync::{Arc, Mutex, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
 
 mod authenticode;
+mod bundle;
+mod official;
+mod version;
+pub use official::{OfficialRuntimeInstaller, RuntimeInstallStatus};
 mod fingerprint_probe;
 mod process;
 use process::BrowserChild;
@@ -39,17 +43,18 @@ const MAX_PREFERENCES_BYTES: u64 = 16 * 1024 * 1024;
 #[derive(Debug, Default)]
 struct BuildRegistry {
     by_id: BTreeMap<BrowserBuildId, BrowserBuild>,
+    bundles: BTreeMap<BrowserBuildId, Arc<bundle::BundleIntegrity>>,
     active_channels: BTreeMap<&'static str, BrowserBuildId>,
 }
 
 /// Owns verified browser builds and all child processes launched from them.
 #[derive(Debug)]
 pub struct ManagedChromiumRuntime {
-    runtime_root: PathBuf,
+    runtime_roots: Vec<PathBuf>,
     profile_root: PathBuf,
     builds: RwLock<BuildRegistry>,
     processes: Mutex<HashMap<SessionId, BrowserChild>>,
-    probing: Mutex<HashSet<BrowserBuildId>>,
+    probing: fingerprint_probe::ProbeGate,
 }
 
 impl ManagedChromiumRuntime {
@@ -57,19 +62,38 @@ impl ManagedChromiumRuntime {
         runtime_root: impl Into<PathBuf>,
         profile_root: impl Into<PathBuf>,
     ) -> PortResult<Self> {
-        let runtime_root = create_and_canonicalize(runtime_root.into(), "runtime root")?;
+        Self::with_roots(vec![runtime_root.into()], profile_root)
+    }
+
+    pub fn with_roots(roots: Vec<PathBuf>, profile_root: impl Into<PathBuf>) -> PortResult<Self> {
+        if roots.is_empty() || roots.len() > 2 {
+            return Err(invalid_data("expected one or two controlled runtime roots"));
+        }
+        let runtime_roots = roots
+            .into_iter()
+            .map(|root| create_and_canonicalize(root, "runtime root"))
+            .collect::<PortResult<Vec<_>>>()?;
         let profile_root = create_and_canonicalize(profile_root.into(), "profile root")?;
         Ok(Self {
-            runtime_root,
+            runtime_roots,
             profile_root,
             builds: RwLock::new(BuildRegistry::default()),
             processes: Mutex::new(HashMap::new()),
-            probing: Mutex::new(HashSet::new()),
+            probing: fingerprint_probe::ProbeGate::default(),
         })
     }
 
     /// Registers a build only after checking its trust, location and digest.
-    pub fn register_build(&self, mut build: BrowserBuild, activate: bool) -> PortResult<()> {
+    pub fn register_build(&self, build: BrowserBuild, activate: bool) -> PortResult<()> {
+        self.register_build_checked(build, activate, None)
+    }
+
+    fn register_build_checked(
+        &self,
+        mut build: BrowserBuild,
+        activate: bool,
+        bundle: Option<bundle::BundleIntegrity>,
+    ) -> PortResult<()> {
         build
             .validate()
             .map_err(|error| invalid_data(error.to_string()))?;
@@ -81,14 +105,17 @@ impl ManagedChromiumRuntime {
         }
 
         let executable = canonical_regular_file(&build.executable_path, "browser executable")?;
-        ensure_within(&executable, &self.runtime_root, "browser executable")?;
+        self.ensure_runtime_path(&executable)?;
         verify_digest(&executable, &build.sha256)?;
         build.executable_path = executable;
         // Publisher admission is not proof of extension support. Only the
         // adapter's own bounded observation may set Supported.
         build.capabilities.fingerprint_support = FingerprintSupport::Unverified;
 
-        self.insert_registered_build(build, activate)
+        if let Some(integrity) = &bundle {
+            integrity.verify()?;
+        }
+        self.insert_registered_build(build, activate, bundle)
     }
 
     /// Records the current digest of an executable already trusted by the
@@ -111,13 +138,50 @@ impl ManagedChromiumRuntime {
         }
 
         let executable = canonical_regular_file(&build.executable_path, "browser executable")?;
-        ensure_within(&executable, &self.runtime_root, "browser executable")?;
+        self.ensure_runtime_path(&executable)?;
         build.sha256 = digest_file(&executable)?;
         build.executable_path = executable;
         self.register_build(build, activate)
     }
 
-    fn insert_registered_build(&self, build: BrowserBuild, activate: bool) -> PortResult<()> {
+    fn ensure_runtime_path(&self, executable: &Path) -> PortResult<()> {
+        if self
+            .runtime_roots
+            .iter()
+            .any(|root| executable.starts_with(root) && executable != root)
+        {
+            Ok(())
+        } else {
+            Err(invalid_data(
+                "browser executable is outside controlled runtime roots",
+            ))
+        }
+    }
+
+    fn verify_build_integrity(&self, build: &BrowserBuild) -> PortResult<()> {
+        self.ensure_runtime_path(&canonical_regular_file(
+            &build.executable_path,
+            "browser executable",
+        )?)?;
+        let bundle = self
+            .builds
+            .read()
+            .map_err(|_| internal("browser build registry lock is poisoned"))?
+            .bundles
+            .get(&build.id)
+            .cloned();
+        if let Some(bundle) = bundle {
+            bundle.verify()?;
+        }
+        verify_digest(&build.executable_path, &build.sha256)
+    }
+
+    fn insert_registered_build(
+        &self,
+        build: BrowserBuild,
+        activate: bool,
+        bundle: Option<bundle::BundleIntegrity>,
+    ) -> PortResult<()> {
         let mut registry = self
             .builds
             .write()
@@ -132,6 +196,9 @@ impl ManagedChromiumRuntime {
             registry
                 .active_channels
                 .insert(channel_key(build.channel), build.id.clone());
+        }
+        if let Some(bundle) = bundle {
+            registry.bundles.insert(build.id.clone(), Arc::new(bundle));
         }
         registry.by_id.insert(build.id.clone(), build);
         Ok(())
@@ -202,8 +269,8 @@ impl ManagedChromiumRuntime {
                 "browser runtime trust was revoked",
             ));
         }
-        ensure_within(&executable, &self.runtime_root, "browser executable")?;
-        verify_digest(&executable, &build.sha256)?;
+        drop(registry);
+        self.verify_build_integrity(&build)?;
         Ok(build)
     }
 
@@ -315,6 +382,13 @@ impl ManagedChromiumRuntime {
 }
 
 impl BrowserRuntime for ManagedChromiumRuntime {
+    fn stop_accepting_probes(&self) {
+        self.probing.stop();
+    }
+    fn wait_for_probes(&self) {
+        self.probing.wait();
+    }
+
     fn probe_fingerprint_support(
         &self,
         build_id: &BrowserBuildId,
@@ -330,11 +404,11 @@ impl BrowserRuntime for ManagedChromiumRuntime {
                     "browser runtime trust was revoked",
                 ));
             }
-            verify_digest(&build.executable_path, &build.sha256)?;
+            self.verify_build_integrity(&build)?;
             let result = fingerprint_probe::run(&build, &self.profile_root);
             // Recheck even when browser execution failed; a changing binary
             // must never gain a capability result from an older executable.
-            verify_digest(&build.executable_path, &build.sha256)?;
+            self.verify_build_integrity(&build)?;
             result
         })();
         match observation {
@@ -385,11 +459,7 @@ impl BrowserRuntime for ManagedChromiumRuntime {
         // Serialize the short admission/spawn step against probe admission,
         // so a Supported snapshot cannot outlive a concurrent re-probe.
         let fingerprint_gate = if loads_extension {
-            Some(
-                self.probing
-                    .lock()
-                    .map_err(|_| internal("fingerprint probe lock is poisoned"))?,
-            )
+            Some(self.probing.lock_for_launch()?)
         } else {
             None
         };
@@ -1027,13 +1097,13 @@ mod tests {
         runtime
             .set_fingerprint_support(&id, FingerprintSupport::Supported)
             .unwrap();
-        runtime.probing.lock().unwrap().insert(id.clone());
+        let slot = fingerprint_probe::ProbeSlot::acquire(&runtime.probing, &id).unwrap();
         assert_eq!(
             runtime.launch(&plan).unwrap_err().kind,
             PortErrorKind::CapabilityUnsupported
         );
         assert!(!plan.user_data_dir.exists());
-        runtime.probing.lock().unwrap().remove(&id);
+        drop(slot);
     }
 
     #[test]
@@ -1069,7 +1139,7 @@ mod tests {
             build.capabilities.fingerprint_support,
             FingerprintSupport::Unsupported
         );
-        assert!(runtime.probing.lock().unwrap().is_empty());
+        let _available = fingerprint_probe::ProbeSlot::acquire(&runtime.probing, &id).unwrap();
         assert!(fs::read_dir(&profile_dir).unwrap().next().is_none());
     }
 

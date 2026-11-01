@@ -430,20 +430,79 @@ pub(crate) struct FingerprintPreviewRequest {
     window_height: u32,
 }
 
+fn browser_runtime_dto(
+    browsers: &dyn brows_application::BrowserRuntime,
+    build: &brows_domain::BrowserBuild,
+) -> BrowserRuntimeDto {
+    let mut dto: BrowserRuntimeDto = build.into();
+    dto.active = browsers
+        .resolve_build(&brows_domain::BrowserBuildSelector::Channel(build.channel))
+        .is_ok_and(|active| active.id == build.id);
+    dto
+}
+
 #[tauri::command]
 pub(crate) fn list_runtimes(state: State<'_, AppState>) -> IpcResult<Vec<BrowserRuntimeDto>> {
-    if let Some(message) = &state.runtime_issue {
-        return Err(ErrorDto {
-            code: ErrorCode::CapabilityUnsupported,
-            message: message.clone(),
-            violations: Vec::new(),
-        });
-    }
     let builds = state
         .browsers
         .list_builds()
         .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
-    Ok(builds.iter().map(Into::into).collect())
+    if builds.is_empty() {
+        if let Some(message) = &state.runtime_issue {
+            return Err(ErrorDto {
+                code: ErrorCode::CapabilityUnsupported,
+                message: message.clone(),
+                violations: Vec::new(),
+            });
+        }
+    }
+    Ok(builds
+        .iter()
+        .map(|build| browser_runtime_dto(state.browsers.as_ref(), build))
+        .collect())
+}
+
+fn runtime_installer(
+    state: &AppState,
+) -> IpcResult<Arc<brows_adapters_runtime::OfficialRuntimeInstaller>> {
+    state.runtime_installer.clone().ok_or_else(|| ErrorDto {
+        code: ErrorCode::CapabilityUnsupported,
+        message: "官方浏览器安装仅在 Windows 桌面版可用".into(),
+        violations: Vec::new(),
+    })
+}
+
+#[tauri::command]
+pub(crate) fn runtime_install_status(
+    state: State<'_, AppState>,
+) -> IpcResult<brows_adapters_runtime::RuntimeInstallStatus> {
+    Ok(runtime_installer(&state)?.status())
+}
+
+#[tauri::command]
+pub(crate) fn runtime_install_cancel(state: State<'_, AppState>) -> IpcResult<()> {
+    runtime_installer(&state)?
+        .cancel()
+        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())
+}
+
+#[tauri::command]
+pub(crate) async fn runtime_install_official(
+    state: State<'_, AppState>,
+) -> IpcResult<brows_contracts::FingerprintProbeResultDto> {
+    let installer = runtime_installer(&state)?;
+    let result = tauri::async_runtime::spawn_blocking(move || installer.install_stable())
+        .await
+        .map_err(|_| ErrorDto {
+            code: ErrorCode::Internal,
+            message: "浏览器安装任务未能完成，请检查安装状态".into(),
+            violations: Vec::new(),
+        })?
+        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
+    Ok(brows_contracts::FingerprintProbeResultDto {
+        runtime: browser_runtime_dto(state.browsers.as_ref(), &result.build),
+        detail: result.detail,
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -470,7 +529,7 @@ pub(crate) async fn probe_runtime_fingerprint(
             })?
             .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
     Ok(brows_contracts::FingerprintProbeResultDto {
-        runtime: (&result.build).into(),
+        runtime: browser_runtime_dto(state.browsers.as_ref(), &result.build),
         detail: result.detail,
     })
 }
@@ -1002,13 +1061,30 @@ pub(crate) fn profile_restore(
     ipc(state.profiles.restore(request))
 }
 
+async fn session_work<T, F>(state: &AppState, work: F) -> IpcResult<T>
+where
+    T: Send + 'static,
+    F: FnOnce(Arc<brows_application::SessionApplicationService>) -> ApplicationResult<T>
+        + Send
+        + 'static,
+{
+    let sessions = state.sessions.clone();
+    tauri::async_runtime::spawn_blocking(move || ipc(work(sessions)))
+        .await
+        .map_err(|_| ErrorDto {
+            code: ErrorCode::Internal,
+            message: "会话操作未能完成，请刷新状态后检查".into(),
+            violations: Vec::new(),
+        })?
+}
+
 #[tauri::command]
-pub(crate) fn session_launch(
+pub(crate) async fn session_launch(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     request: SessionLaunchRequest,
 ) -> IpcResult<SessionDto> {
-    let outcome = ipc(state.sessions.launch(request))?;
+    let outcome = session_work(&state, move |sessions| sessions.launch(request)).await?;
     let (session, event) = match outcome {
         SessionLaunchOutcome::Started { session, event } => (session, event),
         SessionLaunchOutcome::Queued { session, event, .. } => (session, event),
@@ -1020,24 +1096,24 @@ pub(crate) fn session_launch(
 }
 
 #[tauri::command]
-pub(crate) fn session_stop(
+pub(crate) async fn session_stop(
     state: State<'_, AppState>,
     request: SessionStopRequest,
 ) -> IpcResult<SessionDto> {
-    ipc(state.sessions.stop(request))
+    session_work(&state, move |sessions| sessions.stop(request)).await
 }
 
 #[tauri::command]
-pub(crate) fn session_cancel_queued(
+pub(crate) async fn session_cancel_queued(
     state: State<'_, AppState>,
     request: SessionCancelQueuedRequest,
 ) -> IpcResult<SessionDto> {
-    ipc(state.sessions.cancel_queued(request))
+    session_work(&state, move |sessions| sessions.cancel_queued(request)).await
 }
 
 #[tauri::command]
-pub(crate) fn session_list(state: State<'_, AppState>) -> IpcResult<Vec<SessionDto>> {
-    ipc(state.sessions.list())
+pub(crate) async fn session_list(state: State<'_, AppState>) -> IpcResult<Vec<SessionDto>> {
+    session_work(&state, |sessions| sessions.list()).await
 }
 
 #[cfg(test)]

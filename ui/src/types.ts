@@ -64,6 +64,17 @@ export interface BrowserRuntime {
   sha256?: string;
 }
 
+export interface RuntimeInstallStatus {
+  available: boolean;
+  running: boolean;
+  phase: "idle" | "catalog" | "downloading" | "extracting" | "verifying" | "committing" | "probing" | "cleaning" | "ready" | "unsupported" | "cancelled" | "failed";
+  downloadedBytes: number;
+  totalBytes: number | null;
+  canCancel: boolean;
+  cancelRequested: boolean;
+  detail: string;
+}
+
 export interface RuntimeFingerprintProbeResult {
   runtime: BrowserRuntime;
   detail: string;
@@ -311,6 +322,9 @@ export interface ApiClient {
   /** Derive a draft configuration for the selected runtime; this is not a browser observation. */
   fingerprintPreview(input: FingerprintPreviewInput): Promise<FingerprintPreview>;
   /** Launch an isolated local probe to check extension injection; not an anti-detect guarantee. */
+  runtimeInstallStatus(): Promise<RuntimeInstallStatus>;
+  installOfficialRuntime(): Promise<RuntimeFingerprintProbeResult>;
+  cancelRuntimeInstall(): Promise<void>;
   probeRuntimeFingerprint(runtimeId: string): Promise<RuntimeFingerprintProbeResult>;
   /** List registered browser runtimes (auto-detected from the local system). */
   listRuntimes(): Promise<BrowserRuntime[]>;

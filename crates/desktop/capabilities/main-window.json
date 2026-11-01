@@ -8,6 +8,9 @@
   },
   "windows": ["main"],
   "permissions": [
+    "allow-runtime-install-official",
+    "allow-runtime-install-status",
+    "allow-runtime-install-cancel",
     "allow-backup-cancel",
     "allow-backup-cleanup",
     "allow-settings-get",

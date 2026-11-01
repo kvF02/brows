@@ -40,6 +40,7 @@ use std::{
 pub(crate) struct AppState {
     pub(crate) backup_jobs: Arc<crate::backup_jobs::BackupJobs>,
     pub(crate) runtime_issue: Option<String>,
+    pub(crate) runtime_installer: Option<Arc<brows_adapters_runtime::OfficialRuntimeInstaller>>,
     pub(crate) backup_operations: Option<Arc<brows_application::BackupApplicationService>>,
     pub(crate) browsers: Arc<dyn BrowserRuntime>,
     pub(crate) profiles: Arc<ProfileApplicationService>,
@@ -115,7 +116,7 @@ impl AppState {
 
         let (browser_root, mut runtime_issue) = match chrome {
             Ok(root) => (root, None),
-            Err(_) => (data_root.join("runtimes"), Some("未找到 Google Chrome。请安装官方 Chrome，然后重新启动管理器。已有环境仍可查看和备份。".to_owned())),
+            Err(_) => (data_root.join("runtimes"), Some("未找到可用浏览器。可在设置中安装官方 Chrome for Testing，或安装 Google Chrome 后重启；已有环境仍可查看和备份。".to_owned())),
         };
         let profile_root = data_root.join("profiles");
         std::fs::create_dir_all(&profile_root).map_err(|error| {
@@ -134,7 +135,11 @@ impl AppState {
             data_root.join("backups"),
             profile_root.clone(),
         )?);
-        let browsers = Arc::new(ManagedChromiumRuntime::new(&browser_root, &profile_root)?);
+        let managed_runtimes = data_root.join("runtimes/chrome-for-testing");
+        let browsers = Arc::new(ManagedChromiumRuntime::with_roots(
+            vec![browser_root.clone(), managed_runtimes.clone()],
+            &profile_root,
+        )?);
         // The system Chrome installation is discovered at runtime. Verify its
         // Authenticode chain and publisher before recording the current digest,
         // then re-check that digest before every launch. This tolerates an
@@ -148,9 +153,15 @@ impl AppState {
                 Ok(())
             })();
             if admission.is_err() {
-                runtime_issue = Some("Chrome 未通过运行时验证。请修复官方安装，然后重新启动管理器；浏览器启动已禁用。".to_owned());
+                runtime_issue = Some("系统 Chrome 未通过运行时验证。可修复官方安装后重启，或在设置中安装官方 Chrome for Testing。".to_owned());
             }
         }
+
+        let runtime_installer = Arc::new(brows_adapters_runtime::OfficialRuntimeInstaller::new(
+            managed_runtimes,
+            browsers.clone(),
+        )?);
+        let _ = runtime_installer.load_installed();
 
         let compiler = Arc::new(LaunchPlanCompiler::new(
             presets.clone(),
@@ -223,6 +234,7 @@ impl AppState {
         Ok(Self {
             backup_jobs: Arc::new(crate::backup_jobs::BackupJobs::default()),
             runtime_issue,
+            runtime_installer: Some(runtime_installer),
             backup_operations,
             browsers: browsers.clone(),
             profiles: profile_service,
@@ -300,6 +312,7 @@ impl AppState {
         Ok(Self {
             backup_jobs: Arc::new(crate::backup_jobs::BackupJobs::default()),
             runtime_issue: None,
+            runtime_installer: None,
             backup_operations: None,
             browsers: browsers.clone(),
             profiles: profile_service,
@@ -317,8 +330,16 @@ impl AppState {
 impl Drop for AppState {
     fn drop(&mut self) {
         self.backup_jobs.stop_accepting();
+        self.browsers.stop_accepting_probes();
+        if let Some(installer) = &self.runtime_installer {
+            installer.stop_accepting();
+        }
         let _ = self.sessions.shutdown();
         self.backup_jobs.shutdown();
+        if let Some(installer) = &self.runtime_installer {
+            installer.shutdown();
+        }
+        self.browsers.wait_for_probes();
     }
 }
 
@@ -874,6 +895,38 @@ mod tests {
         drop(state);
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn startup_cleans_owned_runtime_downloads_and_preserves_rejected_packages() {
+        let root =
+            std::env::temp_dir().join(format!("brows-runtime-startup-{}", uuid::Uuid::new_v4()));
+        let missing = || {
+            Err(brows_application::ApplicationError::new(
+                ErrorCode::CapabilityUnsupported,
+                "missing",
+            ))
+        };
+        drop(AppState::production_with_runtime(root.clone(), missing()).unwrap());
+        let managed = root.join("runtimes/chrome-for-testing");
+        let staging = managed.join(format!(".install-{}", "a".repeat(32)));
+        std::fs::create_dir(&staging).unwrap();
+        std::fs::write(staging.join("download.zip"), b"partial download").unwrap();
+        let rejected = managed.join("cft-unknown");
+        std::fs::create_dir(&rejected).unwrap();
+        std::fs::write(rejected.join("receipt.json"), b"invalid receipt").unwrap();
+        let state = AppState::production_with_runtime(root.clone(), missing()).unwrap();
+        let installer = state.runtime_installer.as_ref().unwrap();
+        assert!(!installer.status().detail.is_empty());
+        assert!(!staging.exists());
+        assert_eq!(
+            std::fs::read(rejected.join("receipt.json")).unwrap(),
+            b"invalid receipt"
+        );
+        assert!(state.browsers.list_builds().unwrap().is_empty());
+        assert!(state.profiles.list(ProfileListRequest::default()).is_ok());
+        drop(state);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn startup_recovers_migration_and_rollback_boundaries_and_locks_ambiguous_profiles() {
         use brows_application::{

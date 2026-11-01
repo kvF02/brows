@@ -31,6 +31,9 @@ The repository contains the first implementation milestone:
 - application services and ports with in-memory test adapters;
 - SQLite profile persistence, including `SeedableNoise` persona fields;
 - append-only local SQLite audit persistence for Profile and Session actions;
+- an explicit official Chrome for Testing stable installer with fixed HTTPS
+  origins, Windows publisher/version checks, immutable packages, full file hashes,
+  restart admission and automatic local fingerprint probing;
 - a Chromium runtime adapter that confines paths, verifies the Windows
   Authenticode signer against the `Google LLC` allowlist and rechecks SHA-256
   before every launch;
@@ -58,7 +61,7 @@ checks that digest again before each launch. This remains local admission, not
 a remotely signed runtime catalog. It has passed the
 repeatable two-profile smoke test documented in
 [`docs/phase-1-acceptance.md`](docs/phase-1-acceptance.md). It is still an MVP:
-legacy secret migration, managed runtime installation/update, online revocation
+legacy secret migration, unattended runtime updates, online revocation
 freshness, full network diagnostics and high-strength fingerprint resistance
 remain later milestones. Encrypted backup/restore and startup recovery are now
 implemented; the latest lifecycle changes still require Windows stress and
@@ -95,6 +98,10 @@ traits so it can be replaced without changing profile and session rules.
 - Rust 1.97.1 MSVC toolchain
 - Visual Studio 2022 Build Tools with the C++ workload and Windows SDK
 - WebView2 Runtime for the later Tauri desktop build
+
+The Linux portable suite additionally requires `pkg-config` and OpenSSL development
+headers (`pkg-config libssl-dev` on Debian/Ubuntu) for the native HTTPS client.
+See [official runtime installation and acceptance](docs/runtime-installation.md).
 
 The platform-independent Rust crates can also be tested with the GNU Windows
 toolchain when MSVC Build Tools are unavailable.

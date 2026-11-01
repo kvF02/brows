@@ -18,6 +18,7 @@ import {
   type ProxyInput,
   type ProxySummary,
   type RuntimeFingerprintProbeResult,
+  type RuntimeInstallStatus,
   type SessionSummary,
   type Settings,
 } from "../types";
@@ -152,6 +153,9 @@ const handlers = Object.freeze({
   legacyMigrationRollback: "legacy_migration_rollback",
   legacyMigrationList: "legacy_migration_list",
   fingerprintPreview: "fingerprint_preview",
+  runtimeInstallStatus: "runtime_install_status",
+  runtimeInstallOfficial: "runtime_install_official",
+  runtimeInstallCancel: "runtime_install_cancel",
   listRuntimes: "list_runtimes",
   probeRuntimeFingerprint: "probe_runtime_fingerprint",
   backupList: "backup_list",
@@ -242,6 +246,9 @@ export class TauriApiClient implements ApiClient {
     }));
   }
 
+  async runtimeInstallStatus(): Promise<RuntimeInstallStatus> { return this.call<RuntimeInstallStatus>(handlers.runtimeInstallStatus); }
+  async installOfficialRuntime(): Promise<RuntimeFingerprintProbeResult> { return this.call<RuntimeFingerprintProbeResult>(handlers.runtimeInstallOfficial); }
+  async cancelRuntimeInstall(): Promise<void> { return this.call<void>(handlers.runtimeInstallCancel); }
   async probeRuntimeFingerprint(runtimeId: string): Promise<RuntimeFingerprintProbeResult> {
     return this.call<RuntimeFingerprintProbeResult>(handlers.probeRuntimeFingerprint, {
       request: { runtimeId },

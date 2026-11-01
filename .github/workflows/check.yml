@@ -3,6 +3,13 @@ name: Development checks
 on:
   push:
   pull_request:
+  workflow_dispatch:
+    inputs:
+      official_runtime:
+        description: "Download official Windows Chrome for Testing and verify real extension injection"
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -38,7 +45,21 @@ jobs:
       - run: npm run test:fingerprint
       - run: npm run test:settings
       - run: npm run test:backups
+      - run: npm run test:runtimes
       # Real signed-Chrome probes remain explicit opt-in checks. This suite
       # includes job-object process-tree tests and recovery without Chrome.
       - run: cargo +1.97.1 test --locked --workspace
       - run: cargo +1.97.1 clippy --locked --workspace --all-targets -- -D warnings
+
+  windows-official-runtime:
+    if: github.event_name == 'workflow_dispatch' && inputs.official_runtime
+    runs-on: windows-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: 1.97.1
+      # Explicit opt-in: contacts the fixed official catalog and Google storage,
+      # installs into an isolated temporary directory, and launches headless Chrome.
+      - run: cargo +1.97.1 test --locked -p brows-adapters-runtime official_windows_install_and_probe_smoke -- --ignored --nocapture

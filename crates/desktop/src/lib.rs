@@ -12,7 +12,8 @@ use commands::{
     legacy_migration_list, legacy_migration_rollback, list_runtimes, morelogin_import,
     morelogin_preview, probe_runtime_fingerprint, profile_archive, profile_clone, profile_create,
     profile_get, profile_list, profile_restore, profile_update, proxy_list, proxy_remove,
-    proxy_save, proxy_test, session_cancel_queued, session_launch, session_list, session_stop,
+    proxy_save, proxy_test, runtime_install_cancel, runtime_install_official,
+    runtime_install_status, session_cancel_queued, session_launch, session_list, session_stop,
     settings_get, settings_update,
 };
 use state::AppState;
@@ -80,6 +81,9 @@ pub fn run() {
             fingerprint_preview,
             probe_runtime_fingerprint,
             list_runtimes,
+            runtime_install_official,
+            runtime_install_status,
+            runtime_install_cancel,
             backup_list,
             backup_cleanup,
             backup_cancel,
@@ -90,16 +94,29 @@ pub fn run() {
         .expect("Brows desktop runtime failed to build")
         .run(|app, event| {
             if let RunEvent::ExitRequested { .. } = event {
+                stop_accepting_background_work(app.state::<AppState>().inner());
                 app.state::<supervisor::SessionSupervisor>().stop();
                 shutdown_services(app.state::<AppState>().inner());
             }
         })
 }
 
-fn shutdown_services(state: &AppState) {
+fn stop_accepting_background_work(state: &AppState) {
     state.backup_jobs.stop_accepting();
+    state.browsers.stop_accepting_probes();
+    if let Some(installer) = &state.runtime_installer {
+        installer.stop_accepting();
+    }
+}
+
+fn shutdown_services(state: &AppState) {
+    stop_accepting_background_work(state);
     let _ = state.sessions.shutdown();
     state.backup_jobs.shutdown();
+    if let Some(installer) = &state.runtime_installer {
+        installer.shutdown();
+    }
+    state.browsers.wait_for_probes();
 }
 
 fn main_window_url() -> WebviewUrl {

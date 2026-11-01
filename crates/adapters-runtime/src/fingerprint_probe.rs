@@ -11,10 +11,10 @@ use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Command, Stdio},
     sync::{
         atomic::{AtomicBool, AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -27,24 +27,69 @@ const MARKER_FILE: &str = ".brows-fingerprint-probe-owner";
 const PRE_START: &str = "<pre id=\"brows-fingerprint-probe\">";
 static NEXT_PROBE: AtomicU64 = AtomicU64::new(1);
 
-#[derive(Debug)]
-pub(super) struct ProbeSlot<'a> {
-    slots: &'a Mutex<HashSet<BrowserBuildId>>,
-    build_id: BrowserBuildId,
+#[derive(Debug, Default)]
+struct ProbeState {
+    stopping: bool,
+    active: HashSet<BrowserBuildId>,
 }
 
+#[derive(Debug, Default)]
+pub(super) struct ProbeGate {
+    state: Mutex<ProbeState>,
+    finished: Condvar,
+}
+impl ProbeGate {
+    pub fn lock_for_launch(&self) -> PortResult<ProbeLaunchGuard<'_>> {
+        Ok(ProbeLaunchGuard(self.state.lock().map_err(|_| {
+            internal("fingerprint probe lock is poisoned")
+        })?))
+    }
+    pub fn stop(&self) {
+        self.state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .stopping = true;
+    }
+    pub fn wait(&self) {
+        self.stop();
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        drop(
+            self.finished
+                .wait_while(state, |s| !s.active.is_empty())
+                .unwrap_or_else(|e| e.into_inner()),
+        );
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct ProbeLaunchGuard<'a>(std::sync::MutexGuard<'a, ProbeState>);
+impl ProbeLaunchGuard<'_> {
+    pub fn contains(&self, id: &BrowserBuildId) -> bool {
+        self.0.stopping || self.0.active.contains(id)
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct ProbeSlot<'a> {
+    slots: &'a ProbeGate,
+    build_id: BrowserBuildId,
+}
 impl<'a> ProbeSlot<'a> {
-    pub(super) fn acquire(
-        slots: &'a Mutex<HashSet<BrowserBuildId>>,
-        build_id: &BrowserBuildId,
-    ) -> PortResult<Self> {
-        let mut active = slots
+    pub fn acquire(slots: &'a ProbeGate, build_id: &BrowserBuildId) -> PortResult<Self> {
+        let mut state = slots
+            .state
             .lock()
             .map_err(|_| internal("fingerprint probe lock is poisoned"))?;
-        if !active.insert(build_id.clone()) {
+        if state.stopping {
+            return Err(PortError::new(
+                PortErrorKind::Unavailable,
+                "管理器正在退出，不再启动指纹探针",
+            ));
+        }
+        if state.active.len() >= 2 || !state.active.insert(build_id.clone()) {
             return Err(PortError::new(
                 PortErrorKind::AlreadyExists,
-                "此运行时已有指纹能力检测正在执行",
+                "已有指纹探针正在执行，请稍后重试",
             ));
         }
         Ok(Self {
@@ -53,12 +98,15 @@ impl<'a> ProbeSlot<'a> {
         })
     }
 }
-
 impl Drop for ProbeSlot<'_> {
     fn drop(&mut self) {
-        if let Ok(mut active) = self.slots.lock() {
-            active.remove(&self.build_id);
-        }
+        self.slots
+            .state
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .active
+            .remove(&self.build_id);
+        self.slots.finished.notify_all();
     }
 }
 
@@ -109,21 +157,12 @@ pub(super) fn run(build: &BrowserBuild, profile_root: &Path) -> PortResult<Obser
             .stdin(Stdio::null())
             .stdout(Stdio::from(output))
             .stderr(Stdio::null());
-        #[cfg(windows)]
-        {
-            use std::os::windows::process::CommandExt;
-            command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
-        }
-        let child = command.spawn().map_err(|_| {
+        let mut browser = super::BrowserChild::spawn(&mut command).map_err(|_| {
             PortError::new(
                 PortErrorKind::Unavailable,
                 "无法启动隔离的指纹能力探针；仍可使用系统原生模式",
             )
         })?;
-        let mut browser = ProbeChild {
-            child,
-            reaped: false,
-        };
         loop {
             if fs::metadata(&output_path)
                 .map_err(|_| internal("无法检查探针输出大小"))?
@@ -133,11 +172,9 @@ pub(super) fn run(build: &BrowserBuild, profile_root: &Path) -> PortResult<Obser
                 return Err(invalid_data("探针输出超过安全大小限制"));
             }
             if let Some(status) = browser
-                .child
                 .try_wait()
                 .map_err(|_| internal("无法查询探针进程状态"))?
             {
-                browser.reaped = true;
                 if !status.success() {
                     return Err(PortError::new(
                         PortErrorKind::Unavailable,
@@ -154,6 +191,9 @@ pub(super) fn run(build: &BrowserBuild, profile_root: &Path) -> PortResult<Obser
             }
             thread::sleep(Duration::from_millis(40));
         }
+        browser
+            .stop()
+            .map_err(|_| internal("无法回收探针浏览器进程树"))?;
         if !server.requested.load(Ordering::Acquire) {
             return Ok(Observation {
                 support: FingerprintSupport::Unsupported,
@@ -189,45 +229,6 @@ pub(super) fn run(build: &BrowserBuild, profile_root: &Path) -> PortResult<Obser
         (Err(error), _) => Err(error),
         (Ok(_), Err(error)) => Err(error),
         (Ok(observation), Ok(())) => Ok(observation),
-    }
-}
-
-#[derive(Debug)]
-struct ProbeChild {
-    child: Child,
-    reaped: bool,
-}
-
-impl Drop for ProbeChild {
-    fn drop(&mut self) {
-        if self.reaped {
-            return;
-        }
-        #[cfg(windows)]
-        {
-            // Only this newly spawned PID tree is targeted; no image-name kill
-            // and no user browser process is enumerated or stopped.
-            if let Some(system_root) = std::env::var_os("SystemRoot") {
-                use std::os::windows::process::CommandExt;
-                let mut stop =
-                    Command::new(PathBuf::from(system_root).join("System32/taskkill.exe"));
-                stop.args(["/PID", &self.child.id().to_string(), "/T", "/F"])
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::null())
-                    .stderr(Stdio::null())
-                    .creation_flags(0x0800_0000);
-                if let Ok(mut stopper) = stop.spawn() {
-                    let deadline = Instant::now() + Duration::from_secs(1);
-                    while matches!(stopper.try_wait(), Ok(None)) && Instant::now() < deadline {
-                        thread::sleep(Duration::from_millis(10));
-                    }
-                    let _ = stopper.kill();
-                    let _ = stopper.wait();
-                }
-            }
-        }
-        let _ = self.child.kill();
-        let _ = self.child.wait();
     }
 }
 
@@ -578,6 +579,25 @@ mod tests {
     }
 
     #[test]
+    fn closing_probe_gate_rejects_new_work_and_waits_until_resources_are_released() {
+        let slots = Arc::new(ProbeGate::default());
+        let id = BrowserBuildId::new("in-flight").unwrap();
+        let lease = ProbeSlot::acquire(&slots, &id).unwrap();
+        slots.stop();
+        assert!(ProbeSlot::acquire(&slots, &BrowserBuildId::new("late").unwrap()).is_err());
+        let (finished, wait) = std::sync::mpsc::channel();
+        let gate = slots.clone();
+        let worker = thread::spawn(move || {
+            gate.wait();
+            finished.send(()).unwrap();
+        });
+        assert!(wait.recv_timeout(Duration::from_millis(20)).is_err());
+        drop(lease);
+        wait.recv_timeout(Duration::from_secs(5)).unwrap();
+        worker.join().unwrap();
+    }
+
+    #[test]
     fn parser_requires_all_sentinels_and_numeric_memory() {
         assert!(inspect_dump(&encoded_dump(&observation()), "probe-token")
             .unwrap()
@@ -610,7 +630,7 @@ mod tests {
 
     #[test]
     fn one_probe_slot_per_build_is_released_on_drop() {
-        let slots = Mutex::new(HashSet::new());
+        let slots = ProbeGate::default();
         let id = BrowserBuildId::new("test-build").unwrap();
         let first = ProbeSlot::acquire(&slots, &id).unwrap();
         assert_eq!(

@@ -27,6 +27,7 @@ import {
   type ProxySummary,
   type SeedableNoisePersonaConfig,
   type Settings,
+  type RuntimeInstallStatus,
 } from "./types";
 
 type ViewKey = "profiles" | "proxies" | "diagnostics" | "backups" | "settings";
@@ -1790,6 +1791,72 @@ function RuntimeFingerprintRow({ api, runtime, onRefresh, onError, onNotice }: {
   );
 }
 
+function RuntimeInstallPanel({ api, onRefresh, onError, onNotice }: {
+  api: ApiClient; onRefresh(): Promise<void>; onError(message: string): void; onNotice(message: string): void;
+}) {
+  const [status, setStatus] = useState<RuntimeInstallStatus>();
+  const [starting, setStarting] = useState(false);
+  const [cancelling, setCancelling] = useState(false);
+  const [localError, setLocalError] = useState("");
+  const seenRunning = useRef(false);
+  useEffect(() => {
+    let disposed = false;
+    let timer: number | undefined;
+    const poll = async () => {
+      try {
+        const next = await api.runtimeInstallStatus();
+        if (!disposed) {
+          setStatus(next);
+          if (seenRunning.current && !next.running) void onRefresh();
+          seenRunning.current = next.running;
+        }
+      } catch (cause) { if (!disposed) setLocalError(getErrorMessage(cause)); }
+      finally { if (!disposed) timer = window.setTimeout(() => void poll(), 750); }
+    };
+    void poll();
+    return () => { disposed = true; window.clearTimeout(timer); };
+  }, [api, onRefresh]);
+  const install = async () => {
+    setStarting(true); setLocalError("");
+    try {
+      const result = await api.installOfficialRuntime();
+      await onRefresh();
+      onNotice(result.runtime.fingerprintSupport === "supported"
+        ? "官方运行时已安装并通过指纹加载样本检测，可在环境配置中选择。"
+        : "官方运行时已安装；指纹检测尚未通过，可在设置中重试检测。");
+    } catch (cause) {
+      await onRefresh();
+      if (cause instanceof ApiError && cause.code === "OPERATION_CANCELLED") onNotice("运行时安装已取消。");
+      else { setLocalError(getErrorMessage(cause)); onError(getErrorMessage(cause)); }
+    } finally { setStarting(false); }
+  };
+  const cancel = async () => {
+    setCancelling(true);
+    try { await api.cancelRuntimeInstall(); setStatus(await api.runtimeInstallStatus()); }
+    catch (cause) { setLocalError(getErrorMessage(cause)); }
+    finally { setCancelling(false); }
+  };
+  const phases: Record<RuntimeInstallStatus["phase"], string> = {
+    idle: "尚未安装", catalog: "查询官方稳定版", downloading: "下载浏览器", extracting: "校验并解包",
+    verifying: "检查签名、版本和文件", committing: "保存运行时", probing: "检测指纹扩展加载",
+    cleaning: "清理下载暂存", ready: "安装完成，指纹加载样本通过", unsupported: "已安装，指纹检测尚未通过",
+    cancelled: "已取消", failed: "安装未完成",
+  };
+  const running = starting || status?.running;
+  return <div className="runtime-install-panel">
+    <p className="form-info">安装官方 Chrome for Testing 最新稳定版。点击后访问 GoogleChromeLabs 官方目录和 Google 下载服务，安装到应用专用目录并自动检测指纹加载能力。可在环境配置中选择已安装版本。</p>
+    <button className="primary-button full" type="button" disabled={!status?.available || running} onClick={() => void install()}>{running ? "正在安装或检测…" : "安装并检测官方运行时"}</button>
+    {status && <div className="form-info" role="status">
+      <div>{phases[status.phase]}{status.running && status.cancelRequested ? " · 已请求取消，等待收尾" : ""}</div>
+      {status.phase === "downloading" && <div>已下载 {backupBytes(status.downloadedBytes)}{status.totalBytes !== null ? ` / ${backupBytes(status.totalBytes)}` : ""}</div>}
+      {status.detail && <div>{status.detail}</div>}
+      {!status.available && <div>官方运行时安装仅在 Windows 桌面版可用。</div>}
+    </div>}
+    {status?.running && <button className="secondary-button full" type="button" disabled={!status.canCancel || status.cancelRequested || cancelling} onClick={() => void cancel()}>{status.cancelRequested || cancelling ? "等待取消…" : status.canCancel ? "取消安装" : "正在提交或检测，请等待"}</button>}
+    {localError && <div className="form-error" role="alert">{localError}</div>}
+  </div>;
+}
+
 function SettingsView({
   api,
   settings,
@@ -1824,10 +1891,11 @@ function SettingsView({
         </article>
         <article className="settings-card">
           <div className="settings-card-head"><div><h2>浏览器运行时</h2><p>签名可信 ≠ 指纹支持；指纹加载检测通过 ≠ 完整 anti-detect。</p></div><span className="settings-icon">◉</span></div>
-          {runtimes.length === 0 && <div className="form-info">没有可信浏览器运行时。请安装或修复官方 Google Chrome，然后重新启动管理器；已有环境仍可查看和备份。</div>}
+          <RuntimeInstallPanel api={api} onRefresh={onRefresh} onError={onError} onNotice={onNotice} />
+          {runtimes.length === 0 && <div className="form-info">没有可信浏览器运行时。可安装官方 Chrome for Testing，或修复系统 Google Chrome 后重启管理器。</div>}
           {runtimes.map((runtime) => <RuntimeFingerprintRow key={`${runtime.id}:${runtime.version}`} api={api} runtime={runtime} onRefresh={onRefresh} onError={onError} onNotice={onNotice} />)}
           <div className="form-info">检测会创建独立临时环境，仅验证本地扩展注入。SeedableNoise 启动前必须通过；系统原生不受此限制。</div>
-          <button className="text-button" type="button" onClick={() => onNotice("启动时验证 Windows Authenticode 信任链与 Google LLC 发行者，并在每次浏览器启动前重新核对 SHA-256。")}>查看运行时信任说明 →</button>
+          <button className="text-button" type="button" onClick={() => onNotice("系统 Chrome 验证发行者并核对主程序摘要；官方 Chrome for Testing 还核对实际版本与全部安装文件。指纹支持需要另行实测。")}>查看运行时信任说明 →</button>
         </article>
         <article className="settings-card">
           <div className="settings-card-head"><div><h2>隐私与审计</h2><p>默认不向任何远程服务发送数据。</p></div><span className="settings-icon">⌁</span></div>

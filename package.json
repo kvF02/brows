@@ -13,6 +13,7 @@
     "desktop:dev": "cargo run -p brows-desktop",
     "desktop:build": "cargo build -p brows-desktop --release --features custom-protocol",
     "desktop:check": "cargo check -p brows-desktop --tests",
-    "check:ui": "npm run ui:typecheck && npm run ui:build && npm run ui:audit"
+    "check:ui": "npm run ui:typecheck && npm run ui:build && npm run ui:audit",
+    "test:runtimes": "node --experimental-vm-modules --test ui/tests/runtime-api.test.mjs"
   }
 }

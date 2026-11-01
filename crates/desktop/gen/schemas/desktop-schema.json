@@ -177,10 +177,10 @@
       "description": "Permission identifier",
       "oneOf": [
         {
-          "description": "Default permissions for the Brows app — all custom commands.\n#### This default permission set includes:\n\n- `allow-backup-cancel`\n- `allow-backup-cleanup`\n- `allow-settings-get`\n- `allow-settings-update`\n- `allow-profile-list`\n- `allow-profile-get`\n- `allow-profile-create`\n- `allow-profile-update`\n- `allow-profile-clone`\n- `allow-profile-archive`\n- `allow-profile-restore`\n- `allow-proxy-list`\n- `allow-proxy-save`\n- `allow-proxy-remove`\n- `allow-proxy-test`\n- `allow-diagnostic-run`\n- `allow-diagnostic-list`\n- `allow-legacy-migration-inspect`\n- `allow-legacy-migration-execute`\n- `allow-legacy-migration-rollback`\n- `allow-legacy-migration-list`\n- `allow-morelogin-preview`\n- `allow-morelogin-import`\n- `allow-fingerprint-preview`\n- `allow-list-runtimes`\n- `allow-session-launch`\n- `allow-session-stop`\n- `allow-session-cancel-queued`\n- `allow-session-list`\n- `allow-backup-list`\n- `allow-backup-export`\n- `allow-backup-import`",
+          "description": "Default permissions for the Brows app — all custom commands.\n#### This default permission set includes:\n\n- `allow-runtime-install-official`\n- `allow-runtime-install-status`\n- `allow-runtime-install-cancel`\n- `allow-backup-cancel`\n- `allow-backup-cleanup`\n- `allow-settings-get`\n- `allow-settings-update`\n- `allow-profile-list`\n- `allow-profile-get`\n- `allow-profile-create`\n- `allow-profile-update`\n- `allow-profile-clone`\n- `allow-profile-archive`\n- `allow-profile-restore`\n- `allow-proxy-list`\n- `allow-proxy-save`\n- `allow-proxy-remove`\n- `allow-proxy-test`\n- `allow-diagnostic-run`\n- `allow-diagnostic-list`\n- `allow-legacy-migration-inspect`\n- `allow-legacy-migration-execute`\n- `allow-legacy-migration-rollback`\n- `allow-legacy-migration-list`\n- `allow-morelogin-preview`\n- `allow-morelogin-import`\n- `allow-fingerprint-preview`\n- `allow-list-runtimes`\n- `allow-session-launch`\n- `allow-session-stop`\n- `allow-session-cancel-queued`\n- `allow-session-list`\n- `allow-backup-list`\n- `allow-backup-export`\n- `allow-backup-import`",
           "type": "string",
           "const": "default",
-          "markdownDescription": "Default permissions for the Brows app — all custom commands.\n#### This default permission set includes:\n\n- `allow-backup-cancel`\n- `allow-backup-cleanup`\n- `allow-settings-get`\n- `allow-settings-update`\n- `allow-profile-list`\n- `allow-profile-get`\n- `allow-profile-create`\n- `allow-profile-update`\n- `allow-profile-clone`\n- `allow-profile-archive`\n- `allow-profile-restore`\n- `allow-proxy-list`\n- `allow-proxy-save`\n- `allow-proxy-remove`\n- `allow-proxy-test`\n- `allow-diagnostic-run`\n- `allow-diagnostic-list`\n- `allow-legacy-migration-inspect`\n- `allow-legacy-migration-execute`\n- `allow-legacy-migration-rollback`\n- `allow-legacy-migration-list`\n- `allow-morelogin-preview`\n- `allow-morelogin-import`\n- `allow-fingerprint-preview`\n- `allow-list-runtimes`\n- `allow-session-launch`\n- `allow-session-stop`\n- `allow-session-cancel-queued`\n- `allow-session-list`\n- `allow-backup-list`\n- `allow-backup-export`\n- `allow-backup-import`"
+          "markdownDescription": "Default permissions for the Brows app — all custom commands.\n#### This default permission set includes:\n\n- `allow-runtime-install-official`\n- `allow-runtime-install-status`\n- `allow-runtime-install-cancel`\n- `allow-backup-cancel`\n- `allow-backup-cleanup`\n- `allow-settings-get`\n- `allow-settings-update`\n- `allow-profile-list`\n- `allow-profile-get`\n- `allow-profile-create`\n- `allow-profile-update`\n- `allow-profile-clone`\n- `allow-profile-archive`\n- `allow-profile-restore`\n- `allow-proxy-list`\n- `allow-proxy-save`\n- `allow-proxy-remove`\n- `allow-proxy-test`\n- `allow-diagnostic-run`\n- `allow-diagnostic-list`\n- `allow-legacy-migration-inspect`\n- `allow-legacy-migration-execute`\n- `allow-legacy-migration-rollback`\n- `allow-legacy-migration-list`\n- `allow-morelogin-preview`\n- `allow-morelogin-import`\n- `allow-fingerprint-preview`\n- `allow-list-runtimes`\n- `allow-session-launch`\n- `allow-session-stop`\n- `allow-session-cancel-queued`\n- `allow-session-list`\n- `allow-backup-list`\n- `allow-backup-export`\n- `allow-backup-import`"
         },
         {
           "description": "Request cancellation before a backup operation commits.",
@@ -337,6 +337,24 @@
           "type": "string",
           "const": "allow-proxy-test",
           "markdownDescription": "Enables the proxy_test command without any pre-configured scope."
+        },
+        {
+          "description": "Cancel an official browser installation before package publication.",
+          "type": "string",
+          "const": "allow-runtime-install-cancel",
+          "markdownDescription": "Cancel an official browser installation before package publication."
+        },
+        {
+          "description": "Install the latest stable official Chrome for Testing from fixed HTTPS origins.",
+          "type": "string",
+          "const": "allow-runtime-install-official",
+          "markdownDescription": "Install the latest stable official Chrome for Testing from fixed HTTPS origins."
+        },
+        {
+          "description": "Read official browser installation progress.",
+          "type": "string",
+          "const": "allow-runtime-install-status",
+          "markdownDescription": "Read official browser installation progress."
         },
         {
           "description": "Enables the session_cancel_queued command without any pre-configured scope.",
