@@ -13,6 +13,7 @@ serde_json.workspace = true
 sha2 = "0.10"
 serde = { workspace = true }
 getrandom = "0.3.4"
+dunce = "1.0.5"
 reqwest = { version = "0.13.4", default-features = false, features = ["native-tls"] }
 tokio = { version = "1", features = ["rt", "time", "macros"] }
 zip = { version = "4.6.1", default-features = false, features = ["deflate"] }

@@ -316,7 +316,13 @@ impl ManagedChromiumRuntime {
         user_data_dir: &Path,
     ) -> PortResult<Vec<OsString>> {
         let mut rendered = vec![
-            OsString::from(format!("--user-data-dir={}", user_data_dir.display())),
+            // Keep canonical paths for confinement/integrity, but use an
+            // equivalent ordinary Windows path at the Chromium CLI boundary.
+            // IndexedDB's backing store does not accept verbatim drive paths.
+            OsString::from(format!(
+                "--user-data-dir={}",
+                dunce::simplified(user_data_dir).display()
+            )),
             OsString::from("--no-first-run"),
             OsString::from("--no-default-browser-check"),
         ];
@@ -383,7 +389,7 @@ impl ManagedChromiumRuntime {
                         .map_err(|error| invalid_data(error.to_string()))?;
                     rendered.push(OsString::from(format!(
                         "--load-extension={}",
-                        path.display()
+                        dunce::simplified(path).display()
                     )));
                 }
                 LaunchArgument::DisableBlinkFeatures(features) => {

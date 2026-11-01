@@ -284,6 +284,7 @@ dependencies = [
  "brows-application",
  "brows-contracts",
  "brows-domain",
+ "dunce",
  "getrandom 0.3.4",
  "reqwest",
  "serde",

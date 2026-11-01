@@ -176,8 +176,14 @@ pub(super) fn run(build: &BrowserBuild, profile_root: &Path) -> PortResult<Obser
             "--no-proxy-server",
             "--lang=en-US",
         ]);
-        command.arg(format!("--user-data-dir={}", user_data.display()));
-        command.arg(format!("--load-extension={}", extension.display()));
+        command.arg(format!(
+            "--user-data-dir={}",
+            dunce::simplified(&user_data).display()
+        ));
+        command.arg(format!(
+            "--load-extension={}",
+            dunce::simplified(&extension).display()
+        ));
         command.arg(format!("http://{}/{}", server.address, directory.nonce));
         command
             .stdin(Stdio::null())

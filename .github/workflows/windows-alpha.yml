@@ -43,7 +43,9 @@ jobs:
             ~/.cargo/git
             target/alpha-build
           key: windows-alpha-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-          restore-keys: windows-alpha-${{ hashFiles('Cargo.lock') }}-
+          restore-keys: |
+            windows-alpha-${{ hashFiles('Cargo.lock') }}-
+            windows-alpha-
       - name: Check, build and package isolated Alpha
         id: package
         shell: pwsh
@@ -105,7 +107,9 @@ jobs:
             ~/.cargo/git
             target/alpha-build
           key: windows-alpha-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-          restore-keys: windows-alpha-${{ hashFiles('Cargo.lock') }}-
+          restore-keys: |
+            windows-alpha-${{ hashFiles('Cargo.lock') }}-
+            windows-alpha-
       - name: Build embedded frontend assets for native test harness
         shell: pwsh
         run: |

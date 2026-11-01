@@ -121,6 +121,38 @@ fn check(report: &mut Value, name: &str) {
     eprintln!("[native-browser] passed: {name}");
 }
 
+fn storage_logs(root: &Path, directory: &Path, depth: usize, logs: &mut Vec<Value>) {
+    if depth == 0 || logs.len() >= 12 {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(directory) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let Ok(metadata) = fs::symlink_metadata(entry.path()) else {
+            continue;
+        };
+        if metadata.file_type().is_symlink() {
+            continue;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::MetadataExt;
+            if metadata.file_attributes() & 0x400 != 0 {
+                continue;
+            }
+        }
+        if metadata.is_dir() {
+            storage_logs(root, &entry.path(), depth - 1, logs);
+        } else if matches!(entry.file_name().to_str(), Some("LOG" | "LOG.old"))
+            && metadata.len() <= 65536
+            && logs.len() < 12
+        {
+            logs.push(json!({"path":entry.path().strip_prefix(root).unwrap().to_string_lossy(),"text":fs::read_to_string(entry.path()).unwrap_or_default()}));
+        }
+    }
+}
+
 fn exercise(root: &Path, report: &mut Value) {
     if !cfg!(windows) {
         panic!("this acceptance requires real Windows Chrome");
@@ -296,6 +328,9 @@ fn system_native_windows_acceptance() {
     }));
     report["passed"] = json!(result.is_ok());
     if let Err(error) = &result {
+        let mut logs = Vec::new();
+        storage_logs(&root, &root.join("manager-data/profiles"), 8, &mut logs);
+        report["storageLogs"] = json!(logs);
         report["error"] = json!(error
             .downcast_ref::<String>()
             .map(String::as_str)
