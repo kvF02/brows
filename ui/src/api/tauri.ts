@@ -278,7 +278,17 @@ export class TauriApiClient implements ApiClient {
   }
 
   async listProfiles(includeArchived = false): Promise<Profile[]> {
-    const sessionsPromise = this.call<SessionDto[]>(handlers.sessionList);
+    // Observe both failures immediately, even while the profile pages are loading.
+    const [profiles, sessions] = await Promise.all([
+      this.listProfileDtos(includeArchived),
+      this.call<SessionDto[]>(handlers.sessionList),
+    ]);
+    this.sessions = sessions;
+    profiles.forEach((profile) => this.cacheProfile(profile));
+    return profiles.map((profile) => this.toProfile(profile));
+  }
+
+  private async listProfileDtos(includeArchived: boolean): Promise<ProfileDto[]> {
     const profiles: ProfileDto[] = [];
     for (let page = 1; ; page += 1) {
       const batch = await this.call<ProfileDto[]>(handlers.profileList, {
@@ -287,10 +297,7 @@ export class TauriApiClient implements ApiClient {
       profiles.push(...batch);
       if (batch.length < 200) break;
     }
-    const sessions = await sessionsPromise;
-    this.sessions = sessions;
-    profiles.forEach((profile) => this.dtoCache.set(profile.id, profile));
-    return profiles.map((profile) => this.toProfile(profile));
+    return profiles;
   }
 
   async getProfile(id: string): Promise<Profile> {
@@ -299,7 +306,7 @@ export class TauriApiClient implements ApiClient {
       this.call<SessionDto[]>(handlers.sessionList),
     ]);
     this.sessions = sessions;
-    this.dtoCache.set(profile.id, profile);
+    this.cacheProfile(profile);
     return this.toProfile(profile);
   }
 
@@ -307,7 +314,7 @@ export class TauriApiClient implements ApiClient {
     const profile = await this.call<ProfileDto>(handlers.profileCreate, {
       request: { profile: draftFromInput(input) },
     });
-    this.dtoCache.set(profile.id, profile);
+    this.cacheProfile(profile);
     return this.toProfile(profile);
   }
 
@@ -316,7 +323,8 @@ export class TauriApiClient implements ApiClient {
     revision: number,
     changes: Partial<ProfileInput>,
   ): Promise<Profile> {
-    const current = await this.getDto(id);
+    // Reuse cached fields only when they match the edit's expected revision.
+    const current = await this.getDto(id, revision);
     const profile = await this.call<ProfileDto>(handlers.profileUpdate, {
       request: {
         profileId: id,
@@ -324,7 +332,7 @@ export class TauriApiClient implements ApiClient {
         expectedRevision: revision,
       },
     });
-    this.dtoCache.set(profile.id, profile);
+    this.cacheProfile(profile);
     return this.toProfile(profile);
   }
 
@@ -332,7 +340,7 @@ export class TauriApiClient implements ApiClient {
     const profile = await this.call<ProfileDto>(handlers.profileClone, {
       request: { profileId: id },
     });
-    this.dtoCache.set(profile.id, profile);
+    this.cacheProfile(profile);
     return this.toProfile(profile);
   }
 
@@ -340,7 +348,7 @@ export class TauriApiClient implements ApiClient {
     const profile = await this.call<ProfileDto>(handlers.profileArchive, {
       request: { profileId: id, expectedRevision: revision },
     });
-    this.dtoCache.set(profile.id, profile);
+    this.cacheProfile(profile);
     return this.toProfile(profile);
   }
 
@@ -348,7 +356,7 @@ export class TauriApiClient implements ApiClient {
     const profile = await this.call<ProfileDto>(handlers.profileRestore, {
       request: { profileId: id, expectedRevision: revision },
     });
-    this.dtoCache.set(profile.id, profile);
+    this.cacheProfile(profile);
     return this.toProfile(profile);
   }
 
@@ -456,7 +464,7 @@ export class TauriApiClient implements ApiClient {
     const result = await this.call<BackupImportResultDto>(handlers.backupImport, {
       request: { sourceName, password },
     });
-    this.dtoCache.set(result.profile.id, result.profile);
+    this.cacheProfile(result.profile);
     return this.toProfile(result.profile);
   }
   async getSettings(): Promise<Settings> {
@@ -466,13 +474,22 @@ export class TauriApiClient implements ApiClient {
     return unsupported("设置持久化");
   }
 
-  private async getDto(id: string): Promise<ProfileDto> {
+  private cacheProfile(profile: ProfileDto): void {
+    const cached = this.dtoCache.get(profile.id);
+    // Reads and mutations can finish out of order. An older response must not
+    // replace fields that a subsequent partial update will merge into its draft.
+    if (!cached || profile.revision >= cached.revision) {
+      this.dtoCache.set(profile.id, profile);
+    }
+  }
+
+  private async getDto(id: string, revision?: number): Promise<ProfileDto> {
     const cached = this.dtoCache.get(id);
-    if (cached) return cached;
+    if (cached && (revision === undefined || cached.revision === revision)) return cached;
     const profile = await this.call<ProfileDto>(handlers.profileGet, {
       request: { profileId: id },
     });
-    this.dtoCache.set(id, profile);
+    this.cacheProfile(profile);
     return profile;
   }
 
@@ -490,7 +507,7 @@ export class TauriApiClient implements ApiClient {
   }
 
   private toProfile(dto: ProfileDto): Profile {
-    const session = newestActiveSession(this.sessions, dto.id);
+    const session = newestActiveSession(this.sessions, dto.id) ?? newestSession(this.sessions, dto.id);
     const createdAt = this.firstSeen.get(dto.id) ?? new Date().toISOString();
     this.firstSeen.set(dto.id, createdAt);
     return {
@@ -683,13 +700,20 @@ function runtimeId(browser: BrowserSelectorDto): string {
 }
 
 function newestActiveSession(sessions: SessionDto[], profileId: string): SessionDto | undefined {
-  return sessions
-    .filter(
-      (session) =>
-        session.profileId === profileId &&
-        !["stopped", "failed"].includes(session.state),
-    )
-    .sort((left, right) => right.createdAtMs - left.createdAtMs)[0];
+  return newestSession(sessions, profileId, true);
+}
+
+function newestSession(sessions: SessionDto[], profileId: string, activeOnly = false): SessionDto | undefined {
+  let newest: SessionDto | undefined;
+  for (const session of sessions) {
+    if (session.profileId !== profileId) continue;
+    if (activeOnly && (session.state === "stopped" || session.state === "failed")) continue;
+    if (!newest || session.createdAtMs > newest.createdAtMs ||
+      (session.createdAtMs === newest.createdAtMs && session.updatedAtMs > newest.updatedAtMs)) {
+      newest = session;
+    }
+  }
+  return newest;
 }
 
 function toSessionSummary(session: SessionDto): SessionSummary {
