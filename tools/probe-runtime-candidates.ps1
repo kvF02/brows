@@ -28,7 +28,7 @@ try {
     $report.admitted = $true
     $report.version = (Get-Item -LiteralPath $executable).VersionInfo.ProductVersion
     $report.sha256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
-    $observation = & node (Join-Path $PSScriptRoot 'fingerprint-browser-smoke.mjs') $executable
+    $observation = & node (Join-Path $PSScriptRoot 'fingerprint-browser-smoke.mjs') $executable --diagnostic-matrix
     $exitCode = $LASTEXITCODE
     if ($exitCode -notin @(0, 1)) { throw "Candidate observation did not complete (code $exitCode)." }
     $report.observation = ($observation -join "`n") | ConvertFrom-Json
