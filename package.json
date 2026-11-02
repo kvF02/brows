@@ -3,7 +3,7 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "test": "node --test tools/fingerprint-hook.test.mjs && npm run test:ui",
+    "test": "node --test tools/*.test.mjs && npm run test:ui",
     "test:ui": "node --experimental-vm-modules --test ui/tests/*.test.mjs",
     "test:fingerprint": "node --test tools/fingerprint-hook.test.mjs && node --experimental-vm-modules --test ui/tests/fingerprint-api.test.mjs",
     "ui:dev": "npm --prefix ui run dev",
@@ -13,6 +13,7 @@
     "desktop:dev": "cargo run -p brows-desktop",
     "desktop:build": "cargo build -p brows-desktop --release --features custom-protocol",
     "desktop:check": "cargo check -p brows-desktop --tests",
-    "check:ui": "npm run ui:typecheck && npm run ui:build && npm run ui:audit"
+    "check:ui": "npm run ui:typecheck && npm run ui:build && npm run ui:audit",
+    "observe:fingerprint": "node tools/fingerprint-observation.mjs"
   }
 }

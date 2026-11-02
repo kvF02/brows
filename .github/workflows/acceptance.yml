@@ -1,0 +1,54 @@
+name: Windows runtime acceptance
+on:
+  pull_request:
+  push:
+    branches: [master, 'codex/trusted-runtime-acceptance']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Unit and adapter tests
+        run: npm test
+      - name: UI type check and build
+        run: |
+          npm ci --prefix ui
+          npm run ui:build
+      - name: Install Rust toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy,rustfmt
+      - name: Rust tests and lint
+        run: |
+          cargo +stable test --workspace --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +stable clippy --workspace --all-targets --locked -- -D warnings
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install official Stable Chrome for Testing
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP 'brows-acceptance'
+          ./tools/install-runtime.ps1 -DataRoot $root
+          "BROWS_ACCEPTANCE_DATA_ROOT=$root" >> $env:GITHUB_ENV
+      - name: Production registration and capability probe
+        run: cargo +stable test -p brows-desktop managed_runtime_acceptance -- --ignored --nocapture
+      - name: Cross-context observations
+        shell: pwsh
+        run: |
+          $chrome = Get-ChildItem "$env:BROWS_ACCEPTANCE_DATA_ROOT/runtimes/*/chrome-win64/chrome.exe" | Select-Object -First 1
+          node tools/fingerprint-observation.mjs $chrome.FullName target/fingerprint-observation.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Preserve actual evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fingerprint-observation-windows
+          path: target/fingerprint-observation.json
+          if-no-files-found: ignore

@@ -29,6 +29,8 @@ use std::{
 
 mod authenticode;
 mod fingerprint_probe;
+mod managed_bundle;
+pub use managed_bundle::discover_managed_builds;
 
 pub use authenticode::verify_authenticode_publisher;
 
@@ -43,7 +45,8 @@ struct BuildRegistry {
 /// Owns verified browser builds and all child processes launched from them.
 #[derive(Debug)]
 pub struct ManagedChromiumRuntime {
-    runtime_root: PathBuf,
+    runtime_roots: Vec<PathBuf>,
+    bundles: RwLock<BTreeMap<BrowserBuildId, managed_bundle::Bundle>>,
     profile_root: PathBuf,
     builds: RwLock<BuildRegistry>,
     processes: Mutex<HashMap<SessionId, Child>>,
@@ -55,10 +58,22 @@ impl ManagedChromiumRuntime {
         runtime_root: impl Into<PathBuf>,
         profile_root: impl Into<PathBuf>,
     ) -> PortResult<Self> {
-        let runtime_root = create_and_canonicalize(runtime_root.into(), "runtime root")?;
+        Self::with_runtime_roots(vec![runtime_root.into()], profile_root)
+    }
+
+    /// Roots are selected by the composition root, never by IPC callers.
+    pub fn with_runtime_roots(
+        runtime_roots: Vec<PathBuf>,
+        profile_root: impl Into<PathBuf>,
+    ) -> PortResult<Self> {
+        if runtime_roots.is_empty() { return Err(invalid_data("no runtime roots")); }
+        let runtime_roots = runtime_roots.into_iter()
+            .map(|root| create_and_canonicalize(root, "runtime root"))
+            .collect::<PortResult<Vec<_>>>()?;
         let profile_root = create_and_canonicalize(profile_root.into(), "profile root")?;
         Ok(Self {
-            runtime_root,
+            runtime_roots,
+            bundles: RwLock::new(BTreeMap::new()),
             profile_root,
             builds: RwLock::new(BuildRegistry::default()),
             processes: Mutex::new(HashMap::new()),
@@ -79,7 +94,7 @@ impl ManagedChromiumRuntime {
         }
 
         let executable = canonical_regular_file(&build.executable_path, "browser executable")?;
-        ensure_within(&executable, &self.runtime_root, "browser executable")?;
+        self.ensure_runtime_path(&executable)?;
         verify_digest(&executable, &build.sha256)?;
         build.executable_path = executable;
         // Publisher admission is not proof of extension support. Only the
@@ -109,10 +124,38 @@ impl ManagedChromiumRuntime {
         }
 
         let executable = canonical_regular_file(&build.executable_path, "browser executable")?;
-        ensure_within(&executable, &self.runtime_root, "browser executable")?;
+        self.ensure_runtime_path(&executable)?;
         build.sha256 = digest_file(&executable)?;
         build.executable_path = executable;
         self.register_build(build, activate)
+    }
+
+    fn ensure_runtime_path(&self, executable: &Path) -> PortResult<()> {
+        if self.runtime_roots.iter().any(|root| executable.starts_with(root)) {
+            Ok(())
+        } else {
+            Err(invalid_data("browser executable is outside admitted runtime roots"))
+        }
+    }
+
+    /// The manifest is snapshotted in memory. Later on-disk edits cannot admit
+    /// changed DLLs/resources during the life of this application process.
+    pub fn register_managed_build(&self, build: BrowserBuild, activate: bool) -> PortResult<()> {
+        let bundle = managed_bundle::Bundle::load(&build.executable_path)?;
+        bundle.verify()?;
+        let id = build.id.clone();
+        self.register_build(build, activate)?;
+        self.bundles.write().map_err(|_| internal("bundle registry lock is poisoned"))?
+            .insert(id, bundle);
+        Ok(())
+    }
+
+    fn verify_bundle(&self, id: &BrowserBuildId) -> PortResult<()> {
+        if let Some(bundle) = self.bundles.read()
+            .map_err(|_| internal("bundle registry lock is poisoned"))?.get(id) {
+            bundle.verify()?;
+        }
+        Ok(())
     }
 
     fn insert_registered_build(&self, build: BrowserBuild, activate: bool) -> PortResult<()> {
@@ -200,8 +243,9 @@ impl ManagedChromiumRuntime {
                 "browser runtime trust was revoked",
             ));
         }
-        ensure_within(&executable, &self.runtime_root, "browser executable")?;
+        self.ensure_runtime_path(&executable)?;
         verify_digest(&executable, &build.sha256)?;
+        self.verify_bundle(&build.id)?;
         Ok(build)
     }
 
@@ -329,10 +373,12 @@ impl BrowserRuntime for ManagedChromiumRuntime {
                 ));
             }
             verify_digest(&build.executable_path, &build.sha256)?;
+            self.verify_bundle(&build.id)?;
             let result = fingerprint_probe::run(&build, &self.profile_root);
             // Recheck even when browser execution failed; a changing binary
             // must never gain a capability result from an older executable.
             verify_digest(&build.executable_path, &build.sha256)?;
+            self.verify_bundle(&build.id)?;
             result
         })();
         match observation {
