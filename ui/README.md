@@ -4,7 +4,7 @@
 
 ## 开发
 
-需要 Node.js 18+：
+需要 Node.js 24+：
 
 ```powershell
 npm install
@@ -18,6 +18,16 @@ npm run typecheck
 npm run build
 npm run preview
 ```
+
+适配层回归测试可在仓库根目录直接运行，不需要安装 UI 依赖或启动 WebView：
+
+```powershell
+npm run test:ui
+npm test
+```
+
+`test:ui` 覆盖配置版本合并、会话状态映射、分页和并行请求失败处理，以及指纹配置契约。
+`npm test` 还会运行指纹 hook 测试。适配层测试通过 Node.js 的 TypeScript 转换和 VM 模块加载真实源码。
 
 若交付包未包含 `node_modules`，网络不可用时以上命令需要由构建机预先缓存 npm 依赖。UI 源码本身不依赖图标、CSS 框架或远程字体。
 
