@@ -2,7 +2,7 @@ name: Windows runtime acceptance
 on:
   pull_request:
   push:
-    branches: [master, 'codex/trusted-runtime-acceptance']
+    branches: [master]
   workflow_dispatch:
 permissions:
   contents: read
@@ -23,17 +23,18 @@ jobs:
         run: |
           npm ci --prefix ui
           npm run ui:build
-      - name: Install official Stable Chrome for Testing
+      - name: Select signed Edge runtime
         shell: pwsh
         run: |
-          $root = Join-Path $env:RUNNER_TEMP 'brows-acceptance'
-          ./tools/install-runtime.ps1 -DataRoot $root
-          "BROWS_ACCEPTANCE_DATA_ROOT=$root" >> $env:GITHUB_ENV
+          $edge = Join-Path ${env:ProgramFiles(x86)} 'Microsoft/Edge/Application/msedge.exe'
+          $signature = Get-AuthenticodeSignature -LiteralPath $edge
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) -ne 'Microsoft Corporation') { throw 'Edge signature admission failed' }
+          "BROWS_ACCEPTANCE_BROWSER=$edge" >> $env:GITHUB_ENV
+          "BROWS_ACCEPTANCE_DATA_ROOT=$(Join-Path $env:RUNNER_TEMP 'brows-acceptance')" >> $env:GITHUB_ENV
       - name: Cross-context observations
         shell: pwsh
         run: |
-          $chrome = Get-ChildItem "$env:BROWS_ACCEPTANCE_DATA_ROOT/runtimes/*/chrome-win64/chrome.exe" | Select-Object -First 1
-          node tools/fingerprint-observation.mjs $chrome.FullName target/fingerprint-observation.json
+          node tools/fingerprint-observation.mjs $env:BROWS_ACCEPTANCE_BROWSER target/fingerprint-observation.json
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
@@ -44,7 +45,7 @@ jobs:
           cargo +1.97.1 clippy --workspace --all-targets --locked -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Production registration and capability probe
-        run: cargo +1.97.1 test -p brows-desktop managed_runtime_acceptance -- --ignored --nocapture
+        run: cargo +1.97.1 test -p brows-desktop signed_runtime_acceptance -- --ignored --nocapture
       - name: Preserve actual evidence
         if: always()
         uses: actions/upload-artifact@v4

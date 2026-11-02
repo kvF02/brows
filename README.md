@@ -20,8 +20,8 @@ no detection-site pass rate is promised. The default `SystemNative` persona
 remains truthful. See the
 current [fingerprint design and acceptance plan](docs/fingerprint-design.md).
 
-Windows 受控运行时安装与实际覆盖验收见
-[运行时验收流程](docs/runtime-acceptance.md)。新增的 Chrome for Testing 路径仍需
+Windows 签名运行时选择与实际覆盖验收见
+[运行时验收流程](docs/runtime-acceptance.md)。新增的 Microsoft Edge 路径仍需
 真实探针通过，跨上下文报告会保留未覆盖与不一致项。
 
 ## Current Status
@@ -35,7 +35,7 @@ The repository contains the first implementation milestone:
 - SQLite profile persistence, including `SeedableNoise` persona fields;
 - append-only local SQLite audit persistence for Profile and Session actions;
 - a Chromium runtime adapter that confines paths, verifies the Windows
-  Authenticode signer against the `Google LLC` allowlist and rechecks SHA-256
+  Authenticode signer against the runtime-specific publisher allowlist and rechecks SHA-256
   before every launch;
 - a Windows Credential Manager `SecretStore` adapter with redacted errors,
   idempotent cleanup and a non-Windows unavailable stub;
@@ -53,7 +53,7 @@ are documented in [`docs/morelogin-gap-analysis.md`](docs/morelogin-gap-analysis
 The phase-one Windows desktop path now uses SQLite persistence and launches the
 locally installed Google Chrome runtime. At startup it validates the local
 Authenticode trust decision without network retrieval, requires the leaf
-certificate publisher to be `Google LLC`, records the current file digest and
+certificate publisher to be `Google LLC` (Chrome) or `Microsoft Corporation` (Edge), records the current file digest and
 checks that digest again before each launch. This remains local admission, not
 a remotely signed runtime catalog. It has passed the
 repeatable two-profile smoke test documented in

@@ -2,7 +2,7 @@ use brows_adapters_backup::EncryptedBackupService;
 use brows_adapters_diagnostic::LocalNetworkDiagnosticRunner;
 use brows_adapters_morelogin::MoreLoginProfileDataMigrator;
 use brows_adapters_proxy::{StoredProxyRuntime, TcpProxyConnectivityTester};
-use brows_adapters_runtime::{discover_managed_builds, verify_authenticode_publisher, ManagedChromiumRuntime};
+use brows_adapters_runtime::{verify_authenticode_publisher, ManagedChromiumRuntime};
 use brows_adapters_secret_windows::WindowsCredentialStore;
 use brows_adapters_sqlite::{
     SqliteAuditSink, SqliteMigrationRecordRepository, SqliteProfileRepository,
@@ -79,9 +79,7 @@ impl AppState {
         presets.insert(system_native_preset())?;
 
         let system_root = discover_chrome_root().ok();
-        let managed_root = data_root.join("runtimes");
-        std::fs::create_dir_all(&managed_root).map_err(|_| brows_application::ApplicationError::new(
-            brows_contracts::ErrorCode::Internal, "cannot create managed runtime root"))?;
+        let edge_root = discover_edge_root();
         let profile_root = data_root.join("profiles");
         std::fs::create_dir_all(&profile_root).map_err(|error| {
             brows_application::ApplicationError::new(
@@ -99,19 +97,19 @@ impl AppState {
             data_root.join("backups"),
             profile_root.clone(),
         )?);
-        let mut roots = vec![managed_root.clone()];
-        if let Some(root) = &system_root { roots.push(root.clone()); }
+        let roots: Vec<_> = system_root.iter().chain(edge_root.iter()).cloned().collect();
         let browsers = Arc::new(ManagedChromiumRuntime::with_runtime_roots(roots, &profile_root)?);
         if let Some(root) = system_root {
             let mut build = discovered_chrome_build(&root)?;
             build.publisher = verify_authenticode_publisher(&build.executable_path, &["Google LLC"])?;
             browsers.register_build_with_current_digest(build, true)?;
         }
-        // A managed installation never receives Supported merely from its
-        // manifest or signer. The same local production probe remains required.
-        for mut build in discover_managed_builds(&managed_root)? {
-            build.publisher = verify_authenticode_publisher(&build.executable_path, &["Google LLC"])?;
-            browsers.register_managed_build(build, false)?;
+        if let Some(root) = edge_root {
+            let mut build = discovered_edge_build(&root)?;
+            build.publisher = verify_authenticode_publisher(&build.executable_path, &["Microsoft Corporation"])?;
+            // Chrome remains the default for existing channel-based profiles.
+            let activate = browsers.installed_builds()?.is_empty();
+            browsers.register_build_with_current_digest(build, activate)?;
         }
 
         let compiler = Arc::new(LaunchPlanCompiler::new(
@@ -259,6 +257,22 @@ fn discover_chrome_root() -> ApplicationResult<PathBuf> {
                 "Google Chrome installation was not found",
             )
         })
+}
+
+fn discover_edge_root() -> Option<PathBuf> {
+    ["ProgramFiles(x86)", "ProgramFiles", "LocalAppData"].into_iter()
+        .filter_map(std::env::var_os)
+        .map(|root| PathBuf::from(root).join("Microsoft/Edge/Application"))
+        .find(|root| root.join("msedge.exe").is_file())
+}
+
+fn discovered_edge_build(root: &std::path::Path) -> ApplicationResult<BrowserBuild> {
+    let mut build = discovered_chrome_build(root)?;
+    build.id = BrowserBuildId::new("microsoft-edge-stable")?;
+    build.provider = "Microsoft Edge".to_owned();
+    build.executable_path = root.join("msedge.exe");
+    build.publisher = "Microsoft Corporation".to_owned();
+    Ok(build)
 }
 
 #[derive(Debug, Default)]
@@ -601,13 +615,13 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "requires a fresh CI runtime installation and launches signed CfT"]
-    fn managed_runtime_acceptance() {
+    #[ignore = "requires Windows and launches an isolated signed Edge probe"]
+    fn signed_runtime_acceptance() {
         let root = PathBuf::from(std::env::var_os("BROWS_ACCEPTANCE_DATA_ROOT").expect("explicit acceptance root"));
         assert_eq!(root.file_name().unwrap(), "brows-acceptance");
         let state = AppState::production(root).unwrap();
         let build = state.browsers.list_builds().unwrap().into_iter()
-            .find(|b| b.provider == "Chrome for Testing").expect("managed runtime registered");
+            .find(|b| b.provider == "Microsoft Edge").expect("signed Edge registered");
         assert_eq!(build.trust, RuntimeTrust::Verified);
         let result = state.browsers.probe_fingerprint_support(&build.id).unwrap();
         assert_eq!(result.build.capabilities.fingerprint_support, brows_domain::FingerprintSupport::Supported, "{}", result.detail);
