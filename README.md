@@ -20,6 +20,10 @@ no detection-site pass rate is promised. The default `SystemNative` persona
 remains truthful. See the
 current [fingerprint design and acceptance plan](docs/fingerprint-design.md).
 
+Windows 受控运行时安装与实际覆盖验收见
+[运行时验收流程](docs/runtime-acceptance.md)。新增的 Chrome for Testing 路径仍需
+真实探针通过，跨上下文报告会保留未覆盖与不一致项。
+
 ## Current Status
 
 The repository contains the first implementation milestone:
