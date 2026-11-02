@@ -50,7 +50,7 @@ npm run observe:fingerprint -- "C:/Program Files (x86)/Microsoft/Edge/Applicatio
 ## 自动化验证
 
 `.github/workflows/acceptance.yml` 在 Windows 执行 JavaScript 测试、完整 UI 构建、
-Rust workspace 测试和 clippy，并验证 Edge 签名、生产登记/能力探针及跨上下文观测。
+Rust workspace 测试和 clippy，并验证 Edge 签名、生产登记/能力探针、两个真实 SeedableNoise 会话的启动/停止及跨上下文观测。
 JSON 报告作为 Actions artifact 保存；Rust 工具链与仓库的 1.97.1 保持一致。
 
 本地行为回归是 `npm test`。真实生产验收显式执行：

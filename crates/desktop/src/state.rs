@@ -625,6 +625,37 @@ mod tests {
         assert_eq!(build.trust, RuntimeTrust::Verified);
         let result = state.browsers.probe_fingerprint_support(&build.id).unwrap();
         assert_eq!(result.build.capabilities.fingerprint_support, brows_domain::FingerprintSupport::Supported, "{}", result.detail);
+        let mut started = Vec::new();
+        for name in ["Edge acceptance A", "Edge acceptance B"] {
+            let mut profile = draft(name);
+            profile.browser = BrowserSelectorDto::Pinned { build_id: (&build.id).into() };
+            profile.persona = PersonaDto::SeedableNoise {
+                seed: name.to_owned(),
+                platform: brows_contracts::PlatformDto::Windows,
+                hardware_concurrency: 4,
+                device_memory: brows_contracts::DeviceMemoryDto::Four,
+                touch_points: 0,
+                screen: brows_contracts::ScreenConfigDto {
+                    width: 1920, height: 1080, color_depth: 24,
+                    device_scale_factor_hundredths: 100,
+                },
+                webgl_vendor: String::new(), webgl_renderer: String::new(),
+                spoof_canvas: true, spoof_audio: false,
+            };
+            let profile = state.profiles.create(ProfileCreateRequest { profile }).unwrap();
+            let outcome = state.sessions.launch(SessionLaunchRequest { profile_id: profile.id }).unwrap();
+            match outcome {
+                SessionLaunchOutcome::Started { session, .. } => started.push(session),
+                SessionLaunchOutcome::Queued { .. } => panic!("acceptance launch unexpectedly queued"),
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        for session in started {
+            let id: brows_domain::SessionId = session.id.clone().try_into().unwrap();
+            assert!(state.browsers.is_running(&id).unwrap(), "signed Edge must remain running");
+            let stopped = state.sessions.stop(SessionStopRequest { session_id: session.id }).unwrap();
+            assert_eq!(stopped.state, SessionStateDto::Stopped);
+        }
     }
 
     #[test]
