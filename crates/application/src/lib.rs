@@ -10,6 +10,7 @@
 
 mod compiler;
 mod error;
+mod fingerprint_script;
 pub mod memory;
 mod migration_service;
 pub mod persona_fingerprint;
@@ -26,8 +27,10 @@ mod tests;
 
 pub use compiler::{LaunchPlanCompiler, PreparedLaunch};
 pub use error::{ApplicationError, ApplicationResult};
+pub use fingerprint_script::render_session_fingerprint;
 pub use migration_service::MigrationApplicationService;
 pub use ports::*;
 pub use profile_service::ProfileApplicationService;
 pub use proxy_service::ProxyApplicationService;
 pub use session_service::{SessionApplicationService, SessionLaunchOutcome};
+

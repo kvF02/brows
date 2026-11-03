@@ -32,6 +32,8 @@ mod fingerprint_probe;
 #[cfg(windows)]
 mod session_control;
 #[cfg(windows)]
+mod target_registry;
+#[cfg(windows)]
 mod win_pipe;
 
 static LAUNCH_LOCK: Mutex<()> = Mutex::new(());

@@ -145,9 +145,7 @@ impl LaunchPlanCompiler {
             arguments.push(LaunchArgument::SessionFingerprint(Box::new(
                 brows_domain::SessionFingerprintConfig {
                     user_agent: derived.user_agent,
-                    platform: persona.platform,
-                    hardware_concurrency: persona.hardware_concurrency,
-                    device_memory: persona.device_memory,
+                    persona: persona.clone(),
                     languages: profile.locale.accept_languages.clone(),
                     timezone: profile.locale.timezone.clone(),
                 },

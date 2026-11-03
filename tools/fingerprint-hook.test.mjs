@@ -13,7 +13,7 @@ const defaults = {
   spoof_canvas: true, spoof_audio: true,
 };
 
-function environment(overrides = {}, missing = []) {
+function environment(overrides = {}, missing = [], worker = false) {
   const persona = { ...defaults, ...overrides };
   const brands = Object.fromEntries(['navigator', 'screen', 'canvas', 'context', 'gl', 'audio', 'offline', 'event'].map(key => [key, new WeakSet()]));
   const calls = { reads: [], exports: [], audio: [], realtime: [] };
@@ -124,14 +124,19 @@ function environment(overrides = {}, missing = []) {
     Uint8ClampedArray, Float32Array, DOMException, chrome: { app: { nativeSentinel: true } },
     devicePixelRatio: 2, document: { createElement(name) { assert.equal(name, 'canvas'); return new HTMLCanvasElement(); } },
   };
+  if (worker) { globals.WorkerNavigator = Navigator; delete globals.Navigator; delete globals.Screen; delete globals.screen; delete globals.document; delete globals.HTMLCanvasElement; }
   for (const key of missing) delete globals[key];
-  globals.window = globals;
+  if (!worker) globals.window = globals;
   const originalRealtime = AudioBufferSourceNode.prototype.start;
   const originalDpr = Object.getOwnPropertyDescriptor(globals, 'devicePixelRatio');
   const context = vm.createContext(globals);
   const serialized = JSON.stringify(persona).replaceAll('\\', '\\\\').replaceAll("'", "\\'");
   vm.runInContext(template.replace('{{PERSONA_JSON}}', serialized), context, { filename: 'fingerprint-content.js' });
-  return { ...globals, persona, calls, context, originalRealtime, originalDpr };
+  const reinject = (next = persona) => {
+    const json = JSON.stringify(next).replaceAll('\\', '\\\\').replaceAll("'", "\\'");
+    return vm.runInContext(template.replace('{{PERSONA_JSON}}', json), context);
+  };
+  return { ...globals, persona, calls, context, originalRealtime, originalDpr, reinject };
 }
 
 function populatedCanvas(env, offscreen = false) {
@@ -277,4 +282,37 @@ test('missing optional APIs do not prevent other available hooks from applying',
   assert.equal(new env.WebGLRenderingContext().getParameter(37445), 'Configured vendor');
   const canvas = populatedCanvas(env);
   assert.notDeepEqual([...canvas.getContext('2d').getImageData(0, 0, 6, 4).data], [...canvas.pixels]);
+});
+
+test('WorkerNavigator and OffscreenCanvas share the page policy without fabricating window APIs', async () => {
+  const page = environment();
+  const worker = environment({}, [], true);
+  for (const key of ['hardwareConcurrency', 'deviceMemory', 'language', 'platform']) assert.equal(worker.navigator[key], page.navigator[key]);
+  assert.deepEqual([...worker.navigator.languages], [...page.navigator.languages]);
+  assert.equal(worker.window, undefined); assert.equal(worker.document, undefined); assert.equal(worker.screen, undefined);
+  const canvas = populatedCanvas(worker, true);
+  const ctx = canvas.getContext('2d');
+  const reading = [...ctx.getImageData(0, 0, 6, 4).data];
+  assert.deepEqual(reading, [...populatedCanvas(page).getContext('2d').getImageData(0, 0, 6, 4).data]);
+  assert.deepEqual((await canvas.convertToBlob()).data, reading);
+  assert.equal(new worker.WebGLRenderingContext().getParameter(37446), defaults.webgl_renderer);
+  assert.throws(() => Object.getOwnPropertyDescriptor(worker.WorkerNavigator.prototype, 'hardwareConcurrency').get.call({}), /Illegal invocation/);
+});
+
+test('reapplying the same policy preserves Canvas and audio noise; changed policy fails explicitly', async () => {
+  const env = environment({}, [], true);
+  const canvas = populatedCanvas(env, true);
+  const read = () => [...canvas.getContext('2d').getImageData(0, 0, 6, 4).data];
+  const first = read();
+  const audio = new env.OfflineAudioContext();
+  const buffer = await audio.startRendering();
+  const samples = [...buffer.getChannelData(0)];
+  assert.equal(env.reinject(), true);
+  assert.deepEqual(read(), first);
+  assert.deepEqual((await canvas.convertToBlob()).data, first);
+  assert.deepEqual([...((await audio.startRendering()).getChannelData(0))], samples);
+  assert.throws(() => env.reinject({...env.persona, seed:'changed'}), /policy changed/);
+  const marker = env.context[Symbol.for('brows.fingerprint.policy.v1')];
+  assert.equal(typeof marker, 'function');
+  assert.ok(!String(marker).includes(env.persona.seed));
 });

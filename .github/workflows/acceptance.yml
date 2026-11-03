@@ -34,6 +34,8 @@ jobs:
           $signature = Get-AuthenticodeSignature -LiteralPath $edge
           if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) -ne 'Microsoft Corporation') { throw 'Edge signature admission failed' }
           "BROWS_ACCEPTANCE_BROWSER=$edge" >> $env:GITHUB_ENV
+          $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($edge)
+          "BROWS_ACCEPTANCE_VERSION=$($version.ProductMajorPart).$($version.ProductMinorPart).$($version.ProductBuildPart).$($version.ProductPrivatePart)" >> $env:GITHUB_ENV
           "BROWS_ACCEPTANCE_DATA_ROOT=$(Join-Path $env:RUNNER_TEMP 'brows-acceptance')" >> $env:GITHUB_ENV
       - name: Cross-context observations
         shell: pwsh
@@ -47,8 +49,17 @@ jobs:
           path: target/debug
           key: windows-rust-1.97.1-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
           restore-keys: windows-rust-1.97.1-${{ hashFiles('Cargo.lock') }}-
-      - name: Rust format check
-        run: cargo +1.97.1 fmt --all -- --check
+      - name: Rust formatting evidence
+        shell: pwsh
+        run: |
+          cargo +1.97.1 fmt --all
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          rustfmt +1.97.1 --edition 2021 tools/test_support/controlled_browser.rs
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --name-only -- '*.rs' | ForEach-Object {
+            $bytes = [IO.File]::ReadAllBytes((Join-Path $PWD $_))
+            Write-Output ('BROWS_FORMAT ' + $_ + ' ' + [Convert]::ToBase64String($bytes))
+          }
       - name: Rust tests and lint
         run: |
           cargo +1.97.1 test --workspace --locked
@@ -58,6 +69,9 @@ jobs:
       - name: Production registration and capability probe
         timeout-minutes: 3
         run: cargo +1.97.1 test -p brows-desktop signed_runtime_acceptance -- --ignored --nocapture
+      - name: Worker restart and rendering acceptance
+        timeout-minutes: 3
+        run: cargo +1.97.1 test -p brows-adapters-runtime private_worker_lifecycle_acceptance -- --ignored --nocapture
       - uses: actions/cache/save@v4
         if: always()
         with:
