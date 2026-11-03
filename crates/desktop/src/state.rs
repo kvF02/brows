@@ -548,7 +548,10 @@ mod tests {
                     "text/javascript",
                 )
             } else if path.ends_with("service.js") {
-                (format!("{script}addEventListener('install',event=>event.waitUntil(proof));"), "text/javascript")
+                (
+                    format!("{script}addEventListener('install',event=>event.waitUntil(proof));"),
+                    "text/javascript",
+                )
             } else if path.ends_with("worker.js") {
                 (
                     format!("{script}setInterval(()=>{{}},1000);"),
