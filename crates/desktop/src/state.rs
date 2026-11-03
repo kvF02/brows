@@ -829,6 +829,22 @@ mod tests {
             let matching = fixture.wait_proofs(&format!("/{index}/"));
             let id: brows_domain::SessionId = session.id.clone().try_into().unwrap();
             let observed = state.sessions.observe(&id).unwrap();
+            println!(
+                "session {index} sampled/configured kinds: {:?} / {:?}",
+                matching
+                    .iter()
+                    .map(|(_, _, value)| &value["kind"])
+                    .collect::<Vec<_>>(),
+                observed
+                    .targets
+                    .iter()
+                    .map(|target| &target.kind)
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                state.browsers.is_running(&id).unwrap(),
+                "signed Edge must remain running"
+            );
             assert_eq!(
                 matching
                     .iter()
@@ -837,10 +853,6 @@ mod tests {
                     .len(),
                 6,
                 "all controlled context samples are required"
-            );
-            assert!(
-                state.browsers.is_running(&id).unwrap(),
-                "signed Edge must remain running"
             );
             assert!(
                 observed.targets.iter().any(|t| t.kind == "worker"),

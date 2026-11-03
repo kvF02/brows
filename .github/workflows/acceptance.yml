@@ -57,6 +57,7 @@ jobs:
           rustfmt +1.97.1 --edition 2021 --check tools/test_support/controlled_browser.rs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Rust tests and lint
+        id: rust_checks
         run: |
           cargo +1.97.1 test --workspace --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -66,6 +67,7 @@ jobs:
         timeout-minutes: 3
         run: cargo +1.97.1 test -p brows-desktop signed_runtime_acceptance -- --ignored --nocapture
       - name: Worker restart and rendering acceptance
+        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
         timeout-minutes: 3
         run: cargo +1.97.1 test -p brows-adapters-runtime private_worker_lifecycle_acceptance -- --ignored --nocapture
       - uses: actions/cache/save@v4

@@ -60,12 +60,7 @@ impl Wire {
             p.clear();
         }
     }
-    fn begin(
-        &self,
-        method: &str,
-        params: Value,
-        session: Option<&str>,
-    ) -> PortResult<PendingReply> {
+    fn ensure_open(&self) -> PortResult<()> {
         if self.closing.load(Ordering::Acquire) {
             return Err(internal(
                 self.policy_failure
@@ -75,6 +70,15 @@ impl Wire {
                     .unwrap_or_else(|| "session control is closed".to_owned()),
             ));
         }
+        Ok(())
+    }
+    fn begin(
+        &self,
+        method: &str,
+        params: Value,
+        session: Option<&str>,
+    ) -> PortResult<PendingReply> {
+        self.ensure_open()?;
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let mut frame = json!({"id":id,"method":method,"params":params});
         if let Some(s) = session {
@@ -620,6 +624,7 @@ impl Controller {
         outcome
     }
     pub(super) fn observe(&self, session_id: &SessionId) -> PortResult<SessionObservation> {
+        self.wire.ensure_open()?;
         let targets: Vec<_> = self
             .targets
             .0
@@ -667,6 +672,7 @@ impl Controller {
                     .to_owned(),
             });
         }
+        self.wire.ensure_open()?;
         Ok(SessionObservation {
             session_id: session_id.clone(),
             observed_at_ms: now_ms(),
@@ -874,6 +880,11 @@ mod tests {
         )
         .unwrap();
         let initial = fixture.wait_proofs("/life/");
+        assert!(
+            controller.try_wait().unwrap().is_none(),
+            "controller exited: {:?}",
+            controller.wire.policy_failure.lock().unwrap()
+        );
         assert_eq!(
             initial
                 .iter()
