@@ -151,6 +151,11 @@ pub trait BrowserRuntime: fmt::Debug + Send + Sync {
         ))
     }
 
+    fn network_probe_config(&self) -> PortResult<Option<NetworkProbeConfig>> { Ok(None) }
+    fn probe_session_network(&self, _session_id: &SessionId) -> PortResult<NetworkProbeObservation> {
+        Err(PortError::new(PortErrorKind::CapabilityUnsupported, "public network probe service is not configured"))
+    }
+
     fn observe_session(&self, _session_id: &SessionId) -> PortResult<SessionObservation> {
         Err(PortError::new(PortErrorKind::CapabilityUnsupported, "session observation is unavailable"))
     }
@@ -164,6 +169,30 @@ pub trait BrowserRuntime: fmt::Debug + Send + Sync {
     fn launch(&self, plan: &ResolvedLaunchPlan) -> PortResult<BrowserProcess>;
     fn stop(&self, session_id: &SessionId) -> PortResult<()>;
     fn is_running(&self, session_id: &SessionId) -> PortResult<bool>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkProbeConfig {
+    pub origin: String, pub zone: String, pub stun_min: u16, pub stun_max: u16,
+}
+impl NetworkProbeConfig {
+    pub fn validate(&self) -> PortResult<()> {
+        let authority = self.origin.strip_prefix("https://").unwrap_or("");
+        let parts: Vec<_> = authority.split(':').collect();
+        let domain = |name: &str| !name.is_empty() && name.len() <= 253 && name.split('.').all(|label|
+            !label.is_empty() && label.len() <= 63 && !label.starts_with('-') && !label.ends_with('-')
+            && label.bytes().all(|c| c.is_ascii_alphanumeric() || c == b'-'));
+        if parts.len() > 2 || !domain(parts[0]) || !domain(&self.zone)
+            || (parts.len() == 2 && parts[1].parse::<u16>().ok().filter(|p| *p != 0).is_none())
+            || self.stun_min < 1024 || self.stun_max < self.stun_min || self.stun_max - self.stun_min > 255 {
+            return Err(PortError::new(PortErrorKind::InvalidData, "invalid HTTPS DNS/STUN probe configuration"));
+        }
+        Ok(())
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NetworkProbeObservation {
+    pub dns: String, pub web_rtc: String, pub http_egress: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

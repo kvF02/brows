@@ -27,6 +27,8 @@ import {
   type SeedableNoisePersonaConfig,
   type Settings,
   type SessionObservation,
+  type NetworkProbeService,
+  type NetworkProbeObservation,
 } from "./types";
 
 type ViewKey = "profiles" | "proxies" | "diagnostics" | "backups" | "settings";
@@ -1573,19 +1575,31 @@ function DiagnosticsView({ api, profiles, reports, onRefresh, onError, onNotice 
 }) {
   const [selectedId, setSelectedId] = useState(profiles[0]?.id ?? "");
   const [running, setRunning] = useState(false);
-  const [observation, setObservation] = useState<SessionObservation>();
-  const observe = async () => {
-    if (!selectedId) return;
-    setRunning(true); setObservation(undefined);
-    try { setObservation(await api.observeSession(selectedId)); }
+  const [networkService, setNetworkService] = useState<NetworkProbeService>();
+  const [networkResult, setNetworkResult] = useState<NetworkProbeObservation>();
+  const [confirmNetwork, setConfirmNetwork] = useState(false);
+  useEffect(() => { let disposed = false; void api.getNetworkProbeService().then(value => { if (!disposed) setNetworkService(value); }).catch(() => {}); return () => { disposed = true; }; }, [api]);
+  const probeNetwork = async () => {
+    setRunning(true); setNetworkResult(undefined);
+    try { setNetworkResult(await api.probeSessionNetwork(selectedId)); setConfirmNetwork(false); }
     catch (cause) { onError(getErrorMessage(cause)); }
     finally { setRunning(false); }
+  };
+  const [observation, setObservation] = useState<SessionObservation>();
+  const observationRequest = useRef(0);
+  const observe = async () => {
+    if (!selectedId) return;
+    const request = ++observationRequest.current;
+    setRunning(true); setObservation(undefined);
+    try { const result = await api.observeSession(selectedId); if (request === observationRequest.current) setObservation(result); }
+    catch (cause) { if (request === observationRequest.current) onError(getErrorMessage(cause)); }
+    finally { if (request === observationRequest.current) setRunning(false); }
   };
   const [confirmExternal, setConfirmExternal] = useState(false);
   useEffect(() => {
     if (!profiles.some((profile) => profile.id === selectedId)) setSelectedId(profiles[0]?.id ?? "");
   }, [profiles, selectedId]);
-  useEffect(() => { setObservation(undefined); }, [selectedId]);
+  useEffect(() => { observationRequest.current += 1; setObservation(undefined); setNetworkResult(undefined); setConfirmNetwork(false); setRunning(false); }, [selectedId]);
   const report = reports.find((item) => item.profileId === selectedId);
   const run = async (external = false) => {
     if (!selectedId) return;
@@ -1612,9 +1626,20 @@ function DiagnosticsView({ api, profiles, reports, onRefresh, onError, onNotice 
       <button className="secondary-button" type="button" disabled={running || !selectedId} onClick={() => void observe()}>读取当前会话设备信号</button>
       <p>读取已启动环境中页面与 Worker 的设备声明；不读取网页正文、Cookie 或登录数据。此观测不代表公网泄漏测试通过。</p>
     </div>
+    <div className="form-info">
+      <button className="secondary-button" type="button" disabled={running || !networkService || !selectedId} onClick={() => setConfirmNetwork(true)}>公网 DNS / ICE 检查</button>
+      <p>{networkService ? `已配置自有检测服务：${networkService.origin}` : "公网检测服务尚未配置；DNS / ICE 保持未检查。"}</p>
+      {networkResult && <p>DNS：{networkResult.dns} · WebRTC 公网出口：{networkResult.webRtc} · HTTP 出口：{networkResult.httpEgress}。未检查表示证据不足，不能推断无泄漏。</p>}
+    </div>
+    {confirmNetwork && networkService && <div className="modal-backdrop"><section className="modal" role="dialog" aria-modal="true" aria-labelledby="network-probe-title">
+      <h2 id="network-probe-title">确认公网检测端点</h2>
+      <p>将通过该环境的网络设置，在独立测试标签中访问 {networkService.origin}、随机子域 *.{networkService.zone}，以及 UDP 端口 {networkService.stunMin}–{networkService.stunMax}。</p>
+      <p>检测服务会临时接收 DNS 解析器、HTTP 与 STUN 出口地址；不发送 Cookie、登录数据或网页正文。检测结束后关闭测试标签。</p>
+      <div className="modal-actions"><button className="secondary-button" disabled={running} onClick={() => setConfirmNetwork(false)}>取消</button><button className="primary-button" disabled={running} onClick={() => void probeNetwork()}>{running ? "检测中…" : "确认并检查"}</button></div>
+    </section></div>}
     {observation && <div className="diagnostic-report"><p>会话 {observation.sessionId} · {formatDate(new Date(observation.observedAtMs).toISOString())}</p>
       <div className="diagnostic-grid">{observation.targets.map((target, index) => <article className="diagnostic-item" key={index}>
-        <h3>{target.kind}</h3><p>CPU {target.hardwareConcurrency} · Memory {target.deviceMemory}GB</p>
+        <h3>{target.kind}</h3><p>CPU {target.hardwareConcurrency} · Memory {target.deviceMemory === "null" ? "未提供" : `${target.deviceMemory}GB`}</p>
         <p>{target.timezone} · {target.languages.join(", ")}</p><p>Platform {target.platform} · UA-CH {target.clientHintsPlatform || "未提供"}</p><p>{target.userAgent}</p>
       </article>)}</div></div>}
     {!report ? <div className="empty-state compact"><div className="empty-icon">⌁</div><strong>尚未运行诊断</strong><span>选择一个环境后开始检查。主动网络检查会在执行前显示端点。</span></div> : <div className="diagnostic-report">

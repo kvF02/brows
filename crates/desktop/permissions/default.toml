@@ -153,6 +153,16 @@ identifier = "allow-session-observe"
 description = "Reads bounded device signals from an existing controlled session."
 commands = { allow = ["session_observe"] }
 
+[[permission]]
+identifier = "allow-network-probe-service"
+description = "Reads the operator-configured public probe endpoints."
+commands = { allow = ["network_probe_service"] }
+
+[[permission]]
+identifier = "allow-session-probe-network"
+description = "Runs an acknowledged DNS/STUN test in a dedicated session target."
+commands = { allow = ["session_probe_network"] }
+
 # Default permission set: auto-allowed for all capabilities.
 [default]
 description = "Default permissions for the Brows app — all custom commands."
@@ -184,6 +194,8 @@ permissions = [
   "allow-session-cancel-queued",
   "allow-session-list",
   "allow-session-observe",
+  "allow-network-probe-service",
+  "allow-session-probe-network",
   "allow-backup-list",
   "allow-backup-export",
   "allow-backup-import",

@@ -20,6 +20,8 @@ import {
   type Settings,
   type SessionSummary,
   type SessionObservation,
+  type NetworkProbeService,
+  type NetworkProbeObservation,
 } from "../types";
 
 const now = () => new Date().toISOString();
@@ -145,6 +147,11 @@ export class MockApiClient implements ApiClient {
 
   async listLegacyMigrations(_limit = 50): Promise<LegacyMigrationRecord[]> {
     return [];
+  }
+
+  async getNetworkProbeService(): Promise<NetworkProbeService | undefined> { return undefined; }
+  async probeSessionNetwork(_profileId: string): Promise<NetworkProbeObservation> {
+    throw new ApiError("CAPABILITY_UNSUPPORTED", "网页版不能执行真实 DNS/ICE 检测");
   }
 
   async observeSession(_profileId: string): Promise<SessionObservation> {

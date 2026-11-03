@@ -44,7 +44,7 @@ fn spawn_browser(command: &mut Command) -> std::io::Result<Child> {
 enum ManagedProcess {
     Plain(Child),
     #[cfg(windows)]
-    Controlled(session_control::Controller),
+    Controlled(std::sync::Arc<session_control::Controller>),
 }
 impl ManagedProcess {
     fn id(&self) -> u32 { match self { Self::Plain(child) => child.id(), #[cfg(windows)] Self::Controlled(child) => child.id() } }
@@ -69,6 +69,7 @@ struct BuildRegistry {
 pub struct ManagedChromiumRuntime {
     runtime_roots: Vec<PathBuf>,
     profile_root: PathBuf,
+    network_probe: RwLock<Option<brows_application::NetworkProbeConfig>>,
     builds: RwLock<BuildRegistry>,
     processes: Mutex<HashMap<SessionId, ManagedProcess>>,
     probing: Mutex<HashSet<BrowserBuildId>>,
@@ -97,10 +98,27 @@ impl ManagedChromiumRuntime {
         Ok(Self {
             runtime_roots,
             profile_root,
+            network_probe: RwLock::new(None),
             builds: RwLock::new(BuildRegistry::default()),
             processes: Mutex::new(HashMap::new()),
             probing: Mutex::new(HashSet::new()),
         })
+    }
+
+    pub fn set_network_probe_config(&self, config: brows_application::NetworkProbeConfig) -> PortResult<()> {
+        config.validate()?;
+        *self.network_probe.write().map_err(|_| internal("network probe settings lock poisoned"))? = Some(config);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn controlled_session(&self, id: &SessionId) -> PortResult<std::sync::Arc<session_control::Controller>> {
+        let processes = self.processes.lock().map_err(|_| internal("process registry lock poisoned"))?;
+        match processes.get(id) {
+            Some(ManagedProcess::Controlled(controller)) => Ok(controller.clone()),
+            Some(_) => Err(PortError::new(PortErrorKind::CapabilityUnsupported, "this session does not use private fingerprint control")),
+            None => Err(PortError::not_found("browser session")),
+        }
     }
 
     /// Registers a build only after checking its trust, location and digest.
@@ -474,8 +492,8 @@ impl BrowserRuntime for ManagedChromiumRuntime {
                 let mut arguments = arguments;
                 arguments.truncate(arguments.len() - plan.preferences.startup_urls.len());
                 arguments.push(OsString::from("--no-startup-window"));
-                ManagedProcess::Controlled(session_control::Controller::start(
-                    &build.executable_path, &arguments, policy.clone(), &plan.preferences.startup_urls)?)
+                ManagedProcess::Controlled(std::sync::Arc::new(session_control::Controller::start(
+                    &build.executable_path, &arguments, policy.clone(), &plan.preferences.startup_urls)?))
             }
             #[cfg(not(windows))]
             {
@@ -523,14 +541,22 @@ impl BrowserRuntime for ManagedChromiumRuntime {
         Ok(())
     }
 
+    fn network_probe_config(&self) -> PortResult<Option<brows_application::NetworkProbeConfig>> {
+        Ok(self.network_probe.read().map_err(|_| internal("network probe settings lock poisoned"))?.clone())
+    }
+    fn probe_session_network(&self, session_id: &SessionId) -> PortResult<brows_application::NetworkProbeObservation> {
+        let config = self.network_probe_config()?.ok_or_else(|| PortError::new(PortErrorKind::CapabilityUnsupported, "public DNS/STUN probe service is not configured"))?;
+        #[cfg(windows)]
+        { self.controlled_session(session_id)?.probe_network(&config) }
+        #[cfg(not(windows))]
+        { let _ = (session_id, config); Err(PortError::new(PortErrorKind::CapabilityUnsupported, "private session control requires Windows")) }
+    }
+
     fn observe_session(&self, session_id: &SessionId) -> PortResult<brows_application::SessionObservation> {
-        let processes = self.processes.lock().map_err(|_| internal("process registry lock poisoned"))?;
-        match processes.get(session_id) {
-            #[cfg(windows)]
-            Some(ManagedProcess::Controlled(controller)) => controller.observe(session_id),
-            Some(_) => Err(PortError::new(PortErrorKind::CapabilityUnsupported, "this session does not use private fingerprint control")),
-            None => Err(PortError::not_found("browser session")),
-        }
+        #[cfg(windows)]
+        { self.controlled_session(session_id)?.observe(session_id) }
+        #[cfg(not(windows))]
+        { let _ = session_id; Err(PortError::new(PortErrorKind::CapabilityUnsupported, "private session control requires Windows")) }
     }
 
     fn is_running(&self, session_id: &SessionId) -> PortResult<bool> {

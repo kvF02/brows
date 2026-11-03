@@ -113,6 +113,29 @@ impl Controller {
  pub(super) fn kill(&self)->std::io::Result<()> { self.wire.fail(); Ok(()) }
  pub(super) fn wait(&self)->std::io::Result<()> { self.wire.process.wait() }
  pub(super) fn try_wait(&self)->std::io::Result<Option<u32>> { self.wire.process.try_wait() }
+ pub(super) fn probe_network(&self,config:&brows_application::NetworkProbeConfig)->PortResult<brows_application::NetworkProbeObservation> {
+  config.validate()?;
+  let target=self.wire.call("Target.createTarget",json!({"url":"about:blank","background":true}),None)?;
+  let id=target["targetId"].as_str().ok_or_else(|| internal("probe target identity missing"))?;
+  let outcome=(|| {
+   let target=self.await_target(id)?;
+   let service=json!({"origin":config.origin,"zone":config.zone,"stunMin":config.stun_min,"stunMax":config.stun_max});
+   let script=include_str!("network_probe.js").replace("__BROWS_SERVICE__",&service.to_string());
+   evaluate(&self.wire,&target.session,&script)?;
+   let deadline=Instant::now()+Duration::from_secs(20);
+   while Instant::now()<deadline {
+    let value=evaluate(&self.wire,&target.session,"globalThis.__browsNetworkProbe ?? null")?;
+    if !value.is_null() {
+     let status=|key:&str|->PortResult<String>{value[key].as_str().filter(|s|matches!(*s,"pass"|"fail"|"not_checked")).map(str::to_owned).ok_or_else(|| internal("invalid network probe status"))};
+     return Ok(brows_application::NetworkProbeObservation{dns:status("dns")?,web_rtc:status("webRtc")?,http_egress:status("httpEgress")?});
+    }
+    thread::sleep(Duration::from_millis(100));
+   }
+   Ok(brows_application::NetworkProbeObservation{dns:"not_checked".to_owned(),web_rtc:"not_checked".to_owned(),http_egress:"not_checked".to_owned()})
+  })();
+  let _=self.wire.call("Target.closeTarget",json!({"targetId":id}),None);
+  outcome
+ }
  pub(super) fn observe(&self,session_id:&SessionId)->PortResult<SessionObservation> {
   let targets:Vec<_>=self.targets.0.lock().map_err(|_| internal("target lock poisoned"))?.configured.values().cloned().collect();
   if targets.len()>32 { return Err(internal("session observation exceeds target limit")); }
@@ -157,7 +180,7 @@ fn configure(wire:&Wire,session:&str,kind:&str,policy:&SessionFingerprintConfig)
  {
   let memory=policy.device_memory.reported_f64();
   let values=json!({"hardwareConcurrency":policy.hardware_concurrency,"deviceMemory":memory,"languages":policy.languages,"language":policy.languages[0],"platform":platform_string});
-  let script=format!("(()=>{{const values={values};const p=Object.getPrototypeOf(navigator);for(const [key,value] of Object.entries(values)){{const d=Object.getOwnPropertyDescriptor(p,key);if(!d?.get||!d.configurable)throw new Error('Unsupported worker property');const original=d.get;Object.defineProperty(p,key,{{...d,get(){{original.call(this);return Array.isArray(value)?Object.freeze([...value]):value;}}}});}}return navigator.hardwareConcurrency===values.hardwareConcurrency&&navigator.deviceMemory===values.deviceMemory;}})()");
+  let script=format!("(()=>{{const values={values};const p=Object.getPrototypeOf(navigator);for(const [key,value] of Object.entries(values)){{const d=Object.getOwnPropertyDescriptor(p,key);if(!d?.get&&key==='deviceMemory')continue;if(!d?.get||!d.configurable)throw new Error('Unsupported target property');const original=d.get;const reported=Array.isArray(value)?Object.freeze([...value]):value;Object.defineProperty(p,key,{{...d,get(){{original.call(this);return reported;}}}});}}return navigator.hardwareConcurrency===values.hardwareConcurrency&&(typeof navigator.deviceMemory==='undefined'||navigator.deviceMemory===values.deviceMemory);}})()");
   if is_page { wire.call("Page.addScriptToEvaluateOnNewDocument",json!({"source":script}),Some(session))?; }
   if evaluate(wire,session,&script)?!=true { return Err(internal("target hardware policy did not apply")); }
  }

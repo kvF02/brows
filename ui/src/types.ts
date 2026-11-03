@@ -300,6 +300,15 @@ export type CommandName = keyof CommandMap;
 export type CommandParams<Name extends CommandName> = CommandMap[Name]["params"];
 export type CommandResult<Name extends CommandName> = CommandMap[Name]["result"];
 
+export interface NetworkProbeService {
+  origin: string; zone: string; stunMin: number; stunMax: number;
+}
+export interface NetworkProbeObservation {
+  dns: "pass" | "fail" | "not_checked";
+  webRtc: "pass" | "fail" | "not_checked";
+  httpEgress: "pass" | "fail" | "not_checked";
+}
+
 export interface SessionObservation {
   sessionId: string;
   observedAtMs: number;
@@ -337,6 +346,8 @@ export interface ApiClient {
   launchSession(profileId: string): Promise<Profile>;
   stopSession(profileId: string): Promise<Profile>;
   observeSession(profileId: string): Promise<SessionObservation>;
+  getNetworkProbeService(): Promise<NetworkProbeService | undefined>;
+  probeSessionNetwork(profileId: string): Promise<NetworkProbeObservation>;
   cancelQueuedSession(sessionId: string): Promise<SessionSummary>;
   listProxies(): Promise<ProxySummary[]>;
   saveProxy(input: ProxyInput): Promise<ProxySummary>;

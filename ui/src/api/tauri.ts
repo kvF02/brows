@@ -21,6 +21,8 @@ import {
   type RuntimeFingerprintProbeResult,
   type SessionSummary,
   type SessionObservation,
+  type NetworkProbeService,
+  type NetworkProbeObservation,
   type Settings,
 } from "../types";
 
@@ -148,6 +150,8 @@ const handlers = Object.freeze({
   sessionCancelQueued: "session_cancel_queued",
   sessionList: "session_list",
   sessionObserve: "session_observe",
+  networkProbeService: "network_probe_service",
+  sessionProbeNetwork: "session_probe_network",
   moreLoginPreview: "morelogin_preview",
   moreLoginImport: "morelogin_import",
   proxyList: "proxy_list",
@@ -380,6 +384,16 @@ export class TauriApiClient implements ApiClient {
     );
     this.upsertSession(stopped);
     return this.getProfileView(profileId);
+  }
+
+  async getNetworkProbeService(): Promise<NetworkProbeService | undefined> {
+    return (await this.call<NetworkProbeService | null>(handlers.networkProbeService)) ?? undefined;
+  }
+  async probeSessionNetwork(profileId: string): Promise<NetworkProbeObservation> {
+    await this.refreshSessions();
+    const session = newestActiveSession(this.sessions, profileId);
+    if (!session || session.state !== "running") throw new ApiError("INVALID_PROFILE_STATE", "请先启动要检测的环境");
+    return this.call<NetworkProbeObservation>(handlers.sessionProbeNetwork, { request: { sessionId: session.id, acknowledgeExternal: true } });
   }
 
   async observeSession(profileId: string): Promise<SessionObservation> {

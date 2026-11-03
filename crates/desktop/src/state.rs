@@ -99,6 +99,15 @@ impl AppState {
         )?);
         let roots: Vec<_> = system_root.iter().chain(edge_root.iter()).cloned().collect();
         let browsers = Arc::new(ManagedChromiumRuntime::with_runtime_roots(roots, &profile_root)?);
+        let probe_settings = data_root.join("network-probe.json");
+        if probe_settings.is_file() {
+            let bytes = std::fs::read(&probe_settings).map_err(|_| PortError::new(PortErrorKind::InvalidData, "cannot read network probe settings"))?;
+            if bytes.len() > 4096 { return Err(PortError::new(PortErrorKind::InvalidData, "network probe settings too large").into()); }
+            let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| PortError::new(PortErrorKind::InvalidData, "invalid network probe settings"))?;
+            let field = |key: &str| value[key].as_str().map(str::to_owned).ok_or_else(|| PortError::new(PortErrorKind::InvalidData, "missing network probe setting"));
+            let port = |key: &str| value[key].as_u64().and_then(|p|u16::try_from(p).ok()).ok_or_else(|| PortError::new(PortErrorKind::InvalidData, "invalid STUN port setting"));
+            browsers.set_network_probe_config(brows_application::NetworkProbeConfig { origin: field("origin")?, zone: field("zone")?, stun_min: port("stunMin")?, stun_max: port("stunMax")? })?;
+        }
         if let Some(root) = system_root {
             let mut build = discovered_chrome_build(&root)?;
             build.publisher = verify_authenticode_publisher(&build.executable_path, &["Google LLC"])?;

@@ -232,6 +232,14 @@ impl SessionApplicationService {
         })
     }
 
+    pub fn probe_network(&self, session_id: &SessionId) -> ApplicationResult<crate::NetworkProbeObservation> {
+        let session = self.session(session_id)?;
+        if session.state != SessionState::Running {
+            return Err(ApplicationError::new(ErrorCode::InvalidProfileState, "only a running session can be tested"));
+        }
+        Ok(self.browsers.probe_session_network(session_id)?)
+    }
+
     pub fn observe(&self, session_id: &SessionId) -> ApplicationResult<crate::SessionObservation> {
         let session = self.session(session_id)?;
         if session.state != SessionState::Running {

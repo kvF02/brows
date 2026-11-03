@@ -799,6 +799,30 @@ pub(crate) async fn session_observe(state: State<'_, AppState>, request: Session
         targets: result.targets.into_iter().map(|t| TargetObservationDto { kind: t.kind, user_agent: t.user_agent, platform: t.platform, languages: t.languages, hardware_concurrency: t.hardware_concurrency, device_memory: t.device_memory, timezone: t.timezone, client_hints_platform: t.client_hints_platform }).collect() })
 }
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NetworkProbeServiceDto { origin: String, zone: String, stun_min: u16, stun_max: u16 }
+#[tauri::command]
+pub(crate) fn network_probe_service(state: State<'_, AppState>) -> IpcResult<Option<NetworkProbeServiceDto>> {
+    let config = state.browsers.network_probe_config().map_err(|e| brows_application::ApplicationError::from(e).to_contract())?;
+    Ok(config.map(|c| NetworkProbeServiceDto { origin:c.origin, zone:c.zone, stun_min:c.stun_min, stun_max:c.stun_max }))
+}
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SessionNetworkProbeRequest { session_id: brows_contracts::SessionIdDto, #[serde(default)] acknowledge_external: bool }
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct NetworkProbeObservationDto { dns: String, web_rtc: String, http_egress: String }
+#[tauri::command]
+pub(crate) async fn session_probe_network(state: State<'_, AppState>, request: SessionNetworkProbeRequest) -> IpcResult<NetworkProbeObservationDto> {
+    if !request.acknowledge_external { return Err(ErrorDto { code:ErrorCode::ValidationFailed, message:"请先确认公网检测端点".to_owned(), violations:Vec::new() }); }
+    let id = request.session_id.try_into().map_err(|e: brows_contracts::ContractError| ErrorDto { code:ErrorCode::ValidationFailed, message:e.reason, violations:Vec::new() })?;
+    let sessions = state.sessions.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || sessions.probe_network(&id)).await.map_err(|_| ErrorDto { code:ErrorCode::Internal, message:"network probe task failed".to_owned(), violations:Vec::new() })?;
+    let result = ipc(result)?;
+    Ok(NetworkProbeObservationDto { dns:result.dns, web_rtc:result.web_rtc, http_egress:result.http_egress })
+}
+
 #[tauri::command]
 pub(crate) async fn session_list(state: State<'_, AppState>) -> IpcResult<Vec<SessionDto>> {
     let sessions = state.sessions.clone();
