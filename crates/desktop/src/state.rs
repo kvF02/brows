@@ -485,11 +485,7 @@ mod tests {
                 {
                     return proofs;
                 }
-                assert!(
-                    std::time::Instant::now() < deadline,
-                    "missing first-script evidence for {prefix}; received {:?}",
-                    proofs.iter().map(|(_, _, value)| &value["kind"]).collect::<Vec<_>>()
-                );
+                if std::time::Instant::now() >= deadline { return proofs; }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
@@ -567,7 +563,10 @@ mod tests {
                         }
                         ("ok".to_owned(), "text/plain")
                     } else if path.ends_with("error") {
-                        println!("local acceptance script error: {}", String::from_utf8_lossy(&body));
+                        println!(
+                            "local acceptance script error: {}",
+                            String::from_utf8_lossy(&body)
+                        );
                         ("ok".to_owned(), "text/plain")
                     } else {
                         let worker = if path.ends_with("page") {
@@ -864,6 +863,7 @@ mod tests {
             _ => panic!("native baseline unexpectedly queued"),
         };
         let baseline = fixture.wait_proofs("/native/");
+        assert_eq!(baseline.iter().map(|(_, _, value)| value["kind"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>().len(), 6, "all native context samples are required");
         let native_hints: std::collections::BTreeMap<_, _> = baseline
             .iter()
             .map(|(_, headers, first)| {
@@ -949,11 +949,12 @@ mod tests {
         for (index, session) in started.into_iter().enumerate() {
             let matching = fixture.wait_proofs(&format!("/{index}/"));
             let id: brows_domain::SessionId = session.id.clone().try_into().unwrap();
+            let observed = state.sessions.observe(&id).unwrap();
+            assert_eq!(matching.iter().map(|(_, _, value)| value["kind"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>().len(), 6, "all controlled context samples are required");
             assert!(
                 state.browsers.is_running(&id).unwrap(),
                 "signed Edge must remain running"
             );
-            let observed = state.sessions.observe(&id).unwrap();
             assert!(
                 observed.targets.iter().any(|t| t.kind == "worker"),
                 "worker must be observed"

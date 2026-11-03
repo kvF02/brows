@@ -9,9 +9,11 @@ Chromium flags, preferences and an MV3 JavaScript hook. Its configuration
 preview uses the selected runtime version, profile languages and window size;
 it is not a measurement of a running browser. Supported page reads include
 navigator/screen/WebGL declarations, stable Canvas read/export perturbation
-and opt-in offline Audio output perturbation. Client Hints, workers, fonts,
-actual GPU rendering, live audio and the network stack remain host/runtime
-signals. Extension loading must be verified for each runtime, especially
+and opt-in offline Audio output perturbation. On Windows, a private session pipe
+applies UA metadata, hardware declarations, languages and native timezone policy
+before attached page/Worker scripts resume. Diagnostics can read fixed device
+fields from an active session. Fonts, actual GPU rendering, live audio, Worker
+Canvas/Audio and the network stack remain host/runtime signals. Extension loading must be verified for each runtime, especially
 official Google Chrome 137+ with `--load-extension` restrictions. Settings offers
 an isolated local capability probe, and SeedableNoise launch is blocked unless
 it passes. The current system Chrome 154 did not load the extension in the
@@ -23,6 +25,8 @@ current [fingerprint design and acceptance plan](docs/fingerprint-design.md).
 Windows 签名运行时选择与实际覆盖验收见
 [运行时验收流程](docs/runtime-acceptance.md)。新增的 Microsoft Edge 路径仍需
 真实探针通过，跨上下文报告会保留未覆盖与不一致项。
+可选公网 DNS / ICE 检查需要部署自己的检测服务并配置预期出口范围；见
+[服务配置与证据边界](docs/network-probe-service.md)。未配置或缺少观测时保持未检查。
 
 ## Current Status
 
@@ -51,7 +55,7 @@ The evidence-backed MoreLogin capability comparison and implementation order
 are documented in [`docs/morelogin-gap-analysis.md`](docs/morelogin-gap-analysis.md).
 
 The phase-one Windows desktop path now uses SQLite persistence and launches the
-locally installed Google Chrome runtime. At startup it validates the local
+locally installed Google Chrome or Microsoft Edge runtime. At startup it validates the local
 Authenticode trust decision without network retrieval, requires the leaf
 certificate publisher to be `Google LLC` (Chrome) or `Microsoft Corporation` (Edge), records the current file digest and
 checks that digest again before each launch. This remains local admission, not

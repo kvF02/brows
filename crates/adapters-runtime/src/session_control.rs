@@ -79,7 +79,7 @@ impl Wire {
         }
         let value = result.map_err(|_| {
             self.fail();
-            internal("session control response timeout")
+            internal(format!("session control response timeout: {method}"))
         })?;
         if let Some(error) = value.get("error") {
             return Err(internal(format!(
@@ -515,7 +515,7 @@ fn configure(
         );
         if result.is_err() {
             let verify = format!("Intl.DateTimeFormat().resolvedOptions().timeZone===Intl.DateTimeFormat('en',{{timeZone:{}}}).resolvedOptions().timeZone", json!(timezone));
-            if is_page || evaluate(wire, session, &verify)? != true {
+            if evaluate(wire, session, &verify)? != true {
                 return Err(internal("native timezone is unavailable for this target"));
             }
         }
