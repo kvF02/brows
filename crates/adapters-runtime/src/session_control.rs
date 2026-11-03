@@ -771,6 +771,7 @@ fn configure(
         let rendering_script = brows_application::render_session_fingerprint(policy, &actual)?;
         let script = format!("{hardware_script};\n{rendering_script}");
         if is_page {
+            wire.call("Page.enable", json!({}), Some(session))?;
             wire.call(
                 "Page.addScriptToEvaluateOnNewDocument",
                 json!({"source":script,"runImmediately":true}),
@@ -889,6 +890,15 @@ mod tests {
             .clone();
         if !first["webgl"].is_null() {
             assert_eq!(first["webgl"], expected_webgl);
+        }
+        for (_, _, value) in &initial {
+            assert_eq!(value["hardwareConcurrency"], 3, "{} CPU", value["kind"]);
+            assert_eq!(value["timezone"], "Asia/Tokyo", "{} timezone", value["kind"]);
+            assert_eq!(value["canvas"], first["canvas"], "{} Canvas", value["kind"]);
+            assert_eq!(value["repeat"], value["canvas"]);
+            if !value["webgl"].is_null() {
+                assert_eq!(value["webgl"], expected_webgl);
+            }
         }
         let page = controller
             .targets
