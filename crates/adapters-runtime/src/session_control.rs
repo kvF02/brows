@@ -39,7 +39,13 @@ impl Wire {
     }
     fn call(&self, method: &str, params: Value, session: Option<&str>) -> PortResult<Value> {
         if self.closing.load(Ordering::Acquire) {
-            return Err(internal("session control is closed"));
+            return Err(internal(
+                self.policy_failure
+                    .lock()
+                    .ok()
+                    .and_then(|reason| reason.clone())
+                    .unwrap_or_else(|| "session control is closed".to_owned()),
+            ));
         }
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let mut frame = json!({"id":id,"method":method,"params":params});
@@ -507,17 +513,11 @@ fn configure(
             json!({"timezoneId":timezone}),
             Some(session),
         );
-        if result.is_err()
-            && (is_page
-                || evaluate(
-                    wire,
-                    session,
-                    "Intl.DateTimeFormat().resolvedOptions().timeZone",
-                )?
-                .as_str()
-                    != Some(timezone))
-        {
-            return Err(internal("native timezone is unavailable for this target"));
+        if result.is_err() {
+            let verify = format!("Intl.DateTimeFormat().resolvedOptions().timeZone===Intl.DateTimeFormat('en',{{timeZone:{}}}).resolvedOptions().timeZone", json!(timezone));
+            if is_page || evaluate(wire, session, &verify)? != true {
+                return Err(internal("native timezone is unavailable for this target"));
+            }
         }
     }
     {

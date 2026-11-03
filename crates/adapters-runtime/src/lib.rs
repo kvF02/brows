@@ -135,9 +135,10 @@ impl ManagedChromiumRuntime {
 
     pub fn set_network_probe_config(
         &self,
-        config: brows_application::NetworkProbeConfig,
+        mut config: brows_application::NetworkProbeConfig,
     ) -> PortResult<()> {
         config.validate()?;
+        config.zone.make_ascii_lowercase();
         *self
             .network_probe
             .write()

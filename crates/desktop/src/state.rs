@@ -472,15 +472,23 @@ mod tests {
                     .filter(|(path, _, _)| path.starts_with(prefix))
                     .cloned()
                     .collect();
-                if ["page", "frame", "cross_frame", "worker", "shared_worker", "service_worker"]
-                    .iter()
-                    .all(|kind| proofs.iter().any(|(_, _, value)| value["kind"] == *kind))
+                if [
+                    "page",
+                    "frame",
+                    "cross_frame",
+                    "worker",
+                    "shared_worker",
+                    "service_worker",
+                ]
+                .iter()
+                .all(|kind| proofs.iter().any(|(_, _, value)| value["kind"] == *kind))
                 {
                     return proofs;
                 }
                 assert!(
                     std::time::Instant::now() < deadline,
-                    "missing first-script evidence for {prefix}"
+                    "missing first-script evidence for {prefix}; received {:?}",
+                    proofs.iter().map(|(_, _, value)| &value["kind"]).collect::<Vec<_>>()
                 );
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
@@ -490,7 +498,8 @@ mod tests {
             use std::io::{Read, Write};
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
-            let cross_origin = format!("http://localhost:{}", listener.local_addr().unwrap().port());
+            let cross_origin =
+                format!("http://localhost:{}", listener.local_addr().unwrap().port());
             listener.set_nonblocking(true).unwrap();
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let proofs = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -537,10 +546,14 @@ mod tests {
                         continue;
                     };
                     let path = headers.split_whitespace().nth(1).unwrap_or("/").to_owned();
+                    println!("local acceptance request: {path}");
                     let capture = "({kind:typeof document==='undefined'?(typeof ServiceWorkerGlobalScope!=='undefined'&&self instanceof ServiceWorkerGlobalScope?'service_worker':typeof SharedWorkerGlobalScope!=='undefined'&&self instanceof SharedWorkerGlobalScope?'shared_worker':'worker'):window===top?'page':location.hostname==='localhost'?'cross_frame':'frame',userAgent:navigator.userAgent,platform:navigator.platform,languages:Array.from(navigator.languages),hardwareConcurrency:navigator.hardwareConcurrency,deviceMemory:navigator.deviceMemory,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,hints:navigator.userAgentData?.toJSON()})";
                     let script = format!("const first={capture};const proof=fetch('./proof',{{method:'POST',body:JSON.stringify(first)}});");
                     let (content, kind) = if path.ends_with("shared.js") {
-                        (format!("{script}onconnect=event=>event.ports[0].start();"), "text/javascript")
+                        (
+                            format!("{script}onconnect=event=>event.ports[0].start();"),
+                            "text/javascript",
+                        )
                     } else if path.ends_with("service.js") {
                         (format!("{script}addEventListener('install',event=>event.waitUntil(proof));"), "text/javascript")
                     } else if path.ends_with("worker.js") {
@@ -553,9 +566,12 @@ mod tests {
                             output.lock().unwrap().push((path.clone(), headers, value));
                         }
                         ("ok".to_owned(), "text/plain")
+                    } else if path.ends_with("error") {
+                        println!("local acceptance script error: {}", String::from_utf8_lossy(&body));
+                        ("ok".to_owned(), "text/plain")
                     } else {
                         let worker = if path.ends_with("page") {
-                            "globalThis.worker=new Worker('./worker.js');globalThis.shared=new SharedWorker('./shared.js');shared.port.start();navigator.serviceWorker.register('./service.js');"
+                            "addEventListener('error',event=>fetch('./error',{method:'POST',body:String(event.message)}));addEventListener('unhandledrejection',event=>fetch('./error',{method:'POST',body:String(event.reason)}));globalThis.worker=new Worker('./worker.js');globalThis.shared=new SharedWorker('./shared.js');shared.port.start();navigator.serviceWorker.register('./service.js');"
                         } else {
                             ""
                         };
@@ -905,12 +921,14 @@ mod tests {
                 if index == 0 {
                     "Asia/Tokyo"
                 } else {
-                    "America/New_York"
+                    "US/Eastern"
                 }
                 .to_owned(),
             );
             profile.startup_urls = vec![format!("{}/{index}/page", fixture.url)];
-            if index == 0 { invalid_policy = Some(profile.clone()); }
+            if index == 0 {
+                invalid_policy = Some(profile.clone());
+            }
             let profile = state
                 .profiles
                 .create(ProfileCreateRequest { profile })
@@ -941,7 +959,10 @@ mod tests {
                 "worker must be observed"
             );
             for kind in ["shared_worker", "service_worker", "iframe"] {
-                assert!(observed.targets.iter().any(|target| target.kind == kind), "{kind} must be observed");
+                assert!(
+                    observed.targets.iter().any(|target| target.kind == kind),
+                    "{kind} must be observed"
+                );
             }
             let cpu = if index == 0 { 3 } else { 6 };
             let timezone = if index == 0 {
@@ -1018,9 +1039,26 @@ mod tests {
         invalid.name = "Edge invalid timezone rejection".to_owned();
         invalid.locale.timezone = Some("Asia/Not_A_Timezone".to_owned());
         invalid.startup_urls.clear();
-        let invalid = state.profiles.create(ProfileCreateRequest { profile: invalid }).unwrap();
-        assert!(state.sessions.launch(SessionLaunchRequest { profile_id: invalid.id.clone() }).is_err(), "invalid native timezone must fail closed");
-        let failed = state.sessions.list().unwrap().into_iter().find(|session| session.profile_id == invalid.id).unwrap();
+        let invalid = state
+            .profiles
+            .create(ProfileCreateRequest { profile: invalid })
+            .unwrap();
+        assert!(
+            state
+                .sessions
+                .launch(SessionLaunchRequest {
+                    profile_id: invalid.id.clone()
+                })
+                .is_err(),
+            "invalid native timezone must fail closed"
+        );
+        let failed = state
+            .sessions
+            .list()
+            .unwrap()
+            .into_iter()
+            .find(|session| session.profile_id == invalid.id)
+            .unwrap();
         assert_eq!(failed.state, SessionStateDto::Failed);
         let failed_id: brows_domain::SessionId = failed.id.try_into().unwrap();
         assert!(!state.browsers.is_running(&failed_id).unwrap());

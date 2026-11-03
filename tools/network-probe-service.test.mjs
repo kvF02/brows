@@ -5,6 +5,7 @@ import {crc32,allowed,stunReply,dnsQuestion,dnsReply,assessNetwork,startProbeSer
 test('CIDR rules and no-observation cases do not manufacture passing evidence',()=>{
  assert.equal(allowed('203.0.113.7',['203.0.113.0/24']),true);assert.equal(allowed('203.0.114.7',['203.0.113.0/24']),false);
  assert.equal(allowed('::ffff:127.0.0.1',['127.0.0.1/32']),true);
+ for(const cidr of ['127.0.0.1/', '127.0.0.1/24/ignored', '127.0.0.1/-1'])assert.throws(()=>allowed('127.0.0.1',[cidr]),/Invalid IPv4 CIDR/);
  const config={dnsCidrs:['192.0.2.0/24'],egressCidrs:['203.0.113.0/24']};
  const result=assessNetwork({dns:new Set(),stun:new Set(),http:new Set()},config);
  assert.equal(result.dns,'not_checked');assert.equal(result.webRtc,'not_checked');

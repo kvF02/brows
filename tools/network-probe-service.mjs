@@ -15,8 +15,8 @@ export function ipv4(value) {
 }
 export function allowed(address,cidrs) {
  const ip=ipv4(address); if(ip===null)return false;
- return cidrs.some(cidr=>{const [base,bits='32']=cidr.split('/');const value=ipv4(base);const n=Number(bits);
-  if(value===null||!Number.isInteger(n)||n<0||n>32)throw Error('Invalid IPv4 CIDR');
+ return cidrs.some(cidr=>{const parts=cidr.split('/');const [base,bits='32']=parts;const value=ipv4(base);const n=Number(bits);
+  if(parts.length>2||!/^\d{1,2}$/.test(bits)||value===null||!Number.isInteger(n)||n<0||n>32)throw Error('Invalid IPv4 CIDR');
   const mask=n===0?0:(0xffffffff<<(32-n))>>>0;return (ip&mask)===(value&mask);
  });
 }
