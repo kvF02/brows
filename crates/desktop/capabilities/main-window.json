@@ -30,6 +30,7 @@
     "allow-morelogin-import",
     "allow-fingerprint-preview",
     "allow-list-runtimes",
+    "allow-probe-runtime-fingerprint",
     "allow-session-launch",
     "allow-session-stop",
     "allow-session-cancel-queued",

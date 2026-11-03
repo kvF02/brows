@@ -43,7 +43,7 @@ struct BuildRegistry {
 /// Owns verified browser builds and all child processes launched from them.
 #[derive(Debug)]
 pub struct ManagedChromiumRuntime {
-    runtime_root: PathBuf,
+    runtime_roots: Vec<PathBuf>,
     profile_root: PathBuf,
     builds: RwLock<BuildRegistry>,
     processes: Mutex<HashMap<SessionId, Child>>,
@@ -55,10 +55,23 @@ impl ManagedChromiumRuntime {
         runtime_root: impl Into<PathBuf>,
         profile_root: impl Into<PathBuf>,
     ) -> PortResult<Self> {
-        let runtime_root = create_and_canonicalize(runtime_root.into(), "runtime root")?;
+        Self::with_runtime_roots(vec![runtime_root.into()], profile_root)
+    }
+
+    /// Only the composition root selects these roots; IPC cannot add paths.
+    pub fn with_runtime_roots(
+        runtime_roots: Vec<PathBuf>,
+        profile_root: impl Into<PathBuf>,
+    ) -> PortResult<Self> {
+        if runtime_roots.is_empty() {
+            return Err(invalid_data("no admitted runtime roots"));
+        }
+        let runtime_roots = runtime_roots.into_iter()
+            .map(|root| create_and_canonicalize(root, "runtime root"))
+            .collect::<PortResult<Vec<_>>>()?;
         let profile_root = create_and_canonicalize(profile_root.into(), "profile root")?;
         Ok(Self {
-            runtime_root,
+            runtime_roots,
             profile_root,
             builds: RwLock::new(BuildRegistry::default()),
             processes: Mutex::new(HashMap::new()),
@@ -79,7 +92,7 @@ impl ManagedChromiumRuntime {
         }
 
         let executable = canonical_regular_file(&build.executable_path, "browser executable")?;
-        ensure_within(&executable, &self.runtime_root, "browser executable")?;
+        self.ensure_runtime_path(&executable)?;
         verify_digest(&executable, &build.sha256)?;
         build.executable_path = executable;
         // Publisher admission is not proof of extension support. Only the
@@ -109,10 +122,18 @@ impl ManagedChromiumRuntime {
         }
 
         let executable = canonical_regular_file(&build.executable_path, "browser executable")?;
-        ensure_within(&executable, &self.runtime_root, "browser executable")?;
+        self.ensure_runtime_path(&executable)?;
         build.sha256 = digest_file(&executable)?;
         build.executable_path = executable;
         self.register_build(build, activate)
+    }
+
+    fn ensure_runtime_path(&self, executable: &Path) -> PortResult<()> {
+        if self.runtime_roots.iter().any(|root| executable.starts_with(root)) {
+            Ok(())
+        } else {
+            Err(invalid_data("browser executable is outside admitted runtime roots"))
+        }
     }
 
     fn insert_registered_build(&self, build: BrowserBuild, activate: bool) -> PortResult<()> {
@@ -200,7 +221,7 @@ impl ManagedChromiumRuntime {
                 "browser runtime trust was revoked",
             ));
         }
-        ensure_within(&executable, &self.runtime_root, "browser executable")?;
+        self.ensure_runtime_path(&executable)?;
         verify_digest(&executable, &build.sha256)?;
         Ok(build)
     }
@@ -812,6 +833,22 @@ mod tests {
             capabilities: BrowserCapabilities::default(),
             installed_at_ms: 1,
         }
+    }
+
+    #[test]
+    fn multiple_roots_preserve_confinement_between_installations() {
+        let root = temp_root("multiple-roots");
+        let chrome = root.join("chrome");
+        let edge = root.join("edge");
+        let runtime = ManagedChromiumRuntime::with_runtime_roots(
+            vec![chrome.clone(), edge.clone()], root.join("profiles")).unwrap();
+        for (name, folder) in [("chrome", chrome), ("edge", edge), ("outside", root.clone())] {
+            let executable = folder.join("browser.exe");
+            fs::write(&executable, b"fixture").unwrap();
+            let result = runtime.register_build(sample_build(name, executable, b"fixture", BrowserChannel::Stable), false);
+            assert_eq!(result.is_ok(), name != "outside");
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

@@ -78,7 +78,8 @@ impl AppState {
 
         presets.insert(system_native_preset())?;
 
-        let browser_root = discover_chrome_root()?;
+        let system_root = discover_chrome_root().ok();
+        let edge_root = discover_edge_root();
         let profile_root = data_root.join("profiles");
         std::fs::create_dir_all(&profile_root).map_err(|error| {
             brows_application::ApplicationError::new(
@@ -96,16 +97,20 @@ impl AppState {
             data_root.join("backups"),
             profile_root.clone(),
         )?);
-        let browsers = Arc::new(ManagedChromiumRuntime::new(&browser_root, &profile_root)?);
-        // The system Chrome installation is discovered at runtime. Verify its
-        // Authenticode chain and publisher before recording the current digest,
-        // then re-check that digest before every launch. This tolerates an
-        // update between app runs while failing closed on changes during a run.
-        let mut chrome_build = discovered_chrome_build(&browser_root)?;
-        chrome_build.publisher =
-            verify_authenticode_publisher(&chrome_build.executable_path, &["Google LLC"])
-                .map_err(brows_application::ApplicationError::from)?;
-        browsers.register_build_with_current_digest(chrome_build, true)?;
+        let roots: Vec<_> = system_root.iter().chain(edge_root.iter()).cloned().collect();
+        let browsers = Arc::new(ManagedChromiumRuntime::with_runtime_roots(roots, &profile_root)?);
+        if let Some(root) = system_root {
+            let mut build = discovered_chrome_build(&root)?;
+            build.publisher = verify_authenticode_publisher(&build.executable_path, &["Google LLC"])?;
+            browsers.register_build_with_current_digest(build, true)?;
+        }
+        if let Some(root) = edge_root {
+            let mut build = discovered_edge_build(&root)?;
+            build.publisher = verify_authenticode_publisher(&build.executable_path, &["Microsoft Corporation"])?;
+            // Chrome remains the default for existing channel-based profiles.
+            let activate = browsers.installed_builds()?.is_empty();
+            browsers.register_build_with_current_digest(build, activate)?;
+        }
 
         let compiler = Arc::new(LaunchPlanCompiler::new(
             presets.clone(),
@@ -252,6 +257,22 @@ fn discover_chrome_root() -> ApplicationResult<PathBuf> {
                 "Google Chrome installation was not found",
             )
         })
+}
+
+fn discover_edge_root() -> Option<PathBuf> {
+    ["ProgramFiles(x86)", "ProgramFiles", "LocalAppData"].into_iter()
+        .filter_map(std::env::var_os)
+        .map(|root| PathBuf::from(root).join("Microsoft/Edge/Application"))
+        .find(|root| root.join("msedge.exe").is_file())
+}
+
+fn discovered_edge_build(root: &std::path::Path) -> ApplicationResult<BrowserBuild> {
+    let mut build = discovered_chrome_build(root)?;
+    build.id = BrowserBuildId::new("microsoft-edge-stable")?;
+    build.provider = "Microsoft Edge".to_owned();
+    build.executable_path = root.join("msedge.exe");
+    build.publisher = "Microsoft Corporation".to_owned();
+    Ok(build)
 }
 
 #[derive(Debug, Default)]
@@ -591,6 +612,50 @@ mod tests {
             })
             .unwrap();
         assert_eq!(stopped.state, SessionStateDto::Stopped);
+    }
+
+    #[test]
+    #[ignore = "requires Windows and launches an isolated signed Edge probe"]
+    fn signed_runtime_acceptance() {
+        let root = PathBuf::from(std::env::var_os("BROWS_ACCEPTANCE_DATA_ROOT").expect("explicit acceptance root"));
+        assert_eq!(root.file_name().unwrap(), "brows-acceptance");
+        let state = AppState::production(root).unwrap();
+        let build = state.browsers.list_builds().unwrap().into_iter()
+            .find(|b| b.provider == "Microsoft Edge").expect("signed Edge registered");
+        assert_eq!(build.trust, RuntimeTrust::Verified);
+        let result = state.browsers.probe_fingerprint_support(&build.id).unwrap();
+        assert_eq!(result.build.capabilities.fingerprint_support, brows_domain::FingerprintSupport::Supported, "{}", result.detail);
+        let mut started = Vec::new();
+        for name in ["Edge acceptance A", "Edge acceptance B"] {
+            let mut profile = draft(name);
+            profile.browser = BrowserSelectorDto::Pinned { build_id: (&build.id).into() };
+            profile.persona = PersonaDto::SeedableNoise {
+                seed: name.to_owned(),
+                platform: brows_contracts::PlatformDto::Windows,
+                hardware_concurrency: 4,
+                device_memory: brows_contracts::DeviceMemoryDto::Four,
+                touch_points: 0,
+                screen: brows_contracts::ScreenConfigDto {
+                    width: 1920, height: 1080, color_depth: 24,
+                    device_scale_factor_hundredths: 100,
+                },
+                webgl_vendor: String::new(), webgl_renderer: String::new(),
+                spoof_canvas: true, spoof_audio: false,
+            };
+            let profile = state.profiles.create(ProfileCreateRequest { profile }).unwrap();
+            let outcome = state.sessions.launch(SessionLaunchRequest { profile_id: profile.id }).unwrap();
+            match outcome {
+                SessionLaunchOutcome::Started { session, .. } => started.push(session),
+                SessionLaunchOutcome::Queued { .. } => panic!("acceptance launch unexpectedly queued"),
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        for session in started {
+            let id: brows_domain::SessionId = session.id.clone().try_into().unwrap();
+            assert!(state.browsers.is_running(&id).unwrap(), "signed Edge must remain running");
+            let stopped = state.sessions.stop(SessionStopRequest { session_id: session.id }).unwrap();
+            assert_eq!(stopped.state, SessionStateDto::Stopped);
+        }
     }
 
     #[test]

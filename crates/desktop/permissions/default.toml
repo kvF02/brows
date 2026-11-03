@@ -143,6 +143,11 @@ identifier = "allow-backup-import"
 description = "Enables the backup_import command without any pre-configured scope."
 commands = { allow = ["backup_import"] }
 
+[[permission]]
+identifier = "allow-probe-runtime-fingerprint"
+description = "Runs the isolated local fingerprint capability probe."
+commands = { allow = ["probe_runtime_fingerprint"] }
+
 # Default permission set: auto-allowed for all capabilities.
 [default]
 description = "Default permissions for the Brows app — all custom commands."
@@ -168,6 +173,7 @@ permissions = [
   "allow-morelogin-import",
   "allow-fingerprint-preview",
   "allow-list-runtimes",
+  "allow-probe-runtime-fingerprint",
   "allow-session-launch",
   "allow-session-stop",
   "allow-session-cancel-queued",
