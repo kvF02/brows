@@ -671,10 +671,19 @@ impl LaunchArgument {
             Self::SessionFingerprint(config) => {
                 Self::UserAgentOverride(config.user_agent.clone()).validate()?;
                 Self::AcceptLanguages(config.languages.clone()).validate()?;
-                if config.hardware_concurrency == 0 || config.hardware_concurrency > 64
-                    || config.timezone.as_ref().is_some_and(|tz| tz.is_empty() || tz.len() > 64
-                        || !tz.bytes().all(|c| c.is_ascii_alphanumeric() || b"/_-+".contains(&c))) {
-                    return Err(DomainError::InvalidLaunchArgument("session fingerprint policy".to_owned()));
+                if config.hardware_concurrency == 0
+                    || config.hardware_concurrency > 64
+                    || config.timezone.as_ref().is_some_and(|tz| {
+                        tz.is_empty()
+                            || tz.len() > 64
+                            || !tz
+                                .bytes()
+                                .all(|c| c.is_ascii_alphanumeric() || b"/_-+".contains(&c))
+                    })
+                {
+                    return Err(DomainError::InvalidLaunchArgument(
+                        "session fingerprint policy".to_owned(),
+                    ));
                 }
                 Ok(())
             }
@@ -826,10 +835,19 @@ impl ResolvedLaunchPlan {
             return Err(DomainError::InvalidHash);
         }
         self.proxy.validate()?;
-        let controls: Vec<_> = self.arguments.iter().filter_map(|a| match a {
-            LaunchArgument::SessionFingerprint(policy) => Some(policy), _ => None,
-        }).collect();
-        if controls.len() > 1 { return Err(DomainError::InvalidLaunchArgument("duplicate session policy".to_owned())); }
+        let controls: Vec<_> = self
+            .arguments
+            .iter()
+            .filter_map(|a| match a {
+                LaunchArgument::SessionFingerprint(policy) => Some(policy),
+                _ => None,
+            })
+            .collect();
+        if controls.len() > 1 {
+            return Err(DomainError::InvalidLaunchArgument(
+                "duplicate session policy".to_owned(),
+            ));
+        }
         if let Some(policy) = controls.first() {
             if !self.arguments.iter().any(|arg| matches!(arg, LaunchArgument::LoadExtension(_)))
                 || !self.arguments.iter().any(|arg| matches!(arg, LaunchArgument::UserAgentOverride(ua) if ua == &policy.user_agent))

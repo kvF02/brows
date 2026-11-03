@@ -1156,9 +1156,15 @@ mod seedable_noise_tests {
             accept_languages: vec!["en".to_owned()],
             timezone: Some("Europe/London".to_owned()),
         };
-        assert!(runtime.compile_inner(
-            &runtime.profile_id, &persona, &verified_build(), &locale, &WindowConfig::default()
-        ).is_ok());
+        assert!(runtime
+            .compile_inner(
+                &runtime.profile_id,
+                &persona,
+                &verified_build(),
+                &locale,
+                &WindowConfig::default()
+            )
+            .is_ok());
         let mut build = verified_build();
         build.version = "installed".to_owned();
         assert_eq!(

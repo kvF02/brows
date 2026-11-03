@@ -362,7 +362,10 @@ fn compiler_passes_the_whole_profile_to_fingerprint_runtime() {
     }
     harness.browsers.insert_build(verified_build()).unwrap();
     profile.locale.timezone = Some("Asia/Tokyo".to_owned());
-    let plan = compiler.compile(&profile, &SessionId::new("timezone-flow").unwrap()).unwrap().plan;
+    let plan = compiler
+        .compile(&profile, &SessionId::new("timezone-flow").unwrap())
+        .unwrap()
+        .plan;
     assert!(plan.arguments.iter().any(|arg| matches!(arg,
         LaunchArgument::SessionFingerprint(policy) if policy.timezone.as_deref() == Some("Asia/Tokyo"))));
 }
@@ -549,15 +552,45 @@ fn all_ports_are_object_safe() {
 #[test]
 fn process_reconciliation_releases_failed_session_and_promotes_queue() {
     let h = Harness::new(1);
-    let first = h.create_profile("first"); let second = h.create_profile("second");
-    let running = h.session_service.launch(SessionLaunchRequest { profile_id: first.id }).unwrap();
-    h.session_service.launch(SessionLaunchRequest { profile_id: second.id.clone() }).unwrap();
-    let SessionLaunchOutcome::Started { session, .. } = running else { panic!("expected running") };
+    let first = h.create_profile("first");
+    let second = h.create_profile("second");
+    let running = h
+        .session_service
+        .launch(SessionLaunchRequest {
+            profile_id: first.id,
+        })
+        .unwrap();
+    h.session_service
+        .launch(SessionLaunchRequest {
+            profile_id: second.id.clone(),
+        })
+        .unwrap();
+    let SessionLaunchOutcome::Started { session, .. } = running else {
+        panic!("expected running")
+    };
     let id: SessionId = session.id.clone().try_into().unwrap();
     h.browsers.stop(&id).unwrap();
     h.session_service.reconcile_exits().unwrap();
     let list = h.session_service.list().unwrap();
-    assert_eq!(list.iter().find(|s| s.id == session.id).unwrap().state, SessionStateDto::Failed);
-    assert_eq!(list.iter().find(|s| s.profile_id == second.id).unwrap().state, SessionStateDto::Running);
+    assert_eq!(
+        list.iter().find(|s| s.id == session.id).unwrap().state,
+        SessionStateDto::Failed
+    );
+    assert_eq!(
+        list.iter()
+            .find(|s| s.profile_id == second.id)
+            .unwrap()
+            .state,
+        SessionStateDto::Running
+    );
     h.session_service.reconcile_exits().unwrap();
+}
+#[test]
+fn network_probe_configuration_confines_protocol_and_ports() {
+    let valid = crate::NetworkProbeConfig { origin: "https://probe.example:8443".to_owned(), zone: "probe.example".to_owned(), stun_min: 40000, stun_max: 40127 };
+    assert!(valid.validate().is_ok());
+    for origin in ["http://probe.example", "https://user:pass@probe.example", "https://probe.example/path", "https://probe.example?x", "https://probe.example:0"] {
+        let mut config = valid.clone(); config.origin = origin.to_owned(); assert!(config.validate().is_err(), "{origin}");
+    }
+    let mut config = valid; config.stun_max = 50000; assert!(config.validate().is_err());
 }

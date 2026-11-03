@@ -232,10 +232,16 @@ impl SessionApplicationService {
         })
     }
 
-    pub fn probe_network(&self, session_id: &SessionId) -> ApplicationResult<crate::NetworkProbeObservation> {
+    pub fn probe_network(
+        &self,
+        session_id: &SessionId,
+    ) -> ApplicationResult<crate::NetworkProbeObservation> {
         let session = self.session(session_id)?;
         if session.state != SessionState::Running {
-            return Err(ApplicationError::new(ErrorCode::InvalidProfileState, "only a running session can be tested"));
+            return Err(ApplicationError::new(
+                ErrorCode::InvalidProfileState,
+                "only a running session can be tested",
+            ));
         }
         Ok(self.browsers.probe_session_network(session_id)?)
     }
@@ -243,7 +249,10 @@ impl SessionApplicationService {
     pub fn observe(&self, session_id: &SessionId) -> ApplicationResult<crate::SessionObservation> {
         let session = self.session(session_id)?;
         if session.state != SessionState::Running {
-            return Err(ApplicationError::new(ErrorCode::InvalidProfileState, "only a running session can be observed"));
+            return Err(ApplicationError::new(
+                ErrorCode::InvalidProfileState,
+                "only a running session can be observed",
+            ));
         }
         Ok(self.browsers.observe_session(session_id)?)
     }
@@ -280,20 +289,30 @@ impl SessionApplicationService {
         let active: Vec<_> = self.lock_registry()?.processes.keys().cloned().collect();
         for id in active {
             if !self.browsers.is_running(&id)? {
-                self.record_exit_locked(&id, "browser process or session policy controller exited".to_owned())?;
+                self.record_exit_locked(
+                    &id,
+                    "browser process or session policy controller exited".to_owned(),
+                )?;
             }
         }
         Ok(())
     }
 
-    fn record_exit_locked(&self, session_id: &SessionId, message: String) -> ApplicationResult<SessionDto> {
+    fn record_exit_locked(
+        &self,
+        session_id: &SessionId,
+        message: String,
+    ) -> ApplicationResult<SessionDto> {
         let (session, promoted, lease) =
             {
                 let mut registry = self.lock_registry()?;
                 let current = registry.sessions.get(session_id).ok_or_else(|| {
                     ApplicationError::new(ErrorCode::NotFound, "session not found")
                 })?;
-                if !matches!(current.state, SessionState::Starting | SessionState::Running | SessionState::Stopping) {
+                if !matches!(
+                    current.state,
+                    SessionState::Starting | SessionState::Running | SessionState::Stopping
+                ) {
                     return Err(ApplicationError::new(
                         ErrorCode::InvalidProfileState,
                         "session is not active",

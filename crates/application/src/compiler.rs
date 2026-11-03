@@ -140,15 +140,18 @@ impl LaunchPlanCompiler {
         }
 
         if let FingerprintPersona::SeedableNoise(persona) = &profile.persona {
-            let derived = crate::persona_fingerprint::PersonaFingerprint::derive(persona, &build.version)?;
-            arguments.push(LaunchArgument::SessionFingerprint(Box::new(brows_domain::SessionFingerprintConfig {
-                user_agent: derived.user_agent,
-                platform: persona.platform,
-                hardware_concurrency: persona.hardware_concurrency,
-                device_memory: persona.device_memory,
-                languages: profile.locale.accept_languages.clone(),
-                timezone: profile.locale.timezone.clone(),
-            })));
+            let derived =
+                crate::persona_fingerprint::PersonaFingerprint::derive(persona, &build.version)?;
+            arguments.push(LaunchArgument::SessionFingerprint(Box::new(
+                brows_domain::SessionFingerprintConfig {
+                    user_agent: derived.user_agent,
+                    platform: persona.platform,
+                    hardware_concurrency: persona.hardware_concurrency,
+                    device_memory: persona.device_memory,
+                    languages: profile.locale.accept_languages.clone(),
+                    timezone: profile.locale.timezone.clone(),
+                },
+            )));
         }
 
         let mut proxy_lease = None;

@@ -771,7 +771,9 @@ pub(crate) fn session_cancel_queued(
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct SessionObserveRequest { session_id: brows_contracts::SessionIdDto }
+pub(crate) struct SessionObserveRequest {
+    session_id: brows_contracts::SessionIdDto,
+}
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -783,44 +785,129 @@ pub(crate) struct SessionObservationDto {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct TargetObservationDto {
-    kind: String, user_agent: String, platform: String, languages: Vec<String>,
-    hardware_concurrency: u64, device_memory: String, timezone: String,
+    kind: String,
+    user_agent: String,
+    platform: String,
+    languages: Vec<String>,
+    hardware_concurrency: u64,
+    device_memory: String,
+    timezone: String,
     client_hints_platform: String,
 }
 
 #[tauri::command]
-pub(crate) async fn session_observe(state: State<'_, AppState>, request: SessionObserveRequest) -> IpcResult<SessionObservationDto> {
+pub(crate) async fn session_observe(
+    state: State<'_, AppState>,
+    request: SessionObserveRequest,
+) -> IpcResult<SessionObservationDto> {
     let sessions = state.sessions.clone();
-    let id = request.session_id.try_into().map_err(|e: brows_contracts::ContractError| ErrorDto { code: ErrorCode::ValidationFailed, message: e.reason, violations: Vec::new() })?;
-    let result = tauri::async_runtime::spawn_blocking(move || sessions.observe(&id)).await
-        .map_err(|_| ErrorDto { code: ErrorCode::Internal, message: "session observation task failed".to_owned(), violations: Vec::new() })?;
+    let id = request
+        .session_id
+        .try_into()
+        .map_err(|e: brows_contracts::ContractError| ErrorDto {
+            code: ErrorCode::ValidationFailed,
+            message: e.reason,
+            violations: Vec::new(),
+        })?;
+    let result = tauri::async_runtime::spawn_blocking(move || sessions.observe(&id))
+        .await
+        .map_err(|_| ErrorDto {
+            code: ErrorCode::Internal,
+            message: "session observation task failed".to_owned(),
+            violations: Vec::new(),
+        })?;
     let result = ipc(result)?;
-    Ok(SessionObservationDto { session_id: (&result.session_id).into(), observed_at_ms: result.observed_at_ms,
-        targets: result.targets.into_iter().map(|t| TargetObservationDto { kind: t.kind, user_agent: t.user_agent, platform: t.platform, languages: t.languages, hardware_concurrency: t.hardware_concurrency, device_memory: t.device_memory, timezone: t.timezone, client_hints_platform: t.client_hints_platform }).collect() })
+    Ok(SessionObservationDto {
+        session_id: (&result.session_id).into(),
+        observed_at_ms: result.observed_at_ms,
+        targets: result
+            .targets
+            .into_iter()
+            .map(|t| TargetObservationDto {
+                kind: t.kind,
+                user_agent: t.user_agent,
+                platform: t.platform,
+                languages: t.languages,
+                hardware_concurrency: t.hardware_concurrency,
+                device_memory: t.device_memory,
+                timezone: t.timezone,
+                client_hints_platform: t.client_hints_platform,
+            })
+            .collect(),
+    })
 }
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct NetworkProbeServiceDto { origin: String, zone: String, stun_min: u16, stun_max: u16 }
+pub(crate) struct NetworkProbeServiceDto {
+    origin: String,
+    zone: String,
+    stun_min: u16,
+    stun_max: u16,
+}
 #[tauri::command]
-pub(crate) fn network_probe_service(state: State<'_, AppState>) -> IpcResult<Option<NetworkProbeServiceDto>> {
-    let config = state.browsers.network_probe_config().map_err(|e| brows_application::ApplicationError::from(e).to_contract())?;
-    Ok(config.map(|c| NetworkProbeServiceDto { origin:c.origin, zone:c.zone, stun_min:c.stun_min, stun_max:c.stun_max }))
+pub(crate) fn network_probe_service(
+    state: State<'_, AppState>,
+) -> IpcResult<Option<NetworkProbeServiceDto>> {
+    let config = state
+        .browsers
+        .network_probe_config()
+        .map_err(|e| brows_application::ApplicationError::from(e).to_contract())?;
+    Ok(config.map(|c| NetworkProbeServiceDto {
+        origin: c.origin,
+        zone: c.zone,
+        stun_min: c.stun_min,
+        stun_max: c.stun_max,
+    }))
 }
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct SessionNetworkProbeRequest { session_id: brows_contracts::SessionIdDto, #[serde(default)] acknowledge_external: bool }
+pub(crate) struct SessionNetworkProbeRequest {
+    session_id: brows_contracts::SessionIdDto,
+    #[serde(default)]
+    acknowledge_external: bool,
+}
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub(crate) struct NetworkProbeObservationDto { dns: String, web_rtc: String, http_egress: String }
+pub(crate) struct NetworkProbeObservationDto {
+    dns: String,
+    web_rtc: String,
+    http_egress: String,
+}
 #[tauri::command]
-pub(crate) async fn session_probe_network(state: State<'_, AppState>, request: SessionNetworkProbeRequest) -> IpcResult<NetworkProbeObservationDto> {
-    if !request.acknowledge_external { return Err(ErrorDto { code:ErrorCode::ValidationFailed, message:"请先确认公网检测端点".to_owned(), violations:Vec::new() }); }
-    let id = request.session_id.try_into().map_err(|e: brows_contracts::ContractError| ErrorDto { code:ErrorCode::ValidationFailed, message:e.reason, violations:Vec::new() })?;
+pub(crate) async fn session_probe_network(
+    state: State<'_, AppState>,
+    request: SessionNetworkProbeRequest,
+) -> IpcResult<NetworkProbeObservationDto> {
+    if !request.acknowledge_external {
+        return Err(ErrorDto {
+            code: ErrorCode::ValidationFailed,
+            message: "请先确认公网检测端点".to_owned(),
+            violations: Vec::new(),
+        });
+    }
+    let id = request
+        .session_id
+        .try_into()
+        .map_err(|e: brows_contracts::ContractError| ErrorDto {
+            code: ErrorCode::ValidationFailed,
+            message: e.reason,
+            violations: Vec::new(),
+        })?;
     let sessions = state.sessions.clone();
-    let result = tauri::async_runtime::spawn_blocking(move || sessions.probe_network(&id)).await.map_err(|_| ErrorDto { code:ErrorCode::Internal, message:"network probe task failed".to_owned(), violations:Vec::new() })?;
+    let result = tauri::async_runtime::spawn_blocking(move || sessions.probe_network(&id))
+        .await
+        .map_err(|_| ErrorDto {
+            code: ErrorCode::Internal,
+            message: "network probe task failed".to_owned(),
+            violations: Vec::new(),
+        })?;
     let result = ipc(result)?;
-    Ok(NetworkProbeObservationDto { dns:result.dns, web_rtc:result.web_rtc, http_egress:result.http_egress })
+    Ok(NetworkProbeObservationDto {
+        dns: result.dns,
+        web_rtc: result.web_rtc,
+        http_egress: result.http_egress,
+    })
 }
 
 #[tauri::command]
@@ -829,7 +916,13 @@ pub(crate) async fn session_list(state: State<'_, AppState>) -> IpcResult<Vec<Se
     let result = tauri::async_runtime::spawn_blocking(move || {
         sessions.reconcile_exits()?;
         sessions.list()
-    }).await.map_err(|_| ErrorDto { code: ErrorCode::Internal, message: "session supervisor task failed".to_owned(), violations: Vec::new() })?;
+    })
+    .await
+    .map_err(|_| ErrorDto {
+        code: ErrorCode::Internal,
+        message: "session supervisor task failed".to_owned(),
+        violations: Vec::new(),
+    })?;
     ipc(result)
 }
 
@@ -839,6 +932,14 @@ mod tests {
     use brows_application::memory::{InMemoryBrowserRuntime, ManualClock};
     use brows_contracts::{ErrorCode, ProfileListRequest};
     use std::{path::PathBuf, sync::Arc};
+
+    #[test]
+    fn session_diagnostics_reject_script_and_endpoint_arguments() {
+        assert!(serde_json::from_value::<SessionObserveRequest>(serde_json::json!({"sessionId":"s", "expression":"document.cookie"})).is_err());
+        assert!(serde_json::from_value::<SessionNetworkProbeRequest>(serde_json::json!({"sessionId":"s", "acknowledgeExternal":true, "origin":"https://other.example"})).is_err());
+        let request: SessionNetworkProbeRequest = serde_json::from_value(serde_json::json!({"sessionId":"s"})).unwrap();
+        assert!(!request.acknowledge_external);
+    }
 
     fn preview_request() -> FingerprintPreviewRequest {
         FingerprintPreviewRequest {

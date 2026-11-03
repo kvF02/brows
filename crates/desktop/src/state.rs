@@ -97,25 +97,63 @@ impl AppState {
             data_root.join("backups"),
             profile_root.clone(),
         )?);
-        let roots: Vec<_> = system_root.iter().chain(edge_root.iter()).cloned().collect();
-        let browsers = Arc::new(ManagedChromiumRuntime::with_runtime_roots(roots, &profile_root)?);
+        let roots: Vec<_> = system_root
+            .iter()
+            .chain(edge_root.iter())
+            .cloned()
+            .collect();
+        let browsers = Arc::new(ManagedChromiumRuntime::with_runtime_roots(
+            roots,
+            &profile_root,
+        )?);
         let probe_settings = data_root.join("network-probe.json");
         if probe_settings.is_file() {
-            let bytes = std::fs::read(&probe_settings).map_err(|_| PortError::new(PortErrorKind::InvalidData, "cannot read network probe settings"))?;
-            if bytes.len() > 4096 { return Err(PortError::new(PortErrorKind::InvalidData, "network probe settings too large").into()); }
-            let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| PortError::new(PortErrorKind::InvalidData, "invalid network probe settings"))?;
-            let field = |key: &str| value[key].as_str().map(str::to_owned).ok_or_else(|| PortError::new(PortErrorKind::InvalidData, "missing network probe setting"));
-            let port = |key: &str| value[key].as_u64().and_then(|p|u16::try_from(p).ok()).ok_or_else(|| PortError::new(PortErrorKind::InvalidData, "invalid STUN port setting"));
-            browsers.set_network_probe_config(brows_application::NetworkProbeConfig { origin: field("origin")?, zone: field("zone")?, stun_min: port("stunMin")?, stun_max: port("stunMax")? })?;
+            let bytes = std::fs::read(&probe_settings).map_err(|_| {
+                PortError::new(
+                    PortErrorKind::InvalidData,
+                    "cannot read network probe settings",
+                )
+            })?;
+            if bytes.len() > 4096 {
+                return Err(PortError::new(
+                    PortErrorKind::InvalidData,
+                    "network probe settings too large",
+                )
+                .into());
+            }
+            let value: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+                PortError::new(PortErrorKind::InvalidData, "invalid network probe settings")
+            })?;
+            let field = |key: &str| {
+                value[key].as_str().map(str::to_owned).ok_or_else(|| {
+                    PortError::new(PortErrorKind::InvalidData, "missing network probe setting")
+                })
+            };
+            let port = |key: &str| {
+                value[key]
+                    .as_u64()
+                    .and_then(|p| u16::try_from(p).ok())
+                    .ok_or_else(|| {
+                        PortError::new(PortErrorKind::InvalidData, "invalid STUN port setting")
+                    })
+            };
+            browsers.set_network_probe_config(brows_application::NetworkProbeConfig {
+                origin: field("origin")?,
+                zone: field("zone")?,
+                stun_min: port("stunMin")?,
+                stun_max: port("stunMax")?,
+            })?;
         }
         if let Some(root) = system_root {
             let mut build = discovered_chrome_build(&root)?;
-            build.publisher = verify_authenticode_publisher(&build.executable_path, &["Google LLC"])?;
+            build.publisher =
+                verify_authenticode_publisher(&build.executable_path, &["Google LLC"])?;
             browsers.register_build_with_current_digest(build, true)?;
         }
         if let Some(root) = edge_root {
             let mut build = discovered_edge_build(&root)?;
-            build.publisher = verify_authenticode_publisher(&build.executable_path, &["Microsoft Corporation"])?;
+            build.publisher =
+                verify_authenticode_publisher(&build.executable_path, &["Microsoft Corporation"])?;
             // Chrome remains the default for existing channel-based profiles.
             let activate = browsers.installed_builds()?.is_empty();
             browsers.register_build_with_current_digest(build, activate)?;
@@ -269,7 +307,8 @@ fn discover_chrome_root() -> ApplicationResult<PathBuf> {
 }
 
 fn discover_edge_root() -> Option<PathBuf> {
-    ["ProgramFiles(x86)", "ProgramFiles", "LocalAppData"].into_iter()
+    ["ProgramFiles(x86)", "ProgramFiles", "LocalAppData"]
+        .into_iter()
         .filter_map(std::env::var_os)
         .map(|root| PathBuf::from(root).join("Microsoft/Edge/Application"))
         .find(|root| root.join("msedge.exe").is_file())
@@ -429,47 +468,93 @@ mod tests {
             listener.set_nonblocking(true).unwrap();
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let proofs = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let halt = stop.clone(); let output = proofs.clone();
+            let halt = stop.clone();
+            let output = proofs.clone();
             let thread = std::thread::spawn(move || {
                 while !halt.load(std::sync::atomic::Ordering::Acquire) {
                     let (mut stream, _) = match listener.accept() {
                         Ok(value) => value,
-                        Err(_) => { std::thread::sleep(std::time::Duration::from_millis(10)); continue; }
-                    };
-                    stream.set_read_timeout(Some(std::time::Duration::from_millis(300))).unwrap();
-                    let mut bytes = Vec::new(); let mut buffer = [0u8; 2048];
-                    let request = loop {
-                        match stream.read(&mut buffer) { Ok(0) | Err(_) => break None, Ok(n) => bytes.extend_from_slice(&buffer[..n]) }
-                        if bytes.len() > 16384 { break None; }
-                        if let Some(end) = bytes.windows(4).position(|p| p == b"\r\n\r\n") {
-                            let head = String::from_utf8_lossy(&bytes[..end]).to_string();
-                            let length = head.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok())).unwrap_or(0);
-                            if bytes.len() >= end + 4 + length { break Some((head, bytes[end+4..end+4+length].to_vec())); }
+                        Err(_) => {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            continue;
                         }
                     };
-                    let Some((headers, body)) = request else { continue; };
+                    stream
+                        .set_read_timeout(Some(std::time::Duration::from_millis(300)))
+                        .unwrap();
+                    let mut bytes = Vec::new();
+                    let mut buffer = [0u8; 2048];
+                    let request = loop {
+                        match stream.read(&mut buffer) {
+                            Ok(0) | Err(_) => break None,
+                            Ok(n) => bytes.extend_from_slice(&buffer[..n]),
+                        }
+                        if bytes.len() > 16384 {
+                            break None;
+                        }
+                        if let Some(end) = bytes.windows(4).position(|p| p == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&bytes[..end]).to_string();
+                            let length = head
+                                .lines()
+                                .find_map(|line| {
+                                    line.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .and_then(|v| v.trim().parse::<usize>().ok())
+                                })
+                                .unwrap_or(0);
+                            if bytes.len() >= end + 4 + length {
+                                break Some((head, bytes[end + 4..end + 4 + length].to_vec()));
+                            }
+                        }
+                    };
+                    let Some((headers, body)) = request else {
+                        continue;
+                    };
                     let path = headers.split_whitespace().nth(1).unwrap_or("/").to_owned();
-                    let capture = "({userAgent:navigator.userAgent,platform:navigator.platform,languages:Array.from(navigator.languages),hardwareConcurrency:navigator.hardwareConcurrency,deviceMemory:navigator.deviceMemory,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,hints:navigator.userAgentData?.toJSON()})";
+                    let capture = "({kind:typeof document==='undefined'?'worker':window===top?'page':'frame',userAgent:navigator.userAgent,platform:navigator.platform,languages:Array.from(navigator.languages),hardwareConcurrency:navigator.hardwareConcurrency,deviceMemory:navigator.deviceMemory,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,hints:navigator.userAgentData?.toJSON()})";
                     let script = format!("const first={capture};fetch('./proof',{{method:'POST',body:JSON.stringify(first)}});");
                     let (content, kind) = if path.ends_with("worker.js") {
-                        (format!("{script}setInterval(()=>{{}},1000);"), "text/javascript")
+                        (
+                            format!("{script}setInterval(()=>{{}},1000);"),
+                            "text/javascript",
+                        )
                     } else if path.ends_with("proof") {
-                        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) { output.lock().unwrap().push((path.clone(), headers, value)); }
+                        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) {
+                            output.lock().unwrap().push((path.clone(), headers, value));
+                        }
                         ("ok".to_owned(), "text/plain")
                     } else {
-                        let worker = if path.ends_with("page") { "globalThis.worker=new Worker('./worker.js');" } else { "" };
-                        let frame = if path.ends_with("page") { "<iframe src='./frame'></iframe>" } else { "" };
+                        let worker = if path.ends_with("page") {
+                            "globalThis.worker=new Worker('./worker.js');"
+                        } else {
+                            ""
+                        };
+                        let frame = if path.ends_with("page") {
+                            "<iframe src='./frame'></iframe>"
+                        } else {
+                            ""
+                        };
                         (format!("<!doctype html><meta charset='utf-8'><script>{script}{worker}</script>{frame}"), "text/html")
                     };
                     let response = format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\nAccept-CH: Sec-CH-UA-Platform, Sec-CH-UA-Full-Version-List\r\n\r\n{content}", content.len());
                     let _ = stream.write_all(response.as_bytes());
                 }
             });
-            Self { url, proofs, stop, thread: Some(thread) }
+            Self {
+                url,
+                proofs,
+                stop,
+                thread: Some(thread),
+            }
         }
     }
     impl Drop for ControlFixture {
-        fn drop(&mut self) { self.stop.store(true, std::sync::atomic::Ordering::Release); if let Some(thread) = self.thread.take() { let _ = thread.join(); } }
+        fn drop(&mut self) {
+            self.stop.store(true, std::sync::atomic::Ordering::Release);
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
+            }
+        }
     }
 
     fn draft(name: &str) -> ProfileDraftDto {
@@ -683,66 +768,144 @@ mod tests {
     #[test]
     #[ignore = "requires Windows and launches an isolated signed Edge probe"]
     fn signed_runtime_acceptance() {
-        let root = PathBuf::from(std::env::var_os("BROWS_ACCEPTANCE_DATA_ROOT").expect("explicit acceptance root"));
+        let root = PathBuf::from(
+            std::env::var_os("BROWS_ACCEPTANCE_DATA_ROOT").expect("explicit acceptance root"),
+        );
         assert_eq!(root.file_name().unwrap(), "brows-acceptance");
         let state = AppState::production(root).unwrap();
-        let build = state.browsers.list_builds().unwrap().into_iter()
-            .find(|b| b.provider == "Microsoft Edge").expect("signed Edge registered");
+        let build = state
+            .browsers
+            .list_builds()
+            .unwrap()
+            .into_iter()
+            .find(|b| b.provider == "Microsoft Edge")
+            .expect("signed Edge registered");
         assert_eq!(build.trust, RuntimeTrust::Verified);
         let result = state.browsers.probe_fingerprint_support(&build.id).unwrap();
-        assert_eq!(result.build.capabilities.fingerprint_support, brows_domain::FingerprintSupport::Supported, "{}", result.detail);
+        assert_eq!(
+            result.build.capabilities.fingerprint_support,
+            brows_domain::FingerprintSupport::Supported,
+            "{}",
+            result.detail
+        );
         let fixture = ControlFixture::start();
         let mut started = Vec::new();
-        for (index, name) in ["Edge acceptance A", "Edge acceptance B"].into_iter().enumerate() {
+        for (index, name) in ["Edge acceptance A", "Edge acceptance B"]
+            .into_iter()
+            .enumerate()
+        {
             let mut profile = draft(name);
-            profile.browser = BrowserSelectorDto::Pinned { build_id: (&build.id).into() };
+            profile.browser = BrowserSelectorDto::Pinned {
+                build_id: (&build.id).into(),
+            };
             profile.persona = PersonaDto::SeedableNoise {
                 seed: name.to_owned(),
                 platform: brows_contracts::PlatformDto::Windows,
                 hardware_concurrency: if index == 0 { 3 } else { 6 },
-                device_memory: if index == 0 { brows_contracts::DeviceMemoryDto::Half } else { brows_contracts::DeviceMemoryDto::Two },
+                device_memory: if index == 0 {
+                    brows_contracts::DeviceMemoryDto::Half
+                } else {
+                    brows_contracts::DeviceMemoryDto::Two
+                },
                 touch_points: 0,
                 screen: brows_contracts::ScreenConfigDto {
-                    width: 1920, height: 1080, color_depth: 24,
+                    width: 1920,
+                    height: 1080,
+                    color_depth: 24,
                     device_scale_factor_hundredths: 100,
                 },
-                webgl_vendor: String::new(), webgl_renderer: String::new(),
-                spoof_canvas: true, spoof_audio: false,
+                webgl_vendor: String::new(),
+                webgl_renderer: String::new(),
+                spoof_canvas: true,
+                spoof_audio: false,
             };
-            profile.locale.accept_languages = if index == 0 { vec!["ja-JP".to_owned(), "ja".to_owned()] } else { vec!["en-US".to_owned(), "en".to_owned()] };
-            profile.locale.timezone = Some(if index == 0 { "Asia/Tokyo" } else { "America/New_York" }.to_owned());
+            profile.locale.accept_languages = if index == 0 {
+                vec!["ja-JP".to_owned(), "ja".to_owned()]
+            } else {
+                vec!["en-US".to_owned(), "en".to_owned()]
+            };
+            profile.locale.timezone = Some(
+                if index == 0 {
+                    "Asia/Tokyo"
+                } else {
+                    "America/New_York"
+                }
+                .to_owned(),
+            );
             profile.startup_urls = vec![format!("{}/{index}/page", fixture.url)];
-            let profile = state.profiles.create(ProfileCreateRequest { profile }).unwrap();
-            let outcome = state.sessions.launch(SessionLaunchRequest { profile_id: profile.id }).unwrap();
+            let profile = state
+                .profiles
+                .create(ProfileCreateRequest { profile })
+                .unwrap();
+            let outcome = state
+                .sessions
+                .launch(SessionLaunchRequest {
+                    profile_id: profile.id,
+                })
+                .unwrap();
             match outcome {
                 SessionLaunchOutcome::Started { session, .. } => started.push(session),
-                SessionLaunchOutcome::Queued { .. } => panic!("acceptance launch unexpectedly queued"),
+                SessionLaunchOutcome::Queued { .. } => {
+                    panic!("acceptance launch unexpectedly queued")
+                }
             }
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
         for (index, session) in started.into_iter().enumerate() {
             let id: brows_domain::SessionId = session.id.clone().try_into().unwrap();
-            assert!(state.browsers.is_running(&id).unwrap(), "signed Edge must remain running");
+            assert!(
+                state.browsers.is_running(&id).unwrap(),
+                "signed Edge must remain running"
+            );
             let observed = state.sessions.observe(&id).unwrap();
-            assert!(observed.targets.iter().any(|t| t.kind == "worker"), "worker must be observed");
+            assert!(
+                observed.targets.iter().any(|t| t.kind == "worker"),
+                "worker must be observed"
+            );
             let cpu = if index == 0 { 3 } else { 6 };
-            let timezone = if index == 0 { "Asia/Tokyo" } else { "America/New_York" };
+            let timezone = if index == 0 {
+                "Asia/Tokyo"
+            } else {
+                "America/New_York"
+            };
             for target in observed.targets {
                 assert_eq!(target.hardware_concurrency, cpu, "{} CPU", target.kind);
                 assert_eq!(target.timezone, timezone, "{} timezone", target.kind);
-                assert_eq!(target.client_hints_platform, "Windows", "{} UA-CH", target.kind);
+                assert_eq!(
+                    target.client_hints_platform, "Windows",
+                    "{} UA-CH",
+                    target.kind
+                );
             }
             let proofs = fixture.proofs.lock().unwrap();
-            let matching: Vec<_> = proofs.iter().filter(|(path, _, _)| path.starts_with(&format!("/{index}/"))).collect();
-            assert!(matching.len() >= 3, "page/frame/worker first-script proofs are required");
+            let matching: Vec<_> = proofs
+                .iter()
+                .filter(|(path, _, _)| path.starts_with(&format!("/{index}/")))
+                .collect();
+            assert!(
+                matching.len() >= 3,
+                "page/frame/worker first-script proofs are required"
+            );
             for (_, headers, first) in matching {
                 assert_eq!(first["hardwareConcurrency"], cpu);
                 assert_eq!(first["deviceMemory"], if index == 0 { 0.5 } else { 2.0 });
                 assert_eq!(first["timezone"], timezone);
-                assert!(headers.to_ascii_lowercase().contains("sec-ch-ua-platform: \"windows\""));
+                let allowed_headers: Vec<_> = headers.lines().filter(|line| {
+                    let lower = line.to_ascii_lowercase();
+                    ["user-agent:", "accept-language:", "sec-ch-ua"].iter().any(|key| lower.starts_with(key))
+                }).collect();
+                println!("session {index} {} allowed headers: {allowed_headers:?}", first["kind"]);
+                assert!(headers
+                    .to_ascii_lowercase()
+                    .contains("sec-ch-ua-platform: \"windows\""), "{} missing Client Hints: {allowed_headers:?}", first["kind"]);
             }
             drop(proofs);
-            let stopped = state.sessions.stop(SessionStopRequest { session_id: session.id }).unwrap();
+            let stopped = state
+                .sessions
+                .stop(SessionStopRequest {
+                    session_id: session.id,
+                })
+                .unwrap();
             assert_eq!(stopped.state, SessionStateDto::Stopped);
         }
     }

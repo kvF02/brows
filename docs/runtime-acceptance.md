@@ -35,15 +35,34 @@ npm run observe:fingerprint -- "C:/Program Files (x86)/Microsoft/Edge/Applicatio
 结果包括 `hooksObserved`、`repeatStable`、`consistent`、`complete` 和逐项检查。
 未收到的字段是 `not_checked`，不能算通过。默认命令对扩展没有生效、重启不稳定或
 执行错误返回非零；`--require-consistent` 还要求纳入比较的上下文信号一致。
-`complete` 当前始终为 false，因为尚未覆盖下面的项目。
+`complete` 当前始终为 false，因为尚未覆盖下面的项目。该独立 Node 工具只加载扩展，
+不经过桌面核心的私有会话控制器；它保留扩展单独运行时的差异证据。
+
+## 私有会话控制与当前会话观测
+
+SeedableNoise 的生产启动计划增加 typed 会话策略。Windows 核心通过仅继承两个指定
+句柄的 CDP pipe 控制新进程，不开放调试 TCP 端口；Job Object 在控制失败或核心退出时
+终止整棵进程树。新标签先停在 about:blank，完成策略后才导航到启动地址。新 page、
+iframe、Dedicated/Shared/Service Worker 采用暂停、配置、恢复的顺序；不支持策略的
+目标会使会话失败，不静默跳过。
+
+控制器统一 UA、UA-CH、平台、CPU、Memory 和语言。时区使用原生 Emulation 覆盖，
+Worker 不支持该协议方法时必须实际读到期望时区，否则关闭会话。它不替代 Worker
+Canvas/Audio、字体、GPU 或网络栈。浏览器 API 在不安全上下文中本来缺失时，
+不会凭空添加 Device Memory。
+
+诊断页的“读取当前会话设备信号”只允许固定字段，最多读取 32 个 target；IPC 不接受
+脚本、URL、Cookie 或页面正文参数。会话列表定期核对进程状态，控制器退出后释放代理
+与调度槽位，再启动排队环境。此实现的真实内核通过范围以 Windows acceptance 结果为准。
+
+可选公网探测通过独立测试标签运行，必须先确认展示的端点；配置方法和证据边界见
+[公网 DNS / ICE 服务](network-probe-service.md)。未配置服务时保持未检查。
 
 ## 尚未完成的能力
 
-- Worker、UA-CH 与时区的原生统一覆盖；报告能揭示差异，尚未修复这些差异。
-- 现有用户 session 内的只读实测报告；当前使用独立临时环境。
-- 跨源 iframe、Shared/Service Worker、字体、GPU 像素和网络栈的完整观测。
-- DNS 公网泄漏需要受控 DNS/HTTP 关联服务，WebRTC 公网出口需要浏览器 ICE/STUN
-  实测。当前工具仅访问 localhost，不能将 HTTP 出口检查当成这些项目通过的证据。
+- 跨源 iframe、Shared/Service Worker 的完整真实内核验收，以及字体、GPU 像素和网络栈。
+- 自建公网服务部署后的 DNS/HTTP/ICE 关联验收。仓库中的 loopback 协议测试不能将
+  HTTP 出口检查或没有收到 STUN 包换算成公网无泄漏。
 
 不得将本变更描述为完整指纹浏览器交付，也不承诺外部检测站通过率。
 
