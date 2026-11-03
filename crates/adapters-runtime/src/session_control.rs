@@ -893,7 +893,11 @@ mod tests {
         }
         for (_, _, value) in &initial {
             assert_eq!(value["hardwareConcurrency"], 3, "{} CPU", value["kind"]);
-            assert_eq!(value["timezone"], "Asia/Tokyo", "{} timezone", value["kind"]);
+            assert_eq!(
+                value["timezone"], "Asia/Tokyo",
+                "{} timezone",
+                value["kind"]
+            );
             assert_eq!(value["canvas"], first["canvas"], "{} Canvas", value["kind"]);
             assert_eq!(value["repeat"], value["canvas"]);
             if !value["webgl"].is_null() {
