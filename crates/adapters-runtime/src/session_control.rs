@@ -35,7 +35,11 @@ struct Wire {
     pause_ready: Condvar,
 }
 #[derive(Debug)]
-struct PendingReply { id: u64, method: String, receive: mpsc::Receiver<Value> }
+struct PendingReply {
+    id: u64,
+    method: String,
+    receive: mpsc::Receiver<Value>,
+}
 impl Wire {
     fn fail(&self) {
         self.closing.store(true, Ordering::Release);
@@ -44,7 +48,12 @@ impl Wire {
             p.clear();
         }
     }
-    fn begin(&self, method: &str, params: Value, session: Option<&str>) -> PortResult<PendingReply> {
+    fn begin(
+        &self,
+        method: &str,
+        params: Value,
+        session: Option<&str>,
+    ) -> PortResult<PendingReply> {
         if self.closing.load(Ordering::Acquire) {
             return Err(internal(
                 self.policy_failure
@@ -80,10 +89,18 @@ impl Wire {
             self.fail();
             return Err(internal("session control writer unavailable"));
         }
-        Ok(PendingReply { id, method: method.to_owned(), receive })
+        Ok(PendingReply {
+            id,
+            method: method.to_owned(),
+            receive,
+        })
     }
     fn finish(&self, reply: PendingReply) -> PortResult<Value> {
-        let PendingReply { id, method, receive } = reply;
+        let PendingReply {
+            id,
+            method,
+            receive,
+        } = reply;
         let result = receive.recv_timeout(TIMEOUT);
         if let Ok(mut p) = self.pending.lock() {
             p.remove(&id);
@@ -93,8 +110,15 @@ impl Wire {
             internal(format!("session control response timeout: {method}"))
         })?;
         if let Some(error) = value.get("error") {
-            if method == "Emulation.setTimezoneOverride" && error["message"].as_str().is_some_and(|message| message.trim_end_matches('.') == "Timezone override is already in effect") {
-                return Err(PortError::new(PortErrorKind::AlreadyExists, "native timezone override is already active"));
+            if method == "Emulation.setTimezoneOverride"
+                && error["message"].as_str().is_some_and(|message| {
+                    message.trim_end_matches('.') == "Timezone override is already in effect"
+                })
+            {
+                return Err(PortError::new(
+                    PortErrorKind::AlreadyExists,
+                    "native timezone override is already active",
+                ));
             }
             if error["code"] == -32001
                 || matches!(
@@ -115,7 +139,10 @@ impl Wire {
         self.finish(self.begin(method, params, session)?)
     }
     fn pause_service_worker(&self, session: &str) -> PortResult<()> {
-        self.paused.lock().map_err(|_| internal("pause lock poisoned"))?.remove(session);
+        self.paused
+            .lock()
+            .map_err(|_| internal("pause lock poisoned"))?
+            .remove(session);
         // Startup must be released so the Service Worker agent can initialize.
         // Queue a V8 pause first; its first statement stays blocked until policy
         // installation has completed. No call-frame data is retained.
@@ -125,12 +152,22 @@ impl Wire {
         self.finish(enabled)?;
         self.finish(stopped)?;
         let deadline = Instant::now() + TIMEOUT;
-        let mut paused = self.paused.lock().map_err(|_| internal("pause lock poisoned"))?;
+        let mut paused = self
+            .paused
+            .lock()
+            .map_err(|_| internal("pause lock poisoned"))?;
         while !paused.contains(session) {
             if self.closing.load(Ordering::Acquire) || Instant::now() >= deadline {
-                self.fail(); return Err(internal("Service Worker did not pause before its first script"));
+                self.fail();
+                return Err(internal(
+                    "Service Worker did not pause before its first script",
+                ));
             }
-            paused = self.pause_ready.wait_timeout(paused, Duration::from_millis(100)).map_err(|_| internal("pause lock poisoned"))?.0;
+            paused = self
+                .pause_ready
+                .wait_timeout(paused, Duration::from_millis(100))
+                .map_err(|_| internal("pause lock poisoned"))?
+                .0;
         }
         Ok(())
     }
@@ -220,7 +257,9 @@ impl Controller {
                         } else if value["method"] == "Debugger.paused" {
                             if let Some(session) = value["sessionId"].as_str() {
                                 if let Ok(mut paused) = w.paused.lock() {
-                                    if paused.len() >= MAX_TARGETS { break 'read; }
+                                    if paused.len() >= MAX_TARGETS {
+                                        break 'read;
+                                    }
                                     paused.insert(session.to_owned());
                                     w.pause_ready.notify_all();
                                 }
@@ -270,12 +309,17 @@ impl Controller {
                     let session = &job.target.session;
                     let result: PortResult<()> = (|| {
                         if !job.extension {
-                            if job.target.kind == "service_worker" { w.pause_service_worker(session)?; }
+                            if job.target.kind == "service_worker" {
+                                w.pause_service_worker(session)?;
+                            }
                             configure(&w, session, &job.target.kind, &policy)?;
                             if job.target.kind == "service_worker" {
                                 w.call("Debugger.resume", json!({}), Some(session))?;
                                 w.call("Debugger.disable", json!({}), Some(session))?;
-                                w.paused.lock().map_err(|_| internal("pause lock poisoned"))?.remove(session);
+                                w.paused
+                                    .lock()
+                                    .map_err(|_| internal("pause lock poisoned"))?
+                                    .remove(session);
                             }
                         }
                         w.call("Runtime.runIfWaitingForDebugger", json!({}), Some(session))?;
@@ -329,7 +373,9 @@ impl Controller {
                 };
                 if event["method"] == "Target.detachedFromTarget" {
                     if let Some(session) = event["params"]["sessionId"].as_str() {
-                        if let Ok(mut paused) = w.paused.lock() { paused.remove(session); }
+                        if let Ok(mut paused) = w.paused.lock() {
+                            paused.remove(session);
+                        }
                         if let Ok(mut state) = t.0.lock() {
                             state.attached.remove(session);
                             state.configured.retain(|_, value| value.session != session);
@@ -404,7 +450,7 @@ impl Controller {
             .map_err(|_| internal("version lock poisoned"))? = actual.to_owned();
         controller
             .wire
-            .call("Target.setAutoAttach", auto_attach(), None)?;
+            .call("Target.setAutoAttach", auto_attach(true), None)?;
         for url in if urls.is_empty() {
             vec!["about:blank".to_owned()]
         } else {
@@ -599,8 +645,13 @@ fn evaluate(wire: &Wire, session: &str, expression: &str) -> PortResult<Value> {
     }
     Ok(result["result"]["value"].clone())
 }
-fn auto_attach() -> Value {
-    json!({"autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true,"filter":[{"type":"page"},{"type":"iframe"},{"type":"worker"},{"type":"shared_worker"},{"type":"service_worker"}]})
+fn auto_attach(root: bool) -> Value {
+    // Browser owns pages and origin-wide workers. Recursive sessions own only
+    // their frame/dedicated-worker children, preventing duplicate controllers
+    // from racing to pause and resume the same Service Worker.
+    let filter = if root { json!([{"type":"page"},{"type":"shared_worker"},{"type":"service_worker"}]) }
+        else { json!([{"type":"iframe"},{"type":"worker"}]) };
+    json!({"autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true,"filter":filter})
 }
 fn configure(
     wire: &Wire,
@@ -608,7 +659,7 @@ fn configure(
     kind: &str,
     policy: &SessionFingerprintConfig,
 ) -> PortResult<()> {
-    wire.call("Target.setAutoAttach", auto_attach(), Some(session))?;
+    wire.call("Target.setAutoAttach", auto_attach(false), Some(session))?;
     let (platform, platform_version) = match policy.platform {
         PlatformKind::Windows => ("Windows", "10.0.0"),
         PlatformKind::MacOs => ("macOS", "10.15.7"),
@@ -644,7 +695,9 @@ fn configure(
             Some(session),
         );
         if let Err(error) = result {
-            if is_page && error.kind != PortErrorKind::AlreadyExists { return Err(error); }
+            if is_page && error.kind != PortErrorKind::AlreadyExists {
+                return Err(error);
+            }
             let verify = format!("Intl.DateTimeFormat().resolvedOptions().timeZone===Intl.DateTimeFormat('en',{{timeZone:{}}}).resolvedOptions().timeZone", json!(timezone));
             if !is_page && evaluate(wire, session, &verify)? != true {
                 return Err(internal("native timezone is unavailable for this target"));

@@ -549,7 +549,7 @@ mod tests {
                     };
                     let path = headers.split_whitespace().nth(1).unwrap_or("/").to_owned();
                     println!("local acceptance request: {path}");
-                    let capture = "({kind:typeof document==='undefined'?(typeof ServiceWorkerGlobalScope!=='undefined'&&self instanceof ServiceWorkerGlobalScope?'service_worker':typeof SharedWorkerGlobalScope!=='undefined'&&self instanceof SharedWorkerGlobalScope?'shared_worker':'worker'):window===top?'page':location.hostname==='localhost'?'cross_frame':'frame',userAgent:navigator.userAgent,platform:navigator.platform,languages:Array.from(navigator.languages),hardwareConcurrency:navigator.hardwareConcurrency,deviceMemory:navigator.deviceMemory,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,hints:navigator.userAgentData?.toJSON()})";
+                    let capture = "({kind:typeof document==='undefined'?(typeof ServiceWorkerGlobalScope!=='undefined'&&self instanceof ServiceWorkerGlobalScope?'service_worker':typeof SharedWorkerGlobalScope!=='undefined'&&self instanceof SharedWorkerGlobalScope?'shared_worker':'worker'):window===top?'page':location.hostname==='localhost'?'cross_frame':'frame',userAgent:navigator.userAgent,platform:navigator.platform,languages:Array.from(navigator.languages),hardwareConcurrency:navigator.hardwareConcurrency,deviceMemory:navigator.deviceMemory,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,offsetWinter:new Date('2024-01-15T12:00:00Z').getTimezoneOffset(),offsetSummer:new Date('2024-07-15T12:00:00Z').getTimezoneOffset(),hints:navigator.userAgentData?.toJSON()})";
                     let script = format!("const first={capture};const send=()=>fetch('./'+first.kind+'/proof',{{method:'POST',body:JSON.stringify(first),keepalive:typeof document!=='undefined'}});const proof=send().catch(()=>send());");
                     let (content, kind) = if path.ends_with("shared.js") {
                         (
@@ -565,7 +565,7 @@ mod tests {
                         )
                     } else if path.ends_with("proof") {
                         if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) {
-                            println!("local first-script sample: {}", value["kind"]);
+                            println!("local first-script sample: {} CPU {} timezone {}", value["kind"], value["hardwareConcurrency"], value["timezone"]);
                             output.lock().unwrap().push((path.clone(), headers, value));
                         }
                         ("ok".to_owned(), "text/plain")
@@ -1014,6 +1014,8 @@ mod tests {
                 assert_eq!(first["hardwareConcurrency"], cpu);
                 assert_eq!(first["deviceMemory"], if index == 0 { 0.5 } else { 2.0 });
                 assert_eq!(first["timezone"], timezone);
+                assert_eq!(first["offsetWinter"], if index == 0 { -540 } else { 300 });
+                assert_eq!(first["offsetSummer"], if index == 0 { -540 } else { 240 });
                 let allowed_headers: Vec<_> = headers
                     .lines()
                     .filter(|line| {
