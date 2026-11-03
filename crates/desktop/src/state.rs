@@ -459,7 +459,10 @@ mod tests {
     };
 
     mod browser_fixture {
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/test_support/controlled_browser.rs"));
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/test_support/controlled_browser.rs"
+        ));
     }
     use browser_fixture::ControlFixture;
 
@@ -862,7 +865,15 @@ mod tests {
                 .2
                 .clone();
             assert!(!page_signals["hints"].is_null());
-            assert_ne!(page_signals["canvas"], baseline.iter().find(|(_, _, first)| first["kind"] == "page").unwrap().2["canvas"], "Canvas noise must be observed, not inferred from configuration");
+            assert_ne!(
+                page_signals["canvas"],
+                baseline
+                    .iter()
+                    .find(|(_, _, first)| first["kind"] == "page")
+                    .unwrap()
+                    .2["canvas"],
+                "Canvas noise must be observed, not inferred from configuration"
+            );
             for target in observed.targets {
                 assert_eq!(target.hardware_concurrency, cpu, "{} CPU", target.kind);
                 assert_eq!(target.timezone, timezone, "{} timezone", target.kind);
@@ -873,11 +884,31 @@ mod tests {
                 );
             }
             for (_, headers, first) in matching {
-                assert_eq!(first["canvas"], page_signals["canvas"], "{} Canvas", first["kind"]);
-                assert_eq!(first["repeat"], first["canvas"], "{} stable repeat", first["kind"]);
-                if baseline.iter().find(|(_, _, native)| native["kind"] == first["kind"]).is_some_and(|(_, _, native)| !native["webgl"].is_null()) {
-                    assert!(!first["webgl"].is_null(), "{} must preserve available WebGL", first["kind"]);
-                    assert_eq!(first["webgl"], page_signals["webgl"], "{} WebGL declarations", first["kind"]);
+                assert_eq!(
+                    first["canvas"], page_signals["canvas"],
+                    "{} Canvas",
+                    first["kind"]
+                );
+                assert_eq!(
+                    first["repeat"], first["canvas"],
+                    "{} stable repeat",
+                    first["kind"]
+                );
+                if baseline
+                    .iter()
+                    .find(|(_, _, native)| native["kind"] == first["kind"])
+                    .is_some_and(|(_, _, native)| !native["webgl"].is_null())
+                {
+                    assert!(
+                        !first["webgl"].is_null(),
+                        "{} must preserve available WebGL",
+                        first["kind"]
+                    );
+                    assert_eq!(
+                        first["webgl"], page_signals["webgl"],
+                        "{} WebGL declarations",
+                        first["kind"]
+                    );
                 }
                 assert_eq!(first["userAgent"], page_signals["userAgent"]);
                 assert_eq!(first["hints"], page_signals["hints"]);
@@ -942,7 +973,10 @@ mod tests {
             if index == 0 {
                 fixture.bump_service_version();
                 let updates = fixture.wait_kind_count("/0/", "service_worker", 2);
-                assert!(updates.len() >= 2, "updated Service Worker first-script evidence is required");
+                assert!(
+                    updates.len() >= 2,
+                    "updated Service Worker first-script evidence is required"
+                );
                 let updated = &updates.last().unwrap().2;
                 assert_eq!(updated["fixtureVersion"], 1);
                 assert_eq!(updated["hardwareConcurrency"], cpu);

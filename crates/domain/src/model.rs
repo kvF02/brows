@@ -671,13 +671,12 @@ impl LaunchArgument {
                 Self::AcceptLanguages(config.languages.clone()).validate()?;
                 config.persona.validate()?;
                 if config.timezone.as_ref().is_some_and(|tz| {
-                        tz.is_empty()
-                            || tz.len() > 64
-                            || !tz
-                                .bytes()
-                                .all(|c| c.is_ascii_alphanumeric() || b"/_-+".contains(&c))
-                    })
-                {
+                    tz.is_empty()
+                        || tz.len() > 64
+                        || !tz
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || b"/_-+".contains(&c))
+                }) {
                     return Err(DomainError::InvalidLaunchArgument(
                         "session fingerprint policy".to_owned(),
                     ));

@@ -1,24 +1,46 @@
 //! One fixed rendering hook for page and Worker realms; no caller-supplied code.
-use crate::{persona_fingerprint::PersonaFingerprint, stealth_template, PortError, PortErrorKind, PortResult};
+use crate::{
+    persona_fingerprint::PersonaFingerprint, stealth_template, PortError, PortErrorKind, PortResult,
+};
 use brows_domain::{LaunchArgument, LocaleConfig, SeedableNoisePersona, SessionFingerprintConfig};
 
-pub fn render_session_fingerprint(policy: &SessionFingerprintConfig, version: &str) -> PortResult<String> {
-    LaunchArgument::SessionFingerprint(Box::new(policy.clone())).validate()
+pub fn render_session_fingerprint(
+    policy: &SessionFingerprintConfig,
+    version: &str,
+) -> PortResult<String> {
+    LaunchArgument::SessionFingerprint(Box::new(policy.clone()))
+        .validate()
         .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
     let fingerprint = PersonaFingerprint::derive(&policy.persona, version)
         .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
     if fingerprint.user_agent != policy.user_agent {
-        return Err(PortError::new(PortErrorKind::InvalidData, "session identity does not match the selected runtime and persona"));
+        return Err(PortError::new(
+            PortErrorKind::InvalidData,
+            "session identity does not match the selected runtime and persona",
+        ));
     }
-    Ok(render_persona_content(&policy.persona, &fingerprint, &LocaleConfig {
-        accept_languages: policy.languages.clone(), timezone: policy.timezone.clone(),
-    }))
+    Ok(render_persona_content(
+        &policy.persona,
+        &fingerprint,
+        &LocaleConfig {
+            accept_languages: policy.languages.clone(),
+            timezone: policy.timezone.clone(),
+        },
+    ))
 }
 
-pub(crate) fn render_persona_content(persona: &SeedableNoisePersona, fp: &PersonaFingerprint, locale: &LocaleConfig) -> String {
+pub(crate) fn render_persona_content(
+    persona: &SeedableNoisePersona,
+    fp: &PersonaFingerprint,
+    locale: &LocaleConfig,
+) -> String {
     let data = serde_json::json!({
         "seed": persona.seed,
-        "platform": persona.platform_string_for_js(),
+        "platform": match persona.platform {
+            brows_domain::PlatformKind::Windows => "windows",
+            brows_domain::PlatformKind::MacOs => "mac",
+            brows_domain::PlatformKind::Linux => "linux",
+        },
         "hardware_concurrency": fp.hardware_concurrency,
         "device_memory": fp.device_memory_number(),
         "languages": locale.accept_languages,
@@ -32,6 +54,7 @@ pub(crate) fn render_persona_content(persona: &SeedableNoisePersona, fp: &Person
         "spoof_canvas": persona.spoof_canvas,
         "spoof_audio": persona.spoof_audio,
         "webrtc_policy": "none",
-    }).to_string();
+    })
+    .to_string();
     stealth_template::render_content(&data)
 }

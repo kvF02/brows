@@ -1,6 +1,10 @@
 //! Session-scoped control and observation over private inherited pipes.
 //! No generic command/evaluate surface is exposed through application ports.
-use super::{internal, invalid_data, now_ms, target_registry::{Target, TargetJob, Targets, MAX_TARGETS}, win_pipe};
+use super::{
+    internal, invalid_data, now_ms,
+    target_registry::{Target, TargetJob, Targets, MAX_TARGETS},
+    win_pipe,
+};
 use brows_application::{
     PortError, PortErrorKind, PortResult, SessionObservation, TargetObservation,
 };
@@ -43,7 +47,9 @@ struct PendingReply {
 }
 impl Drop for PendingReply {
     fn drop(&mut self) {
-        if let Ok(mut pending) = self.pending.lock() { pending.remove(&self.id); }
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&self.id);
+        }
     }
 }
 impl Wire {
@@ -107,8 +113,13 @@ impl Wire {
         let method = &reply.method;
         let result = reply.receive.recv_timeout(TIMEOUT);
         let value = result.map_err(|_| {
-            if reply.session.is_none() { self.fail(); }
-            PortError::new(PortErrorKind::Unavailable, format!("session control response timeout: {method}"))
+            if reply.session.is_none() {
+                self.fail();
+            }
+            PortError::new(
+                PortErrorKind::Unavailable,
+                format!("session control response timeout: {method}"),
+            )
         })?;
         if let Some(error) = value.get("error") {
             if method == "Emulation.setTimezoneOverride"
@@ -251,7 +262,12 @@ impl Controller {
                             }
                         } else if matches!(
                             value["method"].as_str(),
-                            Some("Target.attachedToTarget" | "Target.detachedFromTarget" | "Inspector.targetCrashed" | "Inspector.targetReloadedAfterCrash")
+                            Some(
+                                "Target.attachedToTarget"
+                                    | "Target.detachedFromTarget"
+                                    | "Inspector.targetCrashed"
+                                    | "Inspector.targetReloadedAfterCrash"
+                            )
                         ) && events.try_send(value).is_err()
                         {
                             break 'read;
@@ -291,8 +307,18 @@ impl Controller {
                         Err(mpsc::RecvTimeoutError::Timeout) => continue,
                         Err(_) => break,
                     };
-                    let Ok(_lease) = job.gate.lock() else { w.fail(); break; };
-                    if !t.0.lock().map(|state| state.is_current(&job)).unwrap_or(false) { continue; }
+                    let Ok(_lease) = job.gate.lock() else {
+                        w.fail();
+                        break;
+                    };
+                    if !t
+                        .0
+                        .lock()
+                        .map(|state| state.is_current(&job))
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
                     let session = &job.target.session;
                     let result: PortResult<()> = (|| {
                         if !job.extension {
@@ -300,7 +326,14 @@ impl Controller {
                                 w.pause_service_worker(session)?;
                             }
                             configure(&w, session, &job.target.kind, &policy)?;
-                            if !t.0.lock().map(|state| state.is_current(&job)).unwrap_or(false) { return Ok(()); }
+                            if !t
+                                .0
+                                .lock()
+                                .map(|state| state.is_current(&job))
+                                .unwrap_or(false)
+                            {
+                                return Ok(());
+                            }
                             if job.target.kind == "service_worker" {
                                 w.call("Debugger.resume", json!({}), Some(session))?;
                                 w.call("Debugger.disable", json!({}), Some(session))?;
@@ -318,8 +351,13 @@ impl Controller {
                             w.fail();
                             break;
                         };
-                        if !state.is_current(&job) { continue; }
-                        if error.kind == PortErrorKind::NotFound { state.detach(session); continue; }
+                        if !state.is_current(&job) {
+                            continue;
+                        }
+                        if error.kind == PortErrorKind::NotFound {
+                            state.detach(session);
+                            continue;
+                        }
                         if let Ok(mut reason) = w.policy_failure.lock() {
                             if reason.is_none() && error.message != "session control is closed" {
                                 *reason = Some(format!(
@@ -336,7 +374,9 @@ impl Controller {
                         w.fail();
                         break;
                     };
-                    if !job.extension && state.ready(&job) { t.1.notify_all(); }
+                    if !job.extension && state.ready(&job) {
+                        t.1.notify_all();
+                    }
                 }
             }));
         }
@@ -360,31 +400,75 @@ impl Controller {
                     }
                     continue;
                 }
-                if matches!(event["method"].as_str(), Some("Inspector.targetCrashed" | "Inspector.targetReloadedAfterCrash")) {
-                    let Some(session) = event["sessionId"].as_str() else { w.fail(); break; };
-                    if let Ok(mut paused) = w.paused.lock() { paused.remove(session); }
+                if matches!(
+                    event["method"].as_str(),
+                    Some("Inspector.targetCrashed" | "Inspector.targetReloadedAfterCrash")
+                ) {
+                    let Some(session) = event["sessionId"].as_str() else {
+                        w.fail();
+                        break;
+                    };
+                    if let Ok(mut paused) = w.paused.lock() {
+                        paused.remove(session);
+                    }
                     let outcome = match t.0.lock() {
-                        Ok(mut state) => if event["method"] == "Inspector.targetCrashed" { state.suspend(session).map(|_| None) } else { state.reload(session) },
-                        Err(_) => { w.fail(); break; }
+                        Ok(mut state) => {
+                            if event["method"] == "Inspector.targetCrashed" {
+                                state.suspend(session).map(|_| None)
+                            } else {
+                                state.reload(session)
+                            }
+                        }
+                        Err(_) => {
+                            w.fail();
+                            break;
+                        }
                     };
                     match outcome {
-                        Ok(Some(job)) => if jobs.try_send(job).is_err() { w.fail(); break; },
-                        Ok(None) => {},
-                        Err(_) => { w.fail(); break; }
+                        Ok(Some(job)) => {
+                            if jobs.try_send(job).is_err() {
+                                w.fail();
+                                break;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(_) => {
+                            w.fail();
+                            break;
+                        }
                     }
                     t.1.notify_all();
                     continue;
                 }
                 let params = &event["params"];
-                let Some(session) = params["sessionId"].as_str() else { w.fail(); break; };
-                let Some(id) = params["targetInfo"]["targetId"].as_str() else { w.fail(); break; };
+                let Some(session) = params["sessionId"].as_str() else {
+                    w.fail();
+                    break;
+                };
+                let Some(id) = params["targetInfo"]["targetId"].as_str() else {
+                    w.fail();
+                    break;
+                };
                 let kind = params["targetInfo"]["type"].as_str().unwrap_or("");
-                let extension = params["targetInfo"]["url"].as_str().unwrap_or("").starts_with("chrome-extension://");
+                let extension = params["targetInfo"]["url"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("chrome-extension://");
                 let job = match t.0.lock() {
                     Ok(mut state) => state.attach(id, session, kind, extension),
-                    Err(_) => { w.fail(); break; }
+                    Err(_) => {
+                        w.fail();
+                        break;
+                    }
                 };
-                let job = match job { Ok(Some(job)) => job, Ok(None) => continue, Err(_) => { w.fail(); break; } };
+                let job = match job {
+                    Ok(Some(job)) => job,
+                    Ok(None) => continue,
+                    Err(_) => {
+                        w.fail();
+                        break;
+                    }
+                };
                 if jobs.try_send(job).is_err() {
                     w.fail();
                     break;
@@ -546,7 +630,15 @@ impl Controller {
         let mut result = Vec::new();
         for target in targets {
             let observed = evaluate(&self.wire, &target.session, OBSERVE);
-            if !self.targets.0.lock().map_err(|_| internal("target lock poisoned"))?.target_current(&target) { continue; }
+            if !self
+                .targets
+                .0
+                .lock()
+                .map_err(|_| internal("target lock poisoned"))?
+                .target_current(&target)
+            {
+                continue;
+            }
             let signals = observed?;
             result.push(TargetObservation {
                 kind: target.kind,
@@ -695,7 +787,10 @@ const OBSERVE:&str="(()=>({userAgent:navigator.userAgent,platform:navigator.plat
 mod tests {
     use super::*;
     mod browser_fixture {
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/test_support/controlled_browser.rs"));
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/test_support/controlled_browser.rs"
+        ));
     }
 
     #[test]
@@ -703,7 +798,13 @@ mod tests {
         let pending = Arc::new(Mutex::new(BTreeMap::new()));
         let (send, receive) = mpsc::channel();
         pending.lock().unwrap().insert(1, send);
-        let reply = PendingReply { id:1, method:"Runtime.enable".to_owned(), receive, session:Some("s".to_owned()), pending:pending.clone() };
+        let reply = PendingReply {
+            id: 1,
+            method: "Runtime.enable".to_owned(),
+            receive,
+            session: Some("s".to_owned()),
+            pending: pending.clone(),
+        };
         drop(reply);
         assert!(pending.lock().unwrap().is_empty());
     }
@@ -712,51 +813,150 @@ mod tests {
     #[ignore = "requires an explicitly supplied signed Edge and uses isolated data"]
     fn private_worker_lifecycle_acceptance() {
         use brows_domain::{DeviceMemoryGb, ScreenConfig, SeedableNoisePersona, WebGLProfile};
-        let executable = std::path::PathBuf::from(std::env::var_os("BROWS_ACCEPTANCE_BROWSER").expect("explicit acceptance browser"));
-        assert_eq!(crate::verify_authenticode_publisher(&executable, &["Microsoft Corporation"]).unwrap(), "Microsoft Corporation");
+        let executable = std::path::PathBuf::from(
+            std::env::var_os("BROWS_ACCEPTANCE_BROWSER").expect("explicit acceptance browser"),
+        );
+        assert_eq!(
+            crate::verify_authenticode_publisher(&executable, &["Microsoft Corporation"]).unwrap(),
+            "Microsoft Corporation"
+        );
         let version = std::env::var("BROWS_ACCEPTANCE_VERSION").expect("verified binary version");
-        let root = std::env::temp_dir().join(format!("brows-worker-lifecycle-{}-{}", std::process::id(), now_ms()));
+        let root = std::env::temp_dir().join(format!(
+            "brows-worker-lifecycle-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
         std::fs::create_dir_all(&root).unwrap();
         let persona = SeedableNoisePersona {
-            seed:"worker-lifecycle".to_owned(), platform:PlatformKind::Windows, hardware_concurrency:3,
-            device_memory:DeviceMemoryGb::Half, touch_points:0,
-            screen:ScreenConfig { width:1920, height:1080, color_depth:24, device_scale_factor_hundredths:100 },
-            webgl:WebGLProfile { vendor:String::new(), unmasked_renderer:String::new() },
-            spoof_canvas:true, spoof_audio:false,
+            seed: "worker-lifecycle".to_owned(),
+            platform: PlatformKind::Windows,
+            hardware_concurrency: 3,
+            device_memory: DeviceMemoryGb::Half,
+            touch_points: 0,
+            screen: ScreenConfig {
+                width: 1920,
+                height: 1080,
+                color_depth: 24,
+                device_scale_factor_hundredths: 100,
+            },
+            webgl: WebGLProfile {
+                vendor: String::new(),
+                unmasked_renderer: String::new(),
+            },
+            spoof_canvas: true,
+            spoof_audio: false,
         };
-        let fp = brows_application::persona_fingerprint::PersonaFingerprint::derive(&persona, &version).unwrap();
-        let policy = SessionFingerprintConfig { user_agent:fp.user_agent, persona, languages:vec!["en-US".to_owned(), "en".to_owned()], timezone:Some("Asia/Tokyo".to_owned()) };
+        let fp =
+            brows_application::persona_fingerprint::PersonaFingerprint::derive(&persona, &version)
+                .unwrap();
+        let policy = SessionFingerprintConfig {
+            user_agent: fp.user_agent,
+            persona,
+            languages: vec!["en-US".to_owned(), "en".to_owned()],
+            timezone: Some("Asia/Tokyo".to_owned()),
+        };
         let fixture = browser_fixture::ControlFixture::start();
-        let args = vec![OsString::from(format!("--user-data-dir={}", root.display())), OsString::from("--no-first-run"), OsString::from("--no-default-browser-check"), OsString::from("--no-startup-window")];
-        let controller = Controller::start(&executable, &args, policy, &[format!("{}/life/page", fixture.url)]).unwrap();
+        let args = vec![
+            OsString::from(format!("--user-data-dir={}", root.display())),
+            OsString::from("--no-first-run"),
+            OsString::from("--no-default-browser-check"),
+            OsString::from("--no-startup-window"),
+        ];
+        let controller = Controller::start(
+            &executable,
+            &args,
+            policy,
+            &[format!("{}/life/page", fixture.url)],
+        )
+        .unwrap();
         let initial = fixture.wait_proofs("/life/");
-        assert_eq!(initial.iter().map(|(_,_,first)|first["kind"].as_str().unwrap()).collect::<BTreeSet<_>>().len(),6);
-        let first = initial.iter().find(|(_,_,first)|first["kind"]=="service_worker").unwrap().2.clone();
-        let page = controller.targets.0.lock().unwrap().snapshot().into_iter().find(|target|target.kind=="page").unwrap();
-        controller.wire.call("ServiceWorker.enable", json!({}), Some(&page.session)).unwrap();
-        controller.wire.call("ServiceWorker.stopAllWorkers", json!({}), Some(&page.session)).unwrap();
-        let deadline = Instant::now()+TIMEOUT;
-        while controller.targets.0.lock().unwrap().snapshot().iter().any(|target|target.kind=="service_worker") {
-            assert!(Instant::now()<deadline,"stopped Worker must leave observation");
+        assert_eq!(
+            initial
+                .iter()
+                .map(|(_, _, first)| first["kind"].as_str().unwrap())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            6
+        );
+        let first = initial
+            .iter()
+            .find(|(_, _, first)| first["kind"] == "service_worker")
+            .unwrap()
+            .2
+            .clone();
+        let page = controller
+            .targets
+            .0
+            .lock()
+            .unwrap()
+            .snapshot()
+            .into_iter()
+            .find(|target| target.kind == "page")
+            .unwrap();
+        controller
+            .wire
+            .call("ServiceWorker.enable", json!({}), Some(&page.session))
+            .unwrap();
+        controller
+            .wire
+            .call(
+                "ServiceWorker.stopAllWorkers",
+                json!({}),
+                Some(&page.session),
+            )
+            .unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        while controller
+            .targets
+            .0
+            .lock()
+            .unwrap()
+            .snapshot()
+            .iter()
+            .any(|target| target.kind == "service_worker")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "stopped Worker must leave observation"
+            );
             thread::sleep(Duration::from_millis(50));
         }
         let session_id = SessionId::new("lifecycle").unwrap();
-        assert!(!controller.observe(&session_id).unwrap().targets.iter().any(|target|target.kind=="service_worker"));
+        assert!(!controller
+            .observe(&session_id)
+            .unwrap()
+            .targets
+            .iter()
+            .any(|target| target.kind == "service_worker"));
         evaluate(&controller.wire,&page.session,"navigator.serviceWorker.ready.then(registration=>registration.active.postMessage('restart-proof'));true").unwrap();
-        let restarted = fixture.wait_kind_count("/life/","service_worker",2);
-        assert!(restarted.len()>=2,"restart must run its first script again");
+        let restarted = fixture.wait_kind_count("/life/", "service_worker", 2);
+        assert!(
+            restarted.len() >= 2,
+            "restart must run its first script again"
+        );
         fixture.bump_service_version();
-        let updated = fixture.wait_kind_count("/life/","service_worker",3);
-        assert!(updated.len()>=3,"updated Worker must run its first script");
-        for (_,_,value) in updated {
-            assert_eq!(value["hardwareConcurrency"],3);
-            assert_eq!(value["timezone"],"Asia/Tokyo");
-            assert_eq!(value["canvas"],first["canvas"]);
-            assert_eq!(value["repeat"],value["canvas"]);
-            assert_eq!(value["webgl"],first["webgl"]);
+        let updated = fixture.wait_kind_count("/life/", "service_worker", 3);
+        assert!(
+            updated.len() >= 3,
+            "updated Worker must run its first script"
+        );
+        for (_, _, value) in updated {
+            assert_eq!(value["hardwareConcurrency"], 3);
+            assert_eq!(value["timezone"], "Asia/Tokyo");
+            assert_eq!(value["canvas"], first["canvas"]);
+            assert_eq!(value["repeat"], value["canvas"]);
+            assert_eq!(value["webgl"], first["webgl"]);
         }
-        assert!(controller.observe(&session_id).unwrap().targets.iter().any(|target|target.kind=="service_worker"));
-        controller.kill().unwrap(); controller.wait().unwrap(); drop(controller); drop(fixture);
+        assert!(controller
+            .observe(&session_id)
+            .unwrap()
+            .targets
+            .iter()
+            .any(|target| target.kind == "service_worker"));
+        controller.kill().unwrap();
+        controller.wait().unwrap();
+        drop(controller);
+        drop(fixture);
         let _ = std::fs::remove_dir_all(root);
     }
 }

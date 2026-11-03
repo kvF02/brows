@@ -12,12 +12,29 @@ pub(crate) struct ControlFixture {
     service_version: Arc<std::sync::atomic::AtomicUsize>,
 }
 impl ControlFixture {
-    pub(crate) fn bump_service_version(&self) { self.service_version.fetch_add(1, std::sync::atomic::Ordering::AcqRel); }
-    pub(crate) fn wait_kind_count(&self, prefix: &str, kind: &str, count: usize) -> Vec<CapturedProof> {
+    pub(crate) fn bump_service_version(&self) {
+        self.service_version
+            .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
+    }
+    pub(crate) fn wait_kind_count(
+        &self,
+        prefix: &str,
+        kind: &str,
+        count: usize,
+    ) -> Vec<CapturedProof> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
-            let proofs: Vec<_> = self.proofs.lock().unwrap().iter().filter(|(path, _, first)| path.starts_with(prefix) && first["kind"] == kind).cloned().collect();
-            if proofs.len() >= count || std::time::Instant::now() >= deadline { return proofs; }
+            let proofs: Vec<_> = self
+                .proofs
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(path, _, first)| path.starts_with(prefix) && first["kind"] == kind)
+                .cloned()
+                .collect();
+            if proofs.len() >= count || std::time::Instant::now() >= deadline {
+                return proofs;
+            }
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
@@ -138,11 +155,19 @@ impl ControlFixture {
                 ""
             };
             let frame = if path.ends_with("page") {
-                format!("<iframe src='./frame'></iframe><iframe src='{cross_origin}{}frame'></iframe>", path.trim_end_matches("page"))
+                format!(
+                    "<iframe src='./frame'></iframe><iframe src='{cross_origin}{}frame'></iframe>",
+                    path.trim_end_matches("page")
+                )
             } else {
                 String::new()
             };
-            (format!("<!doctype html><meta charset='utf-8'><script>{script}{worker}</script>{frame}"), "text/html")
+            (
+                format!(
+                    "<!doctype html><meta charset='utf-8'><script>{script}{worker}</script>{frame}"
+                ),
+                "text/html",
+            )
         };
         let response = format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nAccept-CH: Sec-CH-UA-Platform, Sec-CH-UA-Full-Version-List\r\n\r\n{content}", content.len());
         let _ = stream.write_all(response.as_bytes());
@@ -152,10 +177,8 @@ impl ControlFixture {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let listener_v6 =
-            std::net::TcpListener::bind(("::1", listener.local_addr().unwrap().port()))
-                .unwrap();
-        let cross_origin =
-            format!("http://localhost:{}", listener.local_addr().unwrap().port());
+            std::net::TcpListener::bind(("::1", listener.local_addr().unwrap().port())).unwrap();
+        let cross_origin = format!("http://localhost:{}", listener.local_addr().unwrap().port());
         listener.set_nonblocking(true).unwrap();
         listener_v6.set_nonblocking(true).unwrap();
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -225,4 +248,3 @@ impl Drop for ControlFixture {
         }
     }
 }
-

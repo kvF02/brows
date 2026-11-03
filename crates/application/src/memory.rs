@@ -960,17 +960,34 @@ mod seedable_noise_tests {
 
     #[test]
     fn session_and_extension_hooks_use_the_same_validated_persona() {
-        let root = std::env::temp_dir().join(format!("brows-render-contract-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let root = std::env::temp_dir().join(format!(
+            "brows-render-contract-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
         let id = ProfileId::new("render-contract").unwrap();
         let runtime = SeedableNoiseFingerprintRuntime::new(&root, id.clone()).unwrap();
         let persona = sample_persona("render-contract");
         let build = verified_build();
         let fp = PersonaFingerprint::derive(&persona, &build.version).unwrap();
         let locale = LocaleConfig::default();
-        let directory = runtime.materialize_extension(&id, &persona, &fp, &locale).unwrap();
-        let mut policy = brows_domain::SessionFingerprintConfig { user_agent:fp.user_agent.clone(), persona, languages:locale.accept_languages, timezone:None };
+        let directory = runtime
+            .materialize_extension(&id, &persona, &fp, &locale)
+            .unwrap();
+        let mut policy = brows_domain::SessionFingerprintConfig {
+            user_agent: fp.user_agent.clone(),
+            persona,
+            languages: locale.accept_languages,
+            timezone: None,
+        };
         let session = crate::render_session_fingerprint(&policy, &build.version).unwrap();
-        assert_eq!(session, std::fs::read_to_string(directory.join("content.js")).unwrap());
+        assert_eq!(
+            session,
+            std::fs::read_to_string(directory.join("content.js")).unwrap()
+        );
         policy.user_agent = "unrelated identity".to_owned();
         assert!(crate::render_session_fingerprint(&policy, &build.version).is_err());
         std::fs::remove_dir_all(root).unwrap();
@@ -1225,21 +1242,6 @@ mod seedable_noise_tests {
         );
         assert_eq!(fs::read(&damaged).unwrap(), b"damaged");
         fs::remove_dir_all(root).unwrap();
-    }
-}
-
-// Small helpers on the domain type — used only by SeedableNoiseFingerprintRuntime.
-trait SeedableNoiseExt {
-    fn platform_string_for_js(&self) -> &'static str;
-}
-
-impl SeedableNoiseExt for SeedableNoisePersona {
-    fn platform_string_for_js(&self) -> &'static str {
-        match self.platform {
-            brows_domain::PlatformKind::Windows => "windows",
-            brows_domain::PlatformKind::MacOs => "mac",
-            brows_domain::PlatformKind::Linux => "linux",
-        }
     }
 }
 
