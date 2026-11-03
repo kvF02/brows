@@ -151,6 +151,10 @@ pub trait BrowserRuntime: fmt::Debug + Send + Sync {
         ))
     }
 
+    fn observe_session(&self, _session_id: &SessionId) -> PortResult<SessionObservation> {
+        Err(PortError::new(PortErrorKind::CapabilityUnsupported, "session observation is unavailable"))
+    }
+
     fn resolve_build(&self, selector: &BrowserBuildSelector) -> PortResult<BrowserBuild>;
     /// Returns the locally registered builds for management/diagnostic views.
     /// Runtime adapters that cannot enumerate builds may keep the default.
@@ -160,6 +164,25 @@ pub trait BrowserRuntime: fmt::Debug + Send + Sync {
     fn launch(&self, plan: &ResolvedLaunchPlan) -> PortResult<BrowserProcess>;
     fn stop(&self, session_id: &SessionId) -> PortResult<()>;
     fn is_running(&self, session_id: &SessionId) -> PortResult<bool>;
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionObservation {
+    pub session_id: SessionId,
+    pub observed_at_ms: u64,
+    pub targets: Vec<TargetObservation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetObservation {
+    pub kind: String,
+    pub user_agent: String,
+    pub platform: String,
+    pub languages: Vec<String>,
+    pub hardware_concurrency: u64,
+    pub device_memory: String,
+    pub timezone: String,
+    pub client_hints_platform: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

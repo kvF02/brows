@@ -232,6 +232,14 @@ impl SessionApplicationService {
         })
     }
 
+    pub fn observe(&self, session_id: &SessionId) -> ApplicationResult<crate::SessionObservation> {
+        let session = self.session(session_id)?;
+        if session.state != SessionState::Running {
+            return Err(ApplicationError::new(ErrorCode::InvalidProfileState, "only a running session can be observed"));
+        }
+        Ok(self.browsers.observe_session(session_id)?)
+    }
+
     pub fn list(&self) -> ApplicationResult<Vec<SessionDto>> {
         let registry = self.lock_registry()?;
         Ok(registry.sessions.values().map(SessionDto::from).collect())

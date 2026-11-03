@@ -35,6 +35,7 @@
     "allow-session-stop",
     "allow-session-cancel-queued",
     "allow-session-list",
+    "allow-session-observe",
     "allow-backup-list",
     "allow-backup-export",
     "allow-backup-import"

@@ -406,6 +406,63 @@ mod tests {
         SessionLaunchRequest, SessionStateDto, SessionStopRequest, WindowDto,
     };
 
+    struct ControlFixture {
+        url: String,
+        proofs: Arc<std::sync::Mutex<Vec<(String, String, serde_json::Value)>>>,
+        stop: Arc<std::sync::atomic::AtomicBool>,
+        thread: Option<std::thread::JoinHandle<()>>,
+    }
+    impl ControlFixture {
+        fn start() -> Self {
+            use std::io::{Read, Write};
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let url = format!("http://{}", listener.local_addr().unwrap());
+            listener.set_nonblocking(true).unwrap();
+            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let proofs = Arc::new(std::sync::Mutex::new(Vec::new()));
+            let halt = stop.clone(); let output = proofs.clone();
+            let thread = std::thread::spawn(move || {
+                while !halt.load(std::sync::atomic::Ordering::Acquire) {
+                    let (mut stream, _) = match listener.accept() {
+                        Ok(value) => value,
+                        Err(_) => { std::thread::sleep(std::time::Duration::from_millis(10)); continue; }
+                    };
+                    stream.set_read_timeout(Some(std::time::Duration::from_millis(300))).unwrap();
+                    let mut bytes = Vec::new(); let mut buffer = [0u8; 2048];
+                    let request = loop {
+                        match stream.read(&mut buffer) { Ok(0) | Err(_) => break None, Ok(n) => bytes.extend_from_slice(&buffer[..n]) }
+                        if bytes.len() > 16384 { break None; }
+                        if let Some(end) = bytes.windows(4).position(|p| p == b"\r\n\r\n") {
+                            let head = String::from_utf8_lossy(&bytes[..end]).to_string();
+                            let length = head.lines().find_map(|line| line.to_ascii_lowercase().strip_prefix("content-length:").and_then(|v| v.trim().parse::<usize>().ok())).unwrap_or(0);
+                            if bytes.len() >= end + 4 + length { break Some((head, bytes[end+4..end+4+length].to_vec())); }
+                        }
+                    };
+                    let Some((headers, body)) = request else { continue; };
+                    let path = headers.split_whitespace().nth(1).unwrap_or("/").to_owned();
+                    let capture = "({userAgent:navigator.userAgent,platform:navigator.platform,languages:Array.from(navigator.languages),hardwareConcurrency:navigator.hardwareConcurrency,deviceMemory:navigator.deviceMemory,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,hints:navigator.userAgentData?.toJSON()})";
+                    let script = format!("const first={capture};fetch('./proof',{{method:'POST',body:JSON.stringify(first)}});");
+                    let (content, kind) = if path.ends_with("worker.js") {
+                        (format!("{script}setInterval(()=>{{}},1000);"), "text/javascript")
+                    } else if path.ends_with("proof") {
+                        if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) { output.lock().unwrap().push((path.clone(), headers, value)); }
+                        ("ok".to_owned(), "text/plain")
+                    } else {
+                        let worker = if path.ends_with("page") { "globalThis.worker=new Worker('./worker.js');" } else { "" };
+                        let frame = if path.ends_with("page") { "<iframe src='./frame'></iframe>" } else { "" };
+                        (format!("<!doctype html><meta charset='utf-8'><script>{script}{worker}</script>{frame}"), "text/html")
+                    };
+                    let response = format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\nAccept-CH: Sec-CH-UA-Platform, Sec-CH-UA-Full-Version-List\r\n\r\n{content}", content.len());
+                    let _ = stream.write_all(response.as_bytes());
+                }
+            });
+            Self { url, proofs, stop, thread: Some(thread) }
+        }
+    }
+    impl Drop for ControlFixture {
+        fn drop(&mut self) { self.stop.store(true, std::sync::atomic::Ordering::Release); if let Some(thread) = self.thread.take() { let _ = thread.join(); } }
+    }
+
     fn draft(name: &str) -> ProfileDraftDto {
         ProfileDraftDto {
             name: name.to_owned(),
@@ -625,15 +682,16 @@ mod tests {
         assert_eq!(build.trust, RuntimeTrust::Verified);
         let result = state.browsers.probe_fingerprint_support(&build.id).unwrap();
         assert_eq!(result.build.capabilities.fingerprint_support, brows_domain::FingerprintSupport::Supported, "{}", result.detail);
+        let fixture = ControlFixture::start();
         let mut started = Vec::new();
-        for name in ["Edge acceptance A", "Edge acceptance B"] {
+        for (index, name) in ["Edge acceptance A", "Edge acceptance B"].into_iter().enumerate() {
             let mut profile = draft(name);
             profile.browser = BrowserSelectorDto::Pinned { build_id: (&build.id).into() };
             profile.persona = PersonaDto::SeedableNoise {
                 seed: name.to_owned(),
                 platform: brows_contracts::PlatformDto::Windows,
-                hardware_concurrency: 4,
-                device_memory: brows_contracts::DeviceMemoryDto::Four,
+                hardware_concurrency: if index == 0 { 3 } else { 6 },
+                device_memory: if index == 0 { brows_contracts::DeviceMemoryDto::Half } else { brows_contracts::DeviceMemoryDto::Two },
                 touch_points: 0,
                 screen: brows_contracts::ScreenConfigDto {
                     width: 1920, height: 1080, color_depth: 24,
@@ -642,6 +700,9 @@ mod tests {
                 webgl_vendor: String::new(), webgl_renderer: String::new(),
                 spoof_canvas: true, spoof_audio: false,
             };
+            profile.locale.accept_languages = if index == 0 { vec!["ja-JP".to_owned(), "ja".to_owned()] } else { vec!["en-US".to_owned(), "en".to_owned()] };
+            profile.locale.timezone = Some(if index == 0 { "Asia/Tokyo" } else { "America/New_York" }.to_owned());
+            profile.startup_urls = vec![format!("{}/{index}/page", fixture.url)];
             let profile = state.profiles.create(ProfileCreateRequest { profile }).unwrap();
             let outcome = state.sessions.launch(SessionLaunchRequest { profile_id: profile.id }).unwrap();
             match outcome {
@@ -650,9 +711,28 @@ mod tests {
             }
         }
         std::thread::sleep(std::time::Duration::from_secs(2));
-        for session in started {
+        for (index, session) in started.into_iter().enumerate() {
             let id: brows_domain::SessionId = session.id.clone().try_into().unwrap();
             assert!(state.browsers.is_running(&id).unwrap(), "signed Edge must remain running");
+            let observed = state.sessions.observe(&id).unwrap();
+            assert!(observed.targets.iter().any(|t| t.kind == "worker"), "worker must be observed");
+            let cpu = if index == 0 { 3 } else { 6 };
+            let timezone = if index == 0 { "Asia/Tokyo" } else { "America/New_York" };
+            for target in observed.targets {
+                assert_eq!(target.hardware_concurrency, cpu, "{} CPU", target.kind);
+                assert_eq!(target.timezone, timezone, "{} timezone", target.kind);
+                assert_eq!(target.client_hints_platform, "Windows", "{} UA-CH", target.kind);
+            }
+            let proofs = fixture.proofs.lock().unwrap();
+            let matching: Vec<_> = proofs.iter().filter(|(path, _, _)| path.starts_with(&format!("/{index}/"))).collect();
+            assert!(matching.len() >= 3, "page/frame/worker first-script proofs are required");
+            for (_, headers, first) in matching {
+                assert_eq!(first["hardwareConcurrency"], cpu);
+                assert_eq!(first["deviceMemory"], if index == 0 { 0.5 } else { 2.0 });
+                assert_eq!(first["timezone"], timezone);
+                assert!(headers.to_ascii_lowercase().contains("sec-ch-ua-platform: \"windows\""));
+            }
+            drop(proofs);
             let stopped = state.sessions.stop(SessionStopRequest { session_id: session.id }).unwrap();
             assert_eq!(stopped.state, SessionStateDto::Stopped);
         }

@@ -769,6 +769,36 @@ pub(crate) fn session_cancel_queued(
     ipc(state.sessions.cancel_queued(request))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct SessionObserveRequest { session_id: brows_contracts::SessionIdDto }
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct SessionObservationDto {
+    session_id: brows_contracts::SessionIdDto,
+    observed_at_ms: u64,
+    targets: Vec<TargetObservationDto>,
+}
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TargetObservationDto {
+    kind: String, user_agent: String, platform: String, languages: Vec<String>,
+    hardware_concurrency: u64, device_memory: String, timezone: String,
+    client_hints_platform: String,
+}
+
+#[tauri::command]
+pub(crate) async fn session_observe(state: State<'_, AppState>, request: SessionObserveRequest) -> IpcResult<SessionObservationDto> {
+    let sessions = state.sessions.clone();
+    let id = request.session_id.try_into().map_err(|e: brows_contracts::ContractError| ErrorDto { code: ErrorCode::ValidationFailed, message: e.reason, violations: Vec::new() })?;
+    let result = tauri::async_runtime::spawn_blocking(move || sessions.observe(&id)).await
+        .map_err(|_| ErrorDto { code: ErrorCode::Internal, message: "session observation task failed".to_owned(), violations: Vec::new() })?;
+    let result = ipc(result)?;
+    Ok(SessionObservationDto { session_id: (&result.session_id).into(), observed_at_ms: result.observed_at_ms,
+        targets: result.targets.into_iter().map(|t| TargetObservationDto { kind: t.kind, user_agent: t.user_agent, platform: t.platform, languages: t.languages, hardware_concurrency: t.hardware_concurrency, device_memory: t.device_memory, timezone: t.timezone, client_hints_platform: t.client_hints_platform }).collect() })
+}
+
 #[tauri::command]
 pub(crate) fn session_list(state: State<'_, AppState>) -> IpcResult<Vec<SessionDto>> {
     ipc(state.sessions.list())

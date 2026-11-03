@@ -362,13 +362,9 @@ fn compiler_passes_the_whole_profile_to_fingerprint_runtime() {
     }
     harness.browsers.insert_build(verified_build()).unwrap();
     profile.locale.timezone = Some("Asia/Tokyo".to_owned());
-    assert_eq!(
-        compiler
-            .compile(&profile, &SessionId::new("timezone-flow").unwrap())
-            .unwrap_err()
-            .code(),
-        &ErrorCode::CapabilityUnsupported
-    );
+    let plan = compiler.compile(&profile, &SessionId::new("timezone-flow").unwrap()).unwrap().plan;
+    assert!(plan.arguments.iter().any(|arg| matches!(arg,
+        LaunchArgument::SessionFingerprint(policy) if policy.timezone.as_deref() == Some("Asia/Tokyo"))));
 }
 
 fn second_profile_id<'a>(

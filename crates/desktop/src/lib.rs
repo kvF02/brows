@@ -11,7 +11,7 @@ use commands::{
     legacy_migration_rollback, list_runtimes, morelogin_import, morelogin_preview,
     probe_runtime_fingerprint, profile_archive, profile_clone, profile_create, profile_get,
     profile_list, profile_restore, profile_update, proxy_list, proxy_remove, proxy_save,
-    proxy_test, session_cancel_queued, session_launch, session_list, session_stop,
+    proxy_test, session_cancel_queued, session_launch, session_list, session_observe, session_stop,
 };
 use state::AppState;
 use tauri::{Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder};
@@ -70,6 +70,7 @@ pub fn run() {
             session_stop,
             session_cancel_queued,
             session_list,
+            session_observe,
             fingerprint_preview,
             probe_runtime_fingerprint,
             list_runtimes,

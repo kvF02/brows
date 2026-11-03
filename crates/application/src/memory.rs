@@ -785,12 +785,6 @@ impl SeedableNoiseFingerprintRuntime {
         window
             .validate()
             .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
-        if locale.timezone.is_some() {
-            return Err(PortError::new(
-                PortErrorKind::CapabilityUnsupported,
-                "timezone override is not implemented",
-            ));
-        }
         let fp = PersonaFingerprint::derive(p, &build.version)
             .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
         // Keep the UA major aligned with the concrete Chromium binary. A

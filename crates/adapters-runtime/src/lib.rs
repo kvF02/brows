@@ -29,6 +29,30 @@ use std::{
 
 mod authenticode;
 mod fingerprint_probe;
+#[cfg(windows)]
+mod win_pipe;
+#[cfg(windows)]
+mod session_control;
+
+static LAUNCH_LOCK: Mutex<()> = Mutex::new(());
+fn spawn_browser(command: &mut Command) -> std::io::Result<Child> {
+    let _guard = LAUNCH_LOCK.lock().map_err(|_| std::io::Error::other("launch lock poisoned"))?;
+    command.spawn()
+}
+
+#[derive(Debug)]
+enum ManagedProcess {
+    Plain(Child),
+    #[cfg(windows)]
+    Controlled(session_control::Controller),
+}
+impl ManagedProcess {
+    fn id(&self) -> u32 { match self { Self::Plain(child) => child.id(), #[cfg(windows)] Self::Controlled(child) => child.id() } }
+    fn kill(&mut self) -> std::io::Result<()> { match self { Self::Plain(child) => child.kill(), #[cfg(windows)] Self::Controlled(child) => child.kill() } }
+    fn wait(&mut self) -> std::io::Result<()> { match self { Self::Plain(child) => child.wait().map(|_|()), #[cfg(windows)] Self::Controlled(child) => child.wait() } }
+    fn try_wait(&mut self) -> std::io::Result<Option<u32>> { match self { Self::Plain(child) => child.try_wait().map(|v|v.map(|s|s.code().unwrap_or(1) as u32)), #[cfg(windows)] Self::Controlled(child) => child.try_wait() } }
+}
+
 
 pub use authenticode::verify_authenticode_publisher;
 
@@ -46,7 +70,7 @@ pub struct ManagedChromiumRuntime {
     runtime_roots: Vec<PathBuf>,
     profile_root: PathBuf,
     builds: RwLock<BuildRegistry>,
-    processes: Mutex<HashMap<SessionId, Child>>,
+    processes: Mutex<HashMap<SessionId, ManagedProcess>>,
     probing: Mutex<HashSet<BrowserBuildId>>,
 }
 
@@ -245,6 +269,7 @@ impl ManagedChromiumRuntime {
 
         for argument in &plan.arguments {
             match argument {
+                LaunchArgument::SessionFingerprint(_) => {},
                 LaunchArgument::UserDataDirectory(path) => {
                     if path != &plan.user_data_dir || saw_user_data_dir {
                         return Err(invalid_data("invalid user data directory argument"));
@@ -440,18 +465,28 @@ impl BrowserRuntime for ManagedChromiumRuntime {
             ));
         }
 
-        let child = Command::new(&build.executable_path)
-            .args(arguments)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| {
-                PortError::new(
-                    PortErrorKind::Unavailable,
-                    format!("failed to launch browser process: {error}"),
-                )
-            })?;
+        let policy = plan.arguments.iter().find_map(|arg| match arg {
+            LaunchArgument::SessionFingerprint(policy) => Some(policy.as_ref()), _ => None,
+        });
+        let child = if let Some(policy) = policy {
+            #[cfg(windows)]
+            {
+                let mut arguments = arguments;
+                arguments.truncate(arguments.len() - plan.preferences.startup_urls.len());
+                arguments.push(OsString::from("--no-startup-window"));
+                ManagedProcess::Controlled(session_control::Controller::start(
+                    &build.executable_path, &arguments, policy.clone(), &plan.preferences.startup_urls)?)
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = policy;
+                return Err(PortError::new(PortErrorKind::CapabilityUnsupported, "private fingerprint control currently requires Windows"));
+            }
+        } else {
+            ManagedProcess::Plain(spawn_browser(Command::new(&build.executable_path)
+                .args(arguments).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()))
+                .map_err(|_| internal("failed to launch browser process"))?)
+        };
         let process_id = child.id();
         processes.insert(plan.session_id.clone(), child);
         Ok(BrowserProcess {
@@ -486,6 +521,16 @@ impl BrowserRuntime for ManagedChromiumRuntime {
             .map_err(|error| internal(format!("failed to reap browser process: {error}")))?;
         processes.remove(session_id);
         Ok(())
+    }
+
+    fn observe_session(&self, session_id: &SessionId) -> PortResult<brows_application::SessionObservation> {
+        let processes = self.processes.lock().map_err(|_| internal("process registry lock poisoned"))?;
+        match processes.get(session_id) {
+            #[cfg(windows)]
+            Some(ManagedProcess::Controlled(controller)) => controller.observe(session_id),
+            Some(_) => Err(PortError::new(PortErrorKind::CapabilityUnsupported, "this session does not use private fingerprint control")),
+            None => Err(PortError::not_found("browser session")),
+        }
     }
 
     fn is_running(&self, session_id: &SessionId) -> PortResult<bool> {
