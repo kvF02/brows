@@ -16,7 +16,7 @@ fields from an active session. Fonts, actual GPU rendering, live audio, Worker
 Canvas/Audio and the network stack remain host/runtime signals. Extension loading must be verified for each runtime, especially
 official Google Chrome 137+ with `--load-extension` restrictions. Settings offers
 an isolated local capability probe, and SeedableNoise launch is blocked unless
-it passes. The current system Chrome 154 did not load the extension in the
+it passes. An earlier system Chrome 154 did not load the extension in the
 real-browser smoke test. This is not a complete anti-detect implementation;
 no detection-site pass rate is promised. The default `SystemNative` persona
 remains truthful. See the

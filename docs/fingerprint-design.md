@@ -73,7 +73,7 @@ Chromium 参数实施，指纹扩展不自行更改 TURN/ICE 行为。
 状态仅保留当前 App 进程；重启登记时恢复未验证，文件摘要变更也必须重新登记和检测。
 检测通过只代表 document_start 样本通过，不代表完整 API 或所有 frame 覆盖。
 
-本机官方 Chrome 154 的真实冒烟未观测到 --load-extension 注入；兼容 feature 开关
+此前官方 Chrome 154 的真实冒烟未观测到 --load-extension 注入；兼容 feature 开关
 也未恢复注入。因此当前系统 Chrome 不能被标记为 SeedableNoise 可用。
 后续扩展探针的 frame/API 覆盖并引入可信且实测支持的内核。不要通过关闭
 Chromium sandbox、长期锁定旧版或信任未知下载源来规避问题。受控 Chromium/Chrome
@@ -103,13 +103,14 @@ for Testing 的支持路线仍需可信发布者、安装来源与更新校验�
 Unsupported，拒绝 SeedableNoise，现有环境及会话未修改，临时目录清理通过。
 这是负向能力结果被正确识别的测试，不代表该内核指纹功能已经可用。
 
-P0：完成可信、可注入运行时的选择/安装路径，并对其真实内核验收。基础能力探针与
-失败门禁已落地，但当前系统 Chrome 未通过；此阶段不等于指纹功能完整可用。
+P0：已安装签名 Edge 的发现、准入、能力探针与生产会话验收已通过。托管内核安装、
+安全更新与签名目录仍是后续工作；本机 Chrome 的既有负向探针结果继续保留。
 
-P1：session 内固定字段观测和私有 Client Hints 策略已实现；继续扩展跨源 frame、
-Shared/Service Worker 及更多 API 的真实内核验收。
+P1：session 内固定字段观测和私有 Client Hints 策略已实现，并已实测页面、同源 frame、
+跨源 OOPIF、Dedicated/Shared/Service Worker 的首段脚本。继续扩展更多站点、模块
+Worker、更新/崩溃重启和其他 API；缺失请求头保留未检查。
 
-P2：原生时区与 Worker 核对已进入控制器；继续扩展 Intl/Date 的多 API 一致性验收。
+P2：原生时区、Worker 核对、别名规范化及 Intl/Date 冬夏偏移验收已通过。
 公网 DNS/ICE 服务代码与配置入口已加入，部署和公网浏览器实测仍是独立门槛。
 
 P3：如需内核级字体、GPU、Audio、网络栈一致性，评估受控 Chromium 内核路线及

@@ -61,7 +61,8 @@ Canvas/Audio、字体、GPU 或网络栈。浏览器 API 在不安全上下文�
 
 ## 尚未完成的能力
 
-- 跨源 iframe、Shared/Service Worker 的完整真实内核验收，以及字体、GPU 像素和网络栈。
+- 更多站点、模块 Worker、Service Worker 更新/崩溃重启等生命周期场景，以及字体、
+  GPU 像素和网络栈的完整观测。当前验收是固定的隔离样本，不是所有网站与 API 的保证。
 - 自建公网服务部署后的 DNS/HTTP/ICE 关联验收。仓库中的 loopback 协议测试不能将
   HTTP 出口检查或没有收到 STUN 包换算成公网无泄漏。
 
@@ -72,6 +73,17 @@ Canvas/Audio、字体、GPU 或网络栈。浏览器 API 在不安全上下文�
 `.github/workflows/acceptance.yml` 在 Windows 执行 JavaScript 测试、完整 UI 构建、
 Rust workspace 测试和 clippy，并验证 Edge 签名、生产登记/能力探针、两个真实 SeedableNoise 会话的启动/停止及跨上下文观测。
 JSON 报告作为 Actions artifact 保存；Rust 工具链与仓库的 1.97.1 保持一致。
+
+[生产会话验收记录](https://github.com/kvF02/brows/actions/runs/41650595409) 已通过。
+样本包括页面、同源 iframe、跨源 OOPIF、Dedicated/Shared/Service Worker 的首段脚本。
+两组会话分别使用 CPU 3 / Memory 0.5GB / Asia/Tokyo 与 CPU 6 / Memory 2GB /
+US/Eastern，核对 UA、低熵 UA-CH、完整语言列表、平台、硬件字段、原生 Intl 时区，
+以及固定冬夏日期的 Date 偏移；别名规范化和无效时区失败关闭也纳入断言。
+
+同版本未修改的 Edge 基线不会在这些 Worker fetch 中发送 UA-CH 请求头，因此这些
+缺失头保留 `not_checked`，不凭空补头或记作通过。页面/iframe 已发送的头仍必须与
+设备声明一致。`fingerprint-session-acceptance.json` 记录这些受限证据，并保持
+`complete: false`。
 
 本地行为回归是 `npm test`。真实生产验收显式执行：
 

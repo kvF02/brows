@@ -737,12 +737,20 @@ pub(crate) fn profile_restore(
 }
 
 #[tauri::command]
-pub(crate) fn session_launch(
+pub(crate) async fn session_launch(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
     request: SessionLaunchRequest,
 ) -> IpcResult<SessionDto> {
-    let outcome = ipc(state.sessions.launch(request))?;
+    let sessions = state.sessions.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || sessions.launch(request))
+        .await
+        .map_err(|_| ErrorDto {
+            code: ErrorCode::Internal,
+            message: "session launch task failed".to_owned(),
+            violations: Vec::new(),
+        })?;
+    let outcome = ipc(result)?;
     let (session, event) = match outcome {
         SessionLaunchOutcome::Started { session, event } => (session, event),
         SessionLaunchOutcome::Queued { session, event, .. } => (session, event),
@@ -754,19 +762,35 @@ pub(crate) fn session_launch(
 }
 
 #[tauri::command]
-pub(crate) fn session_stop(
+pub(crate) async fn session_stop(
     state: State<'_, AppState>,
     request: SessionStopRequest,
 ) -> IpcResult<SessionDto> {
-    ipc(state.sessions.stop(request))
+    let sessions = state.sessions.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || sessions.stop(request))
+        .await
+        .map_err(|_| ErrorDto {
+            code: ErrorCode::Internal,
+            message: "session stop task failed".to_owned(),
+            violations: Vec::new(),
+        })?;
+    ipc(result)
 }
 
 #[tauri::command]
-pub(crate) fn session_cancel_queued(
+pub(crate) async fn session_cancel_queued(
     state: State<'_, AppState>,
     request: SessionCancelQueuedRequest,
 ) -> IpcResult<SessionDto> {
-    ipc(state.sessions.cancel_queued(request))
+    let sessions = state.sessions.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || sessions.cancel_queued(request))
+        .await
+        .map_err(|_| ErrorDto {
+            code: ErrorCode::Internal,
+            message: "session cancellation task failed".to_owned(),
+            violations: Vec::new(),
+        })?;
+    ipc(result)
 }
 
 #[derive(Debug, Deserialize)]

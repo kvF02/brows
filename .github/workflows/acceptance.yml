@@ -47,15 +47,8 @@ jobs:
           path: target/debug
           key: windows-rust-1.97.1-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
           restore-keys: windows-rust-1.97.1-${{ hashFiles('Cargo.lock') }}-
-      - name: Rust formatting evidence
-        shell: pwsh
-        run: |
-          cargo +1.97.1 fmt --all
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          git diff --name-only -- '*.rs' | ForEach-Object {
-            $bytes = [IO.File]::ReadAllBytes((Join-Path $PWD $_))
-            Write-Output ('BROWS_FORMAT ' + $_ + ' ' + [Convert]::ToBase64String($bytes))
-          }
+      - name: Rust format check
+        run: cargo +1.97.1 fmt --all -- --check
       - name: Rust tests and lint
         run: |
           cargo +1.97.1 test --workspace --locked

@@ -500,7 +500,9 @@ mod tests {
             use std::io::{Read, Write};
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
-            let listener_v6 = std::net::TcpListener::bind(("::1", listener.local_addr().unwrap().port())).unwrap();
+            let listener_v6 =
+                std::net::TcpListener::bind(("::1", listener.local_addr().unwrap().port()))
+                    .unwrap();
             let cross_origin =
                 format!("http://localhost:{}", listener.local_addr().unwrap().port());
             listener.set_nonblocking(true).unwrap();
@@ -512,7 +514,11 @@ mod tests {
             let thread = std::thread::spawn(move || {
                 while !halt.load(std::sync::atomic::Ordering::Acquire) {
                     let accepted = listener.accept().or_else(|error| {
-                        if error.kind() == std::io::ErrorKind::WouldBlock { listener_v6.accept() } else { Err(error) }
+                        if error.kind() == std::io::ErrorKind::WouldBlock {
+                            listener_v6.accept()
+                        } else {
+                            Err(error)
+                        }
                     });
                     let (mut stream, _) = match accepted {
                         Ok(value) => value,
@@ -1009,7 +1015,12 @@ mod tests {
             } else {
                 "America/New_York"
             };
-            let page_signals = matching.iter().find(|(_, _, first)| first["kind"] == "page").unwrap().2.clone();
+            let page_signals = matching
+                .iter()
+                .find(|(_, _, first)| first["kind"] == "page")
+                .unwrap()
+                .2
+                .clone();
             assert!(!page_signals["hints"].is_null());
             for target in observed.targets {
                 assert_eq!(target.hardware_concurrency, cpu, "{} CPU", target.kind);
@@ -1024,7 +1035,14 @@ mod tests {
                 assert_eq!(first["userAgent"], page_signals["userAgent"]);
                 assert_eq!(first["hints"], page_signals["hints"]);
                 assert_eq!(first["platform"], "Win32");
-                assert_eq!(first["languages"], if index == 0 { serde_json::json!(["ja-JP", "ja"]) } else { serde_json::json!(["en-US", "en"]) });
+                assert_eq!(
+                    first["languages"],
+                    if index == 0 {
+                        serde_json::json!(["ja-JP", "ja"])
+                    } else {
+                        serde_json::json!(["en-US", "en"])
+                    }
+                );
                 assert_eq!(first["hardwareConcurrency"], cpu);
                 assert_eq!(first["deviceMemory"], if index == 0 { 0.5 } else { 2.0 });
                 assert_eq!(first["timezone"], timezone);
