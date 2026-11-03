@@ -42,14 +42,20 @@ Brows 的当前基础能力是多环境数据隔离；`SeedableNoise` 是可选�
 | Canvas | 2D `getImageData`、HTML `toDataURL/toBlob`、Offscreen `convertToBlob` | 稳定 RGB 低位扰动，导出用副本；未覆盖所有绘制/读取 API |
 | Audio | `OfflineAudioContext.startRendering` 与完成事件 buffer | 离线输出稀疏微扰；实时播放、设备采样率保持真实 |
 | 时区 | 原生 Emulation 与 Worker 读取核对 | 不支持或不一致时关闭会话 |
-| Worker | 私有 target 暂停与配置 | UA、语言、平台、CPU、Memory 与时区；Canvas/Audio 旁路仍未完整覆盖 |
+| Worker | 私有 target 暂停与配置，共用完整 hook | UA、语言、平台、CPU、Memory、时区、OffscreenCanvas 读取/导出和 WebGL 声明；缺失 API 保持缺失 |
 | 字体、TLS/HTTP2 | 无覆盖 | 继续依赖主机/运行时 |
 
 Canvas 的扰动由 seed 与绝对像素坐标确定，使普通数值参数的局部读取与整幅读取一致。
 不改变 alpha 或透明黑，不累计扰动，不改原画布；Float16/HDR 读取保留原值。
-不支持的输入形式或 API 回退原生行为。WebGL `readPixels`、worker 内 OffscreenCanvas、
+不支持的输入形式或 API 回退原生行为。WebGL `readPixels`、
 `createImageBitmap` 等旁路不能宣称已覆盖。跨源污染画布仍由原生 API 抛出安全错误，
 不绕过浏览器同源限制。
+
+扩展与私有会话控制器共用同一个脚本生成器。Worker 使用 `WorkerNavigator` 与
+OffscreenCanvas，不创建 Window、Document、Screen 或原本缺失的音频 API。
+同一 realm 重复安装相同策略直接返回，避免 Canvas XOR 扰动相互抵消或 Audio 累计；
+不同策略重入明确失败，生产控制器按策略错误关闭会话。幂等标记只保留比较闭包，
+不把原始 seed 或完整配置写到可读的全局字段；这些 JS hook 仍可被检测。
 
 Audio 只在离线渲染完成后对非零有限采样值加入微小稳定噪声，buffer 至多处理一次，
 Promise 与完成事件读取同一处理后的 buffer。它不改变真实设备，不应冒称“采样率稳定化”。
@@ -85,9 +91,11 @@ for Testing 的支持路线仍需可信发布者、安装来源与更新校验�
 
 1. Domain/契约：seed、平台/GPU、语言、窗口校验；共享信号列表；预览 DTO 可序列化。
 2. Application：所选内核版本决定 UA；语言/数值 Memory 贯通；窗口与屏幕分离；
-   同配置稳定，同 seed 不同配置不覆盖目录；时区进入会话策略。
+   同配置稳定，同 seed 不同配置不覆盖目录；时区与完整 persona 进入会话策略；
+   扩展和会话生成相同的读取覆盖脚本。
 3. 页面 hook 行为：API 缺失互不影响、原生非法 receiver/异常语义、重复读取一致、
-   局部/导出一致、透明像素/原画布不变、Canvas/Audio 开关有效、音频不累计。
+   局部/导出一致、透明像素/原画布不变、Canvas/Audio 开关有效、音频不累计；
+   Worker 无窗口 API 的行为和重复策略注入。
 4. UI：内核/语言/窗口修改后必须重预览；重复选择当前 persona 不重置 seed；显示
    配置值而非观测值；不把数字字符串写入页面 number 字段。
 5. 真实运行时（独立步骤）：隔离临时用户数据，验证扩展确实载入，再记录窗口/frame/
@@ -107,8 +115,9 @@ P0：已安装签名 Edge 的发现、准入、能力探针与生产会话验收
 安全更新与签名目录仍是后续工作；本机 Chrome 的既有负向探针结果继续保留。
 
 P1：session 内固定字段观测和私有 Client Hints 策略已实现，并已实测页面、同源 frame、
-跨源 OOPIF、Dedicated/Shared/Service Worker 的首段脚本。继续扩展更多站点、模块
-Worker、更新/崩溃重启和其他 API；缺失请求头保留未检查。
+跨源 OOPIF、Dedicated/Shared/Service Worker 的首段脚本。六种上下文的 Canvas 读取
+一致性，以及 Service Worker 停止、消息唤醒和版本更新已纳入原生验收。
+继续扩展更多站点、模块 Worker、强制进程崩溃与并发重载和其他 API；缺失请求头保留未检查。
 
 P2：原生时区、Worker 核对、别名规范化及 Intl/Date 冬夏偏移验收已通过。
 公网 DNS/ICE 服务代码与配置入口已加入，部署和公网浏览器实测仍是独立门槛。

@@ -458,210 +458,13 @@ mod tests {
         SessionLaunchRequest, SessionStateDto, SessionStopRequest, WindowDto,
     };
 
-    type CapturedProof = (String, String, serde_json::Value);
-
-    struct ControlFixture {
-        url: String,
-        proofs: Arc<std::sync::Mutex<Vec<CapturedProof>>>,
-        stop: Arc<std::sync::atomic::AtomicBool>,
-        thread: Option<std::thread::JoinHandle<()>>,
+    mod browser_fixture {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/test_support/controlled_browser.rs"
+        ));
     }
-    impl ControlFixture {
-        fn wait_proofs(&self, prefix: &str) -> Vec<CapturedProof> {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-            loop {
-                let proofs: Vec<_> = self
-                    .proofs
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .filter(|(path, _, _)| path.starts_with(prefix))
-                    .cloned()
-                    .collect();
-                if [
-                    "page",
-                    "frame",
-                    "cross_frame",
-                    "worker",
-                    "shared_worker",
-                    "service_worker",
-                ]
-                .iter()
-                .all(|kind| proofs.iter().any(|(_, _, value)| value["kind"] == *kind))
-                {
-                    return proofs;
-                }
-                if std::time::Instant::now() >= deadline {
-                    return proofs;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(50));
-            }
-        }
-
-        fn serve(
-            mut stream: std::net::TcpStream,
-            output: &std::sync::Mutex<Vec<CapturedProof>>,
-            cross_origin: &str,
-        ) {
-            use std::io::{Read, Write};
-            stream
-                .set_read_timeout(Some(std::time::Duration::from_secs(3)))
-                .unwrap();
-            stream
-                .set_write_timeout(Some(std::time::Duration::from_secs(3)))
-                .unwrap();
-            let mut bytes = Vec::new();
-            let mut buffer = [0u8; 2048];
-            let request = loop {
-                match stream.read(&mut buffer) {
-                    Ok(0) | Err(_) => break None,
-                    Ok(n) => bytes.extend_from_slice(&buffer[..n]),
-                }
-                if bytes.len() > 16384 {
-                    break None;
-                }
-                if let Some(end) = bytes.windows(4).position(|p| p == b"\r\n\r\n") {
-                    let head = String::from_utf8_lossy(&bytes[..end]).to_string();
-                    let length = head
-                        .lines()
-                        .find_map(|line| {
-                            line.to_ascii_lowercase()
-                                .strip_prefix("content-length:")
-                                .and_then(|v| v.trim().parse::<usize>().ok())
-                        })
-                        .unwrap_or(0);
-                    if bytes.len() >= end + 4 + length {
-                        break Some((head, bytes[end + 4..end + 4 + length].to_vec()));
-                    }
-                }
-            };
-            let Some((headers, body)) = request else {
-                return;
-            };
-            let path = headers.split_whitespace().nth(1).unwrap_or("/").to_owned();
-            println!("local acceptance request: {path}");
-            let capture = "({kind:typeof document==='undefined'?(typeof ServiceWorkerGlobalScope!=='undefined'&&self instanceof ServiceWorkerGlobalScope?'service_worker':typeof SharedWorkerGlobalScope!=='undefined'&&self instanceof SharedWorkerGlobalScope?'shared_worker':'worker'):window===top?'page':location.hostname==='localhost'?'cross_frame':'frame',userAgent:navigator.userAgent,platform:navigator.platform,languages:Array.from(navigator.languages),hardwareConcurrency:navigator.hardwareConcurrency,deviceMemory:navigator.deviceMemory,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,offsetWinter:new Date('2024-01-15T12:00:00Z').getTimezoneOffset(),offsetSummer:new Date('2024-07-15T12:00:00Z').getTimezoneOffset(),hints:navigator.userAgentData?.toJSON()})";
-            let script = format!("const first={capture};const send=()=>fetch('./'+first.kind+'/proof',{{method:'POST',body:JSON.stringify(first),keepalive:typeof document!=='undefined'}});const proof=send().catch(()=>send());");
-            let (content, kind) = if path.ends_with("shared.js") {
-                (
-                    format!("{script}onconnect=event=>event.ports[0].start();"),
-                    "text/javascript",
-                )
-            } else if path.ends_with("service.js") {
-                (
-                    format!("{script}addEventListener('install',event=>event.waitUntil(proof));"),
-                    "text/javascript",
-                )
-            } else if path.ends_with("worker.js") {
-                (
-                    format!("{script}setInterval(()=>{{}},1000);"),
-                    "text/javascript",
-                )
-            } else if path.ends_with("proof") {
-                if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) {
-                    println!(
-                        "local first-script sample: {} CPU {} timezone {}",
-                        value["kind"], value["hardwareConcurrency"], value["timezone"]
-                    );
-                    output.lock().unwrap().push((path.clone(), headers, value));
-                }
-                ("ok".to_owned(), "text/plain")
-            } else if path.ends_with("error") {
-                println!(
-                    "local acceptance script error: {}",
-                    String::from_utf8_lossy(&body)
-                );
-                ("ok".to_owned(), "text/plain")
-            } else {
-                let worker = if path.ends_with("page") {
-                    "addEventListener('error',event=>fetch('./error',{method:'POST',body:String(event.message)}));addEventListener('unhandledrejection',event=>fetch('./error',{method:'POST',body:String(event.reason)}));globalThis.worker=new Worker('./worker.js');globalThis.shared=new SharedWorker('./shared.js');shared.port.start();navigator.serviceWorker.register('./service.js');"
-                } else {
-                    ""
-                };
-                let frame = if path.ends_with("page") {
-                    format!("<iframe src='./frame'></iframe><iframe src='{cross_origin}{}frame'></iframe>", path.trim_end_matches("page"))
-                } else {
-                    String::new()
-                };
-                (format!("<!doctype html><meta charset='utf-8'><script>{script}{worker}</script>{frame}"), "text/html")
-            };
-            let response = format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\nAccept-CH: Sec-CH-UA-Platform, Sec-CH-UA-Full-Version-List\r\n\r\n{content}", content.len());
-            let _ = stream.write_all(response.as_bytes());
-        }
-
-        fn start() -> Self {
-            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-            let url = format!("http://{}", listener.local_addr().unwrap());
-            let listener_v6 =
-                std::net::TcpListener::bind(("::1", listener.local_addr().unwrap().port()))
-                    .unwrap();
-            let cross_origin =
-                format!("http://localhost:{}", listener.local_addr().unwrap().port());
-            listener.set_nonblocking(true).unwrap();
-            listener_v6.set_nonblocking(true).unwrap();
-            let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
-            let proofs = Arc::new(std::sync::Mutex::new(Vec::new()));
-            let halt = stop.clone();
-            let output = proofs.clone();
-            let thread = std::thread::spawn(move || {
-                // Browsers preconnect before sending headers. One idle socket
-                // must not block or prematurely close unrelated script loads.
-                let (send, receive) = std::sync::mpsc::sync_channel::<std::net::TcpStream>(64);
-                let receive = Arc::new(std::sync::Mutex::new(receive));
-                std::thread::scope(|scope| {
-                    for _ in 0..16 {
-                        let receive = receive.clone();
-                        let output = output.clone();
-                        let halt = halt.clone();
-                        let cross_origin = &cross_origin;
-                        scope.spawn(move || {
-                            while !halt.load(std::sync::atomic::Ordering::Acquire) {
-                                let next = receive
-                                    .lock()
-                                    .unwrap()
-                                    .recv_timeout(std::time::Duration::from_millis(100));
-                                match next {
-                                    Ok(stream) => Self::serve(stream, &output, cross_origin),
-                                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
-                                    Err(_) => break,
-                                }
-                            }
-                        });
-                    }
-                    while !halt.load(std::sync::atomic::Ordering::Acquire) {
-                        let accepted = listener.accept().or_else(|error| {
-                            if error.kind() == std::io::ErrorKind::WouldBlock {
-                                listener_v6.accept()
-                            } else {
-                                Err(error)
-                            }
-                        });
-                        match accepted {
-                            Ok((stream, _)) => {
-                                let _ = send.try_send(stream);
-                            }
-                            Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
-                        }
-                    }
-                    drop(send);
-                });
-            });
-            Self {
-                url,
-                proofs,
-                stop,
-                thread: Some(thread),
-            }
-        }
-    }
-    impl Drop for ControlFixture {
-        fn drop(&mut self) {
-            self.stop.store(true, std::sync::atomic::Ordering::Release);
-            if let Some(thread) = self.thread.take() {
-                let _ = thread.join();
-            }
-        }
-    }
+    use browser_fixture::ControlFixture;
 
     fn draft(name: &str) -> ProfileDraftDto {
         ProfileDraftDto {
@@ -1026,6 +829,22 @@ mod tests {
             let matching = fixture.wait_proofs(&format!("/{index}/"));
             let id: brows_domain::SessionId = session.id.clone().try_into().unwrap();
             let observed = state.sessions.observe(&id).unwrap();
+            println!(
+                "session {index} sampled/configured kinds: {:?} / {:?}",
+                matching
+                    .iter()
+                    .map(|(_, _, value)| &value["kind"])
+                    .collect::<Vec<_>>(),
+                observed
+                    .targets
+                    .iter()
+                    .map(|target| &target.kind)
+                    .collect::<Vec<_>>()
+            );
+            assert!(
+                state.browsers.is_running(&id).unwrap(),
+                "signed Edge must remain running"
+            );
             assert_eq!(
                 matching
                     .iter()
@@ -1034,10 +853,6 @@ mod tests {
                     .len(),
                 6,
                 "all controlled context samples are required"
-            );
-            assert!(
-                state.browsers.is_running(&id).unwrap(),
-                "signed Edge must remain running"
             );
             assert!(
                 observed.targets.iter().any(|t| t.kind == "worker"),
@@ -1062,6 +877,15 @@ mod tests {
                 .2
                 .clone();
             assert!(!page_signals["hints"].is_null());
+            assert_ne!(
+                page_signals["canvas"],
+                baseline
+                    .iter()
+                    .find(|(_, _, first)| first["kind"] == "page")
+                    .unwrap()
+                    .2["canvas"],
+                "Canvas noise must be observed, not inferred from configuration"
+            );
             for target in observed.targets {
                 assert_eq!(target.hardware_concurrency, cpu, "{} CPU", target.kind);
                 assert_eq!(target.timezone, timezone, "{} timezone", target.kind);
@@ -1072,6 +896,32 @@ mod tests {
                 );
             }
             for (_, headers, first) in matching {
+                assert_eq!(
+                    first["canvas"], page_signals["canvas"],
+                    "{} Canvas",
+                    first["kind"]
+                );
+                assert_eq!(
+                    first["repeat"], first["canvas"],
+                    "{} stable repeat",
+                    first["kind"]
+                );
+                if baseline
+                    .iter()
+                    .find(|(_, _, native)| native["kind"] == first["kind"])
+                    .is_some_and(|(_, _, native)| !native["webgl"].is_null())
+                {
+                    assert!(
+                        !first["webgl"].is_null(),
+                        "{} must preserve available WebGL",
+                        first["kind"]
+                    );
+                    assert_eq!(
+                        first["webgl"], page_signals["webgl"],
+                        "{} WebGL declarations",
+                        first["kind"]
+                    );
+                }
                 assert_eq!(first["userAgent"], page_signals["userAgent"]);
                 assert_eq!(first["hints"], page_signals["hints"]);
                 assert_eq!(first["platform"], "Win32");
@@ -1132,6 +982,21 @@ mod tests {
                 evidence.push(serde_json::json!({"profile": index, "first": first, "allowedHeaders": allowed_headers,
                     "clientHintsHeaderStatus": if hints.is_some() { "pass" } else { "not_checked" }}));
             }
+            if index == 0 {
+                fixture.bump_service_version();
+                let updates = fixture.wait_kind_count("/0/", "service_worker", 2);
+                assert!(
+                    updates.len() >= 2,
+                    "updated Service Worker first-script evidence is required"
+                );
+                let updated = &updates.last().unwrap().2;
+                assert_eq!(updated["fixtureVersion"], 1);
+                assert_eq!(updated["hardwareConcurrency"], cpu);
+                assert_eq!(updated["canvas"], page_signals["canvas"]);
+                assert_eq!(updated["repeat"], updated["canvas"]);
+                assert_eq!(updated["timezone"], timezone);
+                evidence.push(serde_json::json!({"profile": index, "phase":"service-worker-update", "first":updated}));
+            }
             let stopped = state
                 .sessions
                 .stop(SessionStopRequest {
@@ -1168,7 +1033,7 @@ mod tests {
         let failed_id: brows_domain::SessionId = failed.id.try_into().unwrap();
         assert!(!state.browsers.is_running(&failed_id).unwrap());
         let report = serde_json::json!({"scope":"signed Edge production sessions; native header baseline", "assertionsPassed":true, "complete":false,
-            "observations":evidence,"uncovered":["public DNS/ICE", "fonts/GPU/network stack", "Worker Canvas/Audio"]});
+            "observations":evidence,"uncovered":["public DNS/ICE", "fonts/GPU/network stack", "uncovered rendering APIs and live Audio"]});
         let output = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/fingerprint-session-acceptance.json");
         std::fs::write(output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();

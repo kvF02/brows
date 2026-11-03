@@ -555,29 +555,7 @@ impl SeedableNoiseFingerprintRuntime {
         locale: &LocaleConfig,
     ) -> PortResult<PathBuf> {
         let profile_hash = digest_hex(profile_id.as_str().as_bytes());
-        let persona_json = serde_json::json!({
-            "seed": persona.seed,
-            "platform": persona.platform_string_for_js(),
-            "hardware_concurrency": fp.hardware_concurrency,
-            "device_memory": fp.device_memory_number(),
-            "languages": locale.accept_languages,
-            "touch_points": fp.touch_points,
-            "screen_width": persona.screen.width,
-            "screen_height": persona.screen.height,
-            "color_depth": persona.screen.color_depth,
-            "device_scale_factor": persona.screen.device_scale_factor_hundredths as f64 / 100.0,
-            "webgl_vendor": fp.webgl_vendor,
-            "webgl_renderer": fp.webgl_renderer,
-            "spoof_canvas": persona.spoof_canvas,
-            "spoof_audio": persona.spoof_audio,
-            // WebRTC is enforced by the typed Chromium argument when a proxy
-            // is configured.  The extension must not force relay-only mode for
-            // direct profiles, otherwise local network use is unexpectedly
-            // disabled.
-            "webrtc_policy": "none",
-        })
-        .to_string();
-        let content = stealth_template::render_content(&persona_json);
+        let content = crate::fingerprint_script::render_persona_content(persona, fp, locale);
         let manifest = stealth_template::render_manifest(profile_id.as_str());
         let background = stealth_template::render_background();
         let artifact_hash = digest_hex(
@@ -808,7 +786,7 @@ impl SeedableNoiseFingerprintRuntime {
         if p.spoof_canvas {
             warnings.push(LaunchWarning::DeclaredFingerprintOnly {
                 field: "canvas".to_owned(),
-                reason: "JS read/export perturbation only; not native rendering or worker coverage"
+                reason: "JS read/export perturbation only; native rendering and uncovered APIs remain shared"
                     .to_owned(),
             });
         }
@@ -978,6 +956,41 @@ mod seedable_noise_tests {
             has_disable_blink,
             "must emit DisableBlinkFeatures for AutomationControlled"
         );
+    }
+
+    #[test]
+    fn session_and_extension_hooks_use_the_same_validated_persona() {
+        let root = std::env::temp_dir().join(format!(
+            "brows-render-contract-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let id = ProfileId::new("render-contract").unwrap();
+        let runtime = SeedableNoiseFingerprintRuntime::new(&root, id.clone()).unwrap();
+        let persona = sample_persona("render-contract");
+        let build = verified_build();
+        let fp = PersonaFingerprint::derive(&persona, &build.version).unwrap();
+        let locale = LocaleConfig::default();
+        let directory = runtime
+            .materialize_extension(&id, &persona, &fp, &locale)
+            .unwrap();
+        let mut policy = brows_domain::SessionFingerprintConfig {
+            user_agent: fp.user_agent.clone(),
+            persona,
+            languages: locale.accept_languages,
+            timezone: None,
+        };
+        let session = crate::render_session_fingerprint(&policy, &build.version).unwrap();
+        assert_eq!(
+            session,
+            std::fs::read_to_string(directory.join("content.js")).unwrap()
+        );
+        policy.user_agent = "unrelated identity".to_owned();
+        assert!(crate::render_session_fingerprint(&policy, &build.version).is_err());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1229,21 +1242,6 @@ mod seedable_noise_tests {
         );
         assert_eq!(fs::read(&damaged).unwrap(), b"damaged");
         fs::remove_dir_all(root).unwrap();
-    }
-}
-
-// Small helpers on the domain type — used only by SeedableNoiseFingerprintRuntime.
-trait SeedableNoiseExt {
-    fn platform_string_for_js(&self) -> &'static str;
-}
-
-impl SeedableNoiseExt for SeedableNoisePersona {
-    fn platform_string_for_js(&self) -> &'static str {
-        match self.platform {
-            brows_domain::PlatformKind::Windows => "windows",
-            brows_domain::PlatformKind::MacOs => "mac",
-            brows_domain::PlatformKind::Linux => "linux",
-        }
     }
 }
 

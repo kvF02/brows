@@ -628,9 +628,7 @@ fn validate_path(path: &Path) -> Result<(), DomainError> {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionFingerprintConfig {
     pub user_agent: String,
-    pub platform: PlatformKind,
-    pub hardware_concurrency: u8,
-    pub device_memory: DeviceMemoryGb,
+    pub persona: SeedableNoisePersona,
     pub languages: Vec<String>,
     pub timezone: Option<String>,
 }
@@ -671,16 +669,14 @@ impl LaunchArgument {
             Self::SessionFingerprint(config) => {
                 Self::UserAgentOverride(config.user_agent.clone()).validate()?;
                 Self::AcceptLanguages(config.languages.clone()).validate()?;
-                if config.hardware_concurrency == 0
-                    || config.hardware_concurrency > 64
-                    || config.timezone.as_ref().is_some_and(|tz| {
-                        tz.is_empty()
-                            || tz.len() > 64
-                            || !tz
-                                .bytes()
-                                .all(|c| c.is_ascii_alphanumeric() || b"/_-+".contains(&c))
-                    })
-                {
+                config.persona.validate()?;
+                if config.timezone.as_ref().is_some_and(|tz| {
+                    tz.is_empty()
+                        || tz.len() > 64
+                        || !tz
+                            .bytes()
+                            .all(|c| c.is_ascii_alphanumeric() || b"/_-+".contains(&c))
+                }) {
                     return Err(DomainError::InvalidLaunchArgument(
                         "session fingerprint policy".to_owned(),
                     ));

@@ -1,6 +1,10 @@
 //! Session-scoped control and observation over private inherited pipes.
 //! No generic command/evaluate surface is exposed through application ports.
-use super::{internal, invalid_data, now_ms, win_pipe};
+use super::{
+    internal, invalid_data, now_ms,
+    target_registry::{Target, TargetJob, Targets, MAX_TARGETS},
+    win_pipe,
+};
 use brows_application::{
     PortError, PortErrorKind, PortResult, SessionObservation, TargetObservation,
 };
@@ -20,7 +24,6 @@ use std::{
 };
 const TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_FRAME: usize = 2 * 1024 * 1024;
-const MAX_TARGETS: usize = 128;
 const POLICY_WORKERS: usize = 8;
 #[derive(Debug)]
 struct Wire {
@@ -30,7 +33,7 @@ struct Wire {
     version: Mutex<String>,
     policy_failure: Mutex<Option<String>>,
     writer: mpsc::SyncSender<Vec<u8>>,
-    pending: Mutex<BTreeMap<u64, mpsc::Sender<Value>>>,
+    pending: Arc<Mutex<BTreeMap<u64, mpsc::Sender<Value>>>>,
     paused: Mutex<BTreeSet<String>>,
     pause_ready: Condvar,
 }
@@ -39,6 +42,15 @@ struct PendingReply {
     id: u64,
     method: String,
     receive: mpsc::Receiver<Value>,
+    session: Option<String>,
+    pending: Arc<Mutex<BTreeMap<u64, mpsc::Sender<Value>>>>,
+}
+impl Drop for PendingReply {
+    fn drop(&mut self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.remove(&self.id);
+        }
+    }
 }
 impl Wire {
     fn fail(&self) {
@@ -48,12 +60,7 @@ impl Wire {
             p.clear();
         }
     }
-    fn begin(
-        &self,
-        method: &str,
-        params: Value,
-        session: Option<&str>,
-    ) -> PortResult<PendingReply> {
+    fn ensure_open(&self) -> PortResult<()> {
         if self.closing.load(Ordering::Acquire) {
             return Err(internal(
                 self.policy_failure
@@ -63,6 +70,15 @@ impl Wire {
                     .unwrap_or_else(|| "session control is closed".to_owned()),
             ));
         }
+        Ok(())
+    }
+    fn begin(
+        &self,
+        method: &str,
+        params: Value,
+        session: Option<&str>,
+    ) -> PortResult<PendingReply> {
+        self.ensure_open()?;
         let id = self.next.fetch_add(1, Ordering::Relaxed);
         let mut frame = json!({"id":id,"method":method,"params":params});
         if let Some(s) = session {
@@ -93,21 +109,21 @@ impl Wire {
             id,
             method: method.to_owned(),
             receive,
+            session: session.map(str::to_owned),
+            pending: self.pending.clone(),
         })
     }
     fn finish(&self, reply: PendingReply) -> PortResult<Value> {
-        let PendingReply {
-            id,
-            method,
-            receive,
-        } = reply;
-        let result = receive.recv_timeout(TIMEOUT);
-        if let Ok(mut p) = self.pending.lock() {
-            p.remove(&id);
-        }
+        let method = &reply.method;
+        let result = reply.receive.recv_timeout(TIMEOUT);
         let value = result.map_err(|_| {
-            self.fail();
-            internal(format!("session control response timeout: {method}"))
+            if reply.session.is_none() {
+                self.fail();
+            }
+            PortError::new(
+                PortErrorKind::Unavailable,
+                format!("session control response timeout: {method}"),
+            )
         })?;
         if let Some(error) = value.get("error") {
             if method == "Emulation.setTimezoneOverride"
@@ -158,7 +174,9 @@ impl Wire {
             .map_err(|_| internal("pause lock poisoned"))?;
         while !paused.contains(session) {
             if self.closing.load(Ordering::Acquire) || Instant::now() >= deadline {
-                self.fail();
+                // The event actor may have invalidated this generation while
+                // startup was pending. The policy worker decides whether this
+                // error still belongs to an active target and must fail closed.
                 return Err(internal(
                     "Service Worker did not pause before its first script",
                 ));
@@ -171,22 +189,6 @@ impl Wire {
         }
         Ok(())
     }
-}
-#[derive(Debug, Clone)]
-struct Target {
-    session: String,
-    kind: String,
-}
-#[derive(Debug, Default)]
-struct Targets {
-    configured: BTreeMap<String, Target>,
-    attached: BTreeSet<String>,
-}
-#[derive(Debug)]
-struct TargetJob {
-    id: String,
-    target: Target,
-    extension: bool,
 }
 #[derive(Debug)]
 pub(super) struct Controller {
@@ -212,7 +214,7 @@ impl Controller {
             version: Mutex::new(String::new()),
             policy_failure: Mutex::new(None),
             writer,
-            pending: Mutex::new(BTreeMap::new()),
+            pending: Arc::new(Mutex::new(BTreeMap::new())),
             paused: Mutex::new(BTreeSet::new()),
             pause_ready: Condvar::new(),
         });
@@ -266,7 +268,12 @@ impl Controller {
                             }
                         } else if matches!(
                             value["method"].as_str(),
-                            Some("Target.attachedToTarget" | "Target.detachedFromTarget")
+                            Some(
+                                "Target.attachedToTarget"
+                                    | "Target.detachedFromTarget"
+                                    | "Inspector.targetCrashed"
+                                    | "Inspector.targetReloadedAfterCrash"
+                            )
                         ) && events.try_send(value).is_err()
                         {
                             break 'read;
@@ -306,6 +313,18 @@ impl Controller {
                         Err(mpsc::RecvTimeoutError::Timeout) => continue,
                         Err(_) => break,
                     };
+                    let Ok(_lease) = job.gate.lock() else {
+                        w.fail();
+                        break;
+                    };
+                    if !t
+                        .0
+                        .lock()
+                        .map(|state| state.is_current(&job))
+                        .unwrap_or(false)
+                    {
+                        continue;
+                    }
                     let session = &job.target.session;
                     let result: PortResult<()> = (|| {
                         if !job.extension {
@@ -313,6 +332,14 @@ impl Controller {
                                 w.pause_service_worker(session)?;
                             }
                             configure(&w, session, &job.target.kind, &policy)?;
+                            if !t
+                                .0
+                                .lock()
+                                .map(|state| state.is_current(&job))
+                                .unwrap_or(false)
+                            {
+                                return Ok(());
+                            }
                             if job.target.kind == "service_worker" {
                                 w.call("Debugger.resume", json!({}), Some(session))?;
                                 w.call("Debugger.disable", json!({}), Some(session))?;
@@ -330,13 +357,11 @@ impl Controller {
                             w.fail();
                             break;
                         };
-                        if error.kind == PortErrorKind::NotFound
-                            || !state.attached.contains(session)
-                        {
-                            state.attached.remove(session);
-                            state
-                                .configured
-                                .retain(|_, value| &value.session != session);
+                        if !state.is_current(&job) {
+                            continue;
+                        }
+                        if error.kind == PortErrorKind::NotFound {
+                            state.detach(session);
                             continue;
                         }
                         if let Ok(mut reason) = w.policy_failure.lock() {
@@ -355,8 +380,7 @@ impl Controller {
                         w.fail();
                         break;
                     };
-                    if !job.extension && state.attached.contains(session) {
-                        state.configured.insert(job.id, job.target);
+                    if !job.extension && state.ready(&job) {
                         t.1.notify_all();
                     }
                 }
@@ -377,10 +401,49 @@ impl Controller {
                             paused.remove(session);
                         }
                         if let Ok(mut state) = t.0.lock() {
-                            state.attached.remove(session);
-                            state.configured.retain(|_, value| value.session != session);
+                            state.detach(session);
                         }
                     }
+                    continue;
+                }
+                if matches!(
+                    event["method"].as_str(),
+                    Some("Inspector.targetCrashed" | "Inspector.targetReloadedAfterCrash")
+                ) {
+                    let Some(session) = event["sessionId"].as_str() else {
+                        w.fail();
+                        break;
+                    };
+                    if let Ok(mut paused) = w.paused.lock() {
+                        paused.remove(session);
+                    }
+                    let outcome = match t.0.lock() {
+                        Ok(mut state) => {
+                            if event["method"] == "Inspector.targetCrashed" {
+                                state.suspend(session).map(|_| None)
+                            } else {
+                                state.reload(session)
+                            }
+                        }
+                        Err(_) => {
+                            w.fail();
+                            break;
+                        }
+                    };
+                    match outcome {
+                        Ok(Some(job)) => {
+                            if jobs.try_send(job).is_err() {
+                                w.fail();
+                                break;
+                            }
+                        }
+                        Ok(None) => {}
+                        Err(_) => {
+                            w.fail();
+                            break;
+                        }
+                    }
+                    t.1.notify_all();
                     continue;
                 }
                 let params = &event["params"];
@@ -392,34 +455,25 @@ impl Controller {
                     w.fail();
                     break;
                 };
-                {
-                    let Ok(mut state) = t.0.lock() else {
+                let kind = params["targetInfo"]["type"].as_str().unwrap_or("");
+                let extension = params["targetInfo"]["url"]
+                    .as_str()
+                    .unwrap_or("")
+                    .starts_with("chrome-extension://");
+                let job = match t.0.lock() {
+                    Ok(mut state) => state.attach(id, session, kind, extension),
+                    Err(_) => {
                         w.fail();
                         break;
-                    };
-                    if state.attached.contains(session) {
-                        continue;
                     }
-                    if state.attached.len() >= MAX_TARGETS {
+                };
+                let job = match job {
+                    Ok(Some(job)) => job,
+                    Ok(None) => continue,
+                    Err(_) => {
                         w.fail();
                         break;
                     }
-                    state.attached.insert(session.to_owned());
-                }
-                // WebUI new tabs retain their policy when navigating to sites.
-                let job = TargetJob {
-                    id: id.to_owned(),
-                    target: Target {
-                        session: session.to_owned(),
-                        kind: params["targetInfo"]["type"]
-                            .as_str()
-                            .unwrap_or("")
-                            .to_owned(),
-                    },
-                    extension: params["targetInfo"]["url"]
-                        .as_str()
-                        .unwrap_or("")
-                        .starts_with("chrome-extension://"),
                 };
                 if jobs.try_send(job).is_err() {
                     w.fail();
@@ -480,7 +534,7 @@ impl Controller {
             .lock()
             .map_err(|_| internal("target lock poisoned"))?;
         loop {
-            if let Some(target) = targets.configured.get(id) {
+            if let Some(target) = targets.get(id) {
                 return Ok(target.clone());
             }
             if self.wire.closing.load(Ordering::Acquire) || Instant::now() >= deadline {
@@ -570,21 +624,29 @@ impl Controller {
         outcome
     }
     pub(super) fn observe(&self, session_id: &SessionId) -> PortResult<SessionObservation> {
+        self.wire.ensure_open()?;
         let targets: Vec<_> = self
             .targets
             .0
             .lock()
             .map_err(|_| internal("target lock poisoned"))?
-            .configured
-            .values()
-            .cloned()
-            .collect();
+            .snapshot();
         if targets.len() > 32 {
             return Err(internal("session observation exceeds target limit"));
         }
         let mut result = Vec::new();
         for target in targets {
-            let signals = evaluate(&self.wire, &target.session, OBSERVE)?;
+            let observed = evaluate(&self.wire, &target.session, OBSERVE);
+            if !self
+                .targets
+                .0
+                .lock()
+                .map_err(|_| internal("target lock poisoned"))?
+                .target_current(&target)
+            {
+                continue;
+            }
+            let signals = observed?;
             result.push(TargetObservation {
                 kind: target.kind,
                 user_agent: string(&signals, "userAgent")?,
@@ -610,6 +672,7 @@ impl Controller {
                     .to_owned(),
             });
         }
+        self.wire.ensure_open()?;
         Ok(SessionObservation {
             session_id: session_id.clone(),
             observed_at_ms: now_ms(),
@@ -635,7 +698,7 @@ fn string(value: &Value, key: &str) -> PortResult<String> {
 fn evaluate(wire: &Wire, session: &str, expression: &str) -> PortResult<Value> {
     let result = wire.call(
         "Runtime.evaluate",
-        json!({"expression":expression,"returnByValue":true,"silent":true}),
+        json!({"expression":expression,"returnByValue":true,"silent":true,"timeout":1500}),
         Some(session),
     )?;
     if result.get("exceptionDetails").is_some() {
@@ -663,12 +726,12 @@ fn configure(
     policy: &SessionFingerprintConfig,
 ) -> PortResult<()> {
     wire.call("Target.setAutoAttach", auto_attach(false), Some(session))?;
-    let (platform, platform_version) = match policy.platform {
+    let (platform, platform_version) = match policy.persona.platform {
         PlatformKind::Windows => ("Windows", "10.0.0"),
         PlatformKind::MacOs => ("macOS", "10.15.7"),
         PlatformKind::Linux => ("Linux", ""),
     };
-    let platform_string = match policy.platform {
+    let platform_string = match policy.persona.platform {
         PlatformKind::Windows => "Win32",
         PlatformKind::MacOs => "MacIntel",
         PlatformKind::Linux => "Linux x86_64",
@@ -708,10 +771,13 @@ fn configure(
         }
     }
     {
-        let memory = policy.device_memory.reported_f64();
-        let values = json!({"hardwareConcurrency":policy.hardware_concurrency,"deviceMemory":memory,"languages":policy.languages,"language":policy.languages[0],"platform":platform_string});
-        let script=format!("(()=>{{const values={values};const p=Object.getPrototypeOf(navigator);for(const [key,value] of Object.entries(values)){{const d=Object.getOwnPropertyDescriptor(p,key);if(!d?.get&&key==='deviceMemory')continue;if(!d?.get||!d.configurable)throw new Error('Unsupported target property');const original=d.get;const reported=Array.isArray(value)?Object.freeze([...value]):value;Object.defineProperty(p,key,{{...d,get(){{original.call(this);return reported;}}}});}}return navigator.hardwareConcurrency===values.hardwareConcurrency&&(typeof navigator.deviceMemory==='undefined'||navigator.deviceMemory===values.deviceMemory);}})()");
+        let memory = policy.persona.device_memory.reported_f64();
+        let values = json!({"hardwareConcurrency":policy.persona.hardware_concurrency,"deviceMemory":memory,"languages":policy.languages,"language":policy.languages[0],"platform":platform_string});
+        let hardware_script=format!("(()=>{{const values={values};const p=Object.getPrototypeOf(navigator);for(const [key,value] of Object.entries(values)){{const d=Object.getOwnPropertyDescriptor(p,key);if(!d?.get&&key==='deviceMemory')continue;if(!d?.get||!d.configurable)throw new Error('Unsupported target property');const original=d.get;const reported=Array.isArray(value)?Object.freeze([...value]):value;Object.defineProperty(p,key,{{...d,get(){{original.call(this);return reported;}}}});}}return navigator.hardwareConcurrency===values.hardwareConcurrency&&(typeof navigator.deviceMemory==='undefined'||navigator.deviceMemory===values.deviceMemory);}})()");
+        let rendering_script = brows_application::render_session_fingerprint(policy, &actual)?;
+        let script = format!("{hardware_script};\n{rendering_script}");
         if is_page {
+            wire.call("Page.enable", json!({}), Some(session))?;
             wire.call(
                 "Page.addScriptToEvaluateOnNewDocument",
                 json!({"source":script,"runImmediately":true}),
@@ -725,3 +791,204 @@ fn configure(
     Ok(())
 }
 const OBSERVE:&str="(()=>({userAgent:navigator.userAgent,platform:navigator.platform,languages:Array.from(navigator.languages),hardwareConcurrency:navigator.hardwareConcurrency,deviceMemory:navigator.deviceMemory,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,clientHintsPlatform:navigator.userAgentData?.platform??''}))()";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    mod browser_fixture {
+        include!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/test_support/controlled_browser.rs"
+        ));
+    }
+
+    #[test]
+    fn abandoned_replies_release_the_bounded_pending_budget() {
+        let pending = Arc::new(Mutex::new(BTreeMap::new()));
+        let (send, receive) = mpsc::channel();
+        pending.lock().unwrap().insert(1, send);
+        let reply = PendingReply {
+            id: 1,
+            method: "Runtime.enable".to_owned(),
+            receive,
+            session: Some("s".to_owned()),
+            pending: pending.clone(),
+        };
+        drop(reply);
+        assert!(pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly supplied signed Edge and uses isolated data"]
+    fn private_worker_lifecycle_acceptance() {
+        use brows_domain::{DeviceMemoryGb, ScreenConfig, SeedableNoisePersona, WebGLProfile};
+        let executable = std::path::PathBuf::from(
+            std::env::var_os("BROWS_ACCEPTANCE_BROWSER").expect("explicit acceptance browser"),
+        );
+        assert_eq!(
+            crate::verify_authenticode_publisher(&executable, &["Microsoft Corporation"]).unwrap(),
+            "Microsoft Corporation"
+        );
+        let version = std::env::var("BROWS_ACCEPTANCE_VERSION").expect("verified binary version");
+        let root = std::env::temp_dir().join(format!(
+            "brows-worker-lifecycle-{}-{}",
+            std::process::id(),
+            now_ms()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let persona = SeedableNoisePersona {
+            seed: "worker-lifecycle".to_owned(),
+            platform: PlatformKind::Windows,
+            hardware_concurrency: 3,
+            device_memory: DeviceMemoryGb::Half,
+            touch_points: 0,
+            screen: ScreenConfig {
+                width: 1920,
+                height: 1080,
+                color_depth: 24,
+                device_scale_factor_hundredths: 100,
+            },
+            webgl: WebGLProfile {
+                vendor: String::new(),
+                unmasked_renderer: String::new(),
+            },
+            spoof_canvas: true,
+            spoof_audio: false,
+        };
+        let fp =
+            brows_application::persona_fingerprint::PersonaFingerprint::derive(&persona, &version)
+                .unwrap();
+        let expected_webgl = json!({"vendor":fp.webgl_vendor,"renderer":fp.webgl_renderer});
+        let policy = SessionFingerprintConfig {
+            user_agent: fp.user_agent,
+            persona,
+            languages: vec!["en-US".to_owned(), "en".to_owned()],
+            timezone: Some("Asia/Tokyo".to_owned()),
+        };
+        let fixture = browser_fixture::ControlFixture::start();
+        let args = vec![
+            OsString::from(format!("--user-data-dir={}", root.display())),
+            OsString::from("--no-first-run"),
+            OsString::from("--no-default-browser-check"),
+            OsString::from("--no-startup-window"),
+        ];
+        let controller = Controller::start(
+            &executable,
+            &args,
+            policy,
+            &[format!("{}/life/page", fixture.url)],
+        )
+        .unwrap();
+        let initial = fixture.wait_proofs("/life/");
+        assert!(
+            controller.try_wait().unwrap().is_none(),
+            "controller exited: {:?}",
+            controller.wire.policy_failure.lock().unwrap()
+        );
+        assert_eq!(
+            initial
+                .iter()
+                .map(|(_, _, first)| first["kind"].as_str().unwrap())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            6
+        );
+        let first = initial
+            .iter()
+            .find(|(_, _, first)| first["kind"] == "service_worker")
+            .unwrap()
+            .2
+            .clone();
+        if !first["webgl"].is_null() {
+            assert_eq!(first["webgl"], expected_webgl);
+        }
+        for (_, _, value) in &initial {
+            assert_eq!(value["hardwareConcurrency"], 3, "{} CPU", value["kind"]);
+            assert_eq!(
+                value["timezone"], "Asia/Tokyo",
+                "{} timezone",
+                value["kind"]
+            );
+            assert_eq!(value["canvas"], first["canvas"], "{} Canvas", value["kind"]);
+            assert_eq!(value["repeat"], value["canvas"]);
+            if !value["webgl"].is_null() {
+                assert_eq!(value["webgl"], expected_webgl);
+            }
+        }
+        let page = controller
+            .targets
+            .0
+            .lock()
+            .unwrap()
+            .snapshot()
+            .into_iter()
+            .find(|target| target.kind == "page")
+            .unwrap();
+        controller
+            .wire
+            .call("ServiceWorker.enable", json!({}), Some(&page.session))
+            .unwrap();
+        controller
+            .wire
+            .call(
+                "ServiceWorker.stopAllWorkers",
+                json!({}),
+                Some(&page.session),
+            )
+            .unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        while controller
+            .targets
+            .0
+            .lock()
+            .unwrap()
+            .snapshot()
+            .iter()
+            .any(|target| target.kind == "service_worker")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "stopped Worker must leave observation"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        let session_id = SessionId::new("lifecycle").unwrap();
+        assert!(!controller
+            .observe(&session_id)
+            .unwrap()
+            .targets
+            .iter()
+            .any(|target| target.kind == "service_worker"));
+        evaluate(&controller.wire,&page.session,"navigator.serviceWorker.ready.then(registration=>registration.active.postMessage('restart-proof'));true").unwrap();
+        let restarted = fixture.wait_kind_count("/life/", "service_worker", 2);
+        assert!(
+            restarted.len() >= 2,
+            "restart must run its first script again"
+        );
+        fixture.bump_service_version();
+        let updated = fixture.wait_kind_count("/life/", "service_worker", 3);
+        assert!(
+            updated.len() >= 3,
+            "updated Worker must run its first script"
+        );
+        assert_eq!(updated.last().unwrap().2["fixtureVersion"], 1);
+        for (_, _, value) in updated {
+            assert_eq!(value["hardwareConcurrency"], 3);
+            assert_eq!(value["timezone"], "Asia/Tokyo");
+            assert_eq!(value["canvas"], first["canvas"]);
+            assert_eq!(value["repeat"], value["canvas"]);
+            assert_eq!(value["webgl"], first["webgl"]);
+        }
+        assert!(controller
+            .observe(&session_id)
+            .unwrap()
+            .targets
+            .iter()
+            .any(|target| target.kind == "service_worker"));
+        controller.kill().unwrap();
+        controller.wait().unwrap();
+        drop(controller);
+        drop(fixture);
+        let _ = std::fs::remove_dir_all(root);
+    }
+}

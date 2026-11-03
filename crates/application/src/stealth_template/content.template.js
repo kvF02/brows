@@ -1,7 +1,14 @@
-// Generated MAIN-world hooks. These change page reads, not the browser engine.
+// Generated hooks shared by page and Worker realms, not the browser engine.
 // No detection-site pass rate or native-function invisibility is promised.
 (() => {
   const persona = JSON.parse('{{PERSONA_JSON}}');
+  const policy = JSON.stringify(persona);
+  const installed = Symbol.for('brows.fingerprint.policy.v1');
+  if (Object.prototype.hasOwnProperty.call(globalThis, installed)) {
+    const matches = globalThis[installed];
+    if (typeof matches !== 'function' || !matches(policy)) throw new Error('Fingerprint policy changed in a live realm');
+    return true;
+  }
   let seed = 0x811c9dc5;
   for (let i = 0; i < persona.seed.length; i++) {
     seed = Math.imul(seed ^ persona.seed.charCodeAt(i), 0x01000193) >>> 0;
@@ -26,7 +33,8 @@
       });
     } catch (_) {}
   };
-  if (typeof Navigator !== 'undefined') {
+  const navigatorPrototype = globalThis.Navigator?.prototype ?? globalThis.WorkerNavigator?.prototype;
+  if (navigatorPrototype) {
     const languages = Object.freeze([...persona.languages]);
     for (const [name, value] of [
       ['language', languages[0]], ['languages', languages],
@@ -34,7 +42,7 @@
       ['deviceMemory', persona.device_memory], ['maxTouchPoints', persona.touch_points],
       ['platform', persona.platform === 'windows' ? 'Win32'
         : persona.platform === 'mac' ? 'MacIntel' : 'Linux x86_64'],
-    ]) overrideGetter(Navigator.prototype, name, value);
+    ]) overrideGetter(navigatorPrototype, name, value);
   }
   // devicePixelRatio stays native: the launch scale flag and browser zoom own it.
   // Do not fabricate chrome.runtime or replace WebRTC constructors.
@@ -171,4 +179,8 @@
       }
     } catch (_) {}
   }
+  // Retain an opaque equality check, never a readable seed/persona record.
+  Object.defineProperty(globalThis, installed, { value: candidate => candidate === policy });
+  return true;
 })();
+
