@@ -38,6 +38,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Install Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal --component clippy,rustfmt
+      - uses: actions/cache/restore@v4
+        with:
+          path: target/debug
+          key: windows-rust-1.97.1-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          restore-keys: windows-rust-1.97.1-${{ hashFiles('Cargo.lock') }}-
       - name: Rust tests and lint
         run: |
           cargo +1.97.1 test --workspace --locked
@@ -46,6 +51,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Production registration and capability probe
         run: cargo +1.97.1 test -p brows-desktop signed_runtime_acceptance -- --ignored --nocapture
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: target/debug
+          key: windows-rust-1.97.1-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
       - name: Preserve actual evidence
         if: always()
         uses: actions/upload-artifact@v4

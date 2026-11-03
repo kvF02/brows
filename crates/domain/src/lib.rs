@@ -15,7 +15,7 @@ pub use model::{
     FingerprintPersona, FingerprintSupport, LaunchArgument, LaunchWarning, LocaleConfig,
     PersonaKind, PlatformKind, ProfileSpec, ProxyLaunchBinding, ProxyScheme, ProxySpec,
     ResolvedLaunchPlan, RuntimeTrust, ScreenConfig, SeedableNoisePersona, Session, SessionFailure,
-    SessionState, SystemNativePersona, WebGLProfile, WindowConfig, DEFAULT_MAX_CONCURRENT_SESSIONS,
+    SessionState, SessionFingerprintConfig, SystemNativePersona, WebGLProfile, WindowConfig, DEFAULT_MAX_CONCURRENT_SESSIONS,
     DEFAULT_PROXY_TIMEOUT_MS, MAX_CONCURRENT_SESSIONS, MAX_PROFILE_NAME_CHARS, MAX_QUEUED_SESSIONS,
     MAX_TAG_CHARS,
 };
