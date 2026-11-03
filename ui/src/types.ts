@@ -89,6 +89,7 @@ export interface Profile {
   diagnostic: DiagnosticSummary;
   persona?: PersonaConfig;
   acceptLanguages?: string[];
+  timezone?: string;
   windowWidth?: number;
   windowHeight?: number;
 }
@@ -102,6 +103,7 @@ export interface ProfileInput {
   /** v0.2: optional SeedableNoise persona. If omitted, SystemNative is used. */
   persona?: PersonaConfig;
   acceptLanguages?: string[];
+  timezone?: string;
   windowWidth?: number;
   windowHeight?: number;
 }
@@ -298,6 +300,16 @@ export type CommandName = keyof CommandMap;
 export type CommandParams<Name extends CommandName> = CommandMap[Name]["params"];
 export type CommandResult<Name extends CommandName> = CommandMap[Name]["result"];
 
+export interface SessionObservation {
+  sessionId: string;
+  observedAtMs: number;
+  targets: Array<{
+    kind: string; userAgent: string; platform: string; languages: string[];
+    hardwareConcurrency: number; deviceMemory: string; timezone: string;
+    clientHintsPlatform: string;
+  }>;
+}
+
 export interface ApiClient {
   /** Derive a draft configuration for the selected runtime; this is not a browser observation. */
   fingerprintPreview(input: FingerprintPreviewInput): Promise<FingerprintPreview>;
@@ -324,6 +336,7 @@ export interface ApiClient {
   restoreProfile(id: string, revision: number): Promise<Profile>;
   launchSession(profileId: string): Promise<Profile>;
   stopSession(profileId: string): Promise<Profile>;
+  observeSession(profileId: string): Promise<SessionObservation>;
   cancelQueuedSession(sessionId: string): Promise<SessionSummary>;
   listProxies(): Promise<ProxySummary[]>;
   saveProxy(input: ProxyInput): Promise<ProxySummary>;
@@ -373,3 +386,4 @@ export const EMPTY_SETTINGS: Settings = {
   stopSessionsOnExit: true,
   retainArchivedDays: 7,
 };
+

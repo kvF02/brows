@@ -26,6 +26,7 @@ import {
   type ProxySummary,
   type SeedableNoisePersonaConfig,
   type Settings,
+  type SessionObservation,
 } from "./types";
 
 type ViewKey = "profiles" | "proxies" | "diagnostics" | "backups" | "settings";
@@ -148,9 +149,10 @@ function App() {
   const [showArchived, setShowArchived] = useState(false);
   const [search, setSearch] = useState("");
 
-  const refresh = useCallback(async () => {
-    setLoading(true);
-    setError("");
+  const refreshGeneration = useRef(0);
+  const refresh = useCallback(async (quiet = false) => {
+    const generation = ++refreshGeneration.current;
+    if (!quiet) { setLoading(true); setError(""); }
     const results = await Promise.allSettled([
       apiRef.current.listProfiles(true),
       apiRef.current.listProxies(),
@@ -159,6 +161,7 @@ function App() {
       apiRef.current.listRuntimes(),
       apiRef.current.getSettings(),
     ]);
+    if (generation !== refreshGeneration.current) return;
     const failures: string[] = [];
     const apply = <T,>(
       result: PromiseSettledResult<T>,
@@ -181,6 +184,18 @@ function App() {
   useEffect(() => {
     void refresh();
   }, [refresh]);
+
+  const hasActiveSessions = profiles.some(profile => ["running", "starting", "queued", "stopping"].includes(profile.status));
+  useEffect(() => {
+    if (!hasActiveSessions || !isTauriRuntime()) return;
+    let busy = false;
+    const timer = window.setInterval(() => {
+      if (busy) return;
+      busy = true;
+      void refresh(true).finally(() => { busy = false; });
+    }, 2000);
+    return () => window.clearInterval(timer);
+  }, [hasActiveSessions, refresh]);
 
   useEffect(() => {
     if (!isTauriRuntime()) return;
@@ -759,6 +774,7 @@ function ProfileModal({
   const [runtimeId, setRuntimeId] = useState(initial?.runtimeId ?? runtimes.find((runtime) => runtime.active)?.id ?? runtimes[0]?.id ?? "");
   const [persona, setPersona] = useState<PersonaConfig>(initial?.persona ?? { kind: "system_native" });
   const [languagesText, setLanguagesText] = useState((initial?.acceptLanguages ?? ["zh-CN", "zh"]).join(", "));
+  const [timezone, setTimezone] = useState(initial?.timezone ?? "");
   const [windowWidth, setWindowWidth] = useState(initial?.windowWidth ?? 1280);
   const [windowHeight, setWindowHeight] = useState(initial?.windowHeight ?? 800);
   const [formError, setFormError] = useState("");
@@ -805,6 +821,7 @@ function ProfileModal({
       runtimeId,
       persona,
       acceptLanguages: [...acceptLanguages],
+      timezone: persona.kind === "seedable_noise" ? timezone.trim() || undefined : undefined,
       windowWidth,
       windowHeight,
     });
@@ -853,6 +870,9 @@ function ProfileModal({
             <div><label className="field-label" htmlFor="profile-window-w">启动窗口宽度</label><input id="profile-window-w" className="text-input" type="number" required min={320} max={0xffffffff} step={1} value={windowWidth} onChange={(event) => setWindowWidth(Number(event.target.value))} /></div>
             <div><label className="field-label" htmlFor="profile-window-h">启动窗口高度</label><input id="profile-window-h" className="text-input" type="number" required min={240} max={0xffffffff} step={1} value={windowHeight} onChange={(event) => setWindowHeight(Number(event.target.value))} /></div>
           </div>
+
+          <label className="field-label" htmlFor="profile-timezone">时区（留空跟随系统）</label>
+          <input id="profile-timezone" className="text-input" disabled={persona.kind !== "seedable_noise"} value={timezone} onChange={(event) => setTimezone(event.target.value)} placeholder="例如 Asia/Tokyo" />
 
           <PersonaEditor value={persona} onChange={setPersona} api={api} runtimeId={runtimeId} acceptLanguages={acceptLanguages} windowWidth={windowWidth} windowHeight={windowHeight} />
 
@@ -1553,10 +1573,19 @@ function DiagnosticsView({ api, profiles, reports, onRefresh, onError, onNotice 
 }) {
   const [selectedId, setSelectedId] = useState(profiles[0]?.id ?? "");
   const [running, setRunning] = useState(false);
+  const [observation, setObservation] = useState<SessionObservation>();
+  const observe = async () => {
+    if (!selectedId) return;
+    setRunning(true); setObservation(undefined);
+    try { setObservation(await api.observeSession(selectedId)); }
+    catch (cause) { onError(getErrorMessage(cause)); }
+    finally { setRunning(false); }
+  };
   const [confirmExternal, setConfirmExternal] = useState(false);
   useEffect(() => {
     if (!profiles.some((profile) => profile.id === selectedId)) setSelectedId(profiles[0]?.id ?? "");
   }, [profiles, selectedId]);
+  useEffect(() => { setObservation(undefined); }, [selectedId]);
   const report = reports.find((item) => item.profileId === selectedId);
   const run = async (external = false) => {
     if (!selectedId) return;
@@ -1579,6 +1608,15 @@ function DiagnosticsView({ api, profiles, reports, onRefresh, onError, onNotice 
       <div className="page-actions"><button className="secondary-button" type="button" disabled={!selectedId || running} onClick={() => void run(false)}>{running ? "检查中…" : "本地检查"}</button><button className="primary-button" type="button" disabled={!selectedId || running} onClick={() => setConfirmExternal(true)}>主动网络检查</button></div>
     </div>
     <div className="diagnostic-toolbar"><label className="field-label" htmlFor="diagnostic-profile">选择环境</label><select id="diagnostic-profile" className="text-input" value={selectedId} onChange={(event) => setSelectedId(event.target.value)}><option value="">请选择</option>{profiles.map((profile) => <option key={profile.id} value={profile.id}>{profile.name}</option>)}</select><span className="diagnostic-scope-legend"><span className="scope-badge scope-isolated">独立隔离</span><span className="scope-badge scope-configurable">可配置</span><span className="scope-badge scope-shared">主机共享</span></span></div>
+    <div className="form-info">
+      <button className="secondary-button" type="button" disabled={running || !selectedId} onClick={() => void observe()}>读取当前会话设备信号</button>
+      <p>读取已启动环境中页面与 Worker 的设备声明；不读取网页正文、Cookie 或登录数据。此观测不代表公网泄漏测试通过。</p>
+    </div>
+    {observation && <div className="diagnostic-report"><p>会话 {observation.sessionId} · {formatDate(new Date(observation.observedAtMs).toISOString())}</p>
+      <div className="diagnostic-grid">{observation.targets.map((target, index) => <article className="diagnostic-item" key={index}>
+        <h3>{target.kind}</h3><p>CPU {target.hardwareConcurrency} · Memory {target.deviceMemory}GB</p>
+        <p>{target.timezone} · {target.languages.join(", ")}</p><p>Platform {target.platform} · UA-CH {target.clientHintsPlatform || "未提供"}</p><p>{target.userAgent}</p>
+      </article>)}</div></div>}
     {!report ? <div className="empty-state compact"><div className="empty-icon">⌁</div><strong>尚未运行诊断</strong><span>选择一个环境后开始检查。主动网络检查会在执行前显示端点。</span></div> : <div className="diagnostic-report">
       <div className={`report-banner ${report.overall}`}><span className="report-score">{report.overall === "pass" ? "✓" : "!"}</span><div><strong>{report.overall === "pass" ? "检查通过" : "存在需要关注的项目"}</strong><p>检查时间 {formatDate(report.checkedAt)} · {report.externalEndpoints.length === 0 ? "本次未访问外部检测端点" : `已访问 ${report.externalEndpoints.join("、")}`}</p></div></div>
       <div className="diagnostic-grid">{report.items.map((item) => <article className="diagnostic-item" key={item.key}><div className="diagnostic-item-head"><span className={`scope-badge ${scopeMeta[item.scope].className}`}>{scopeMeta[item.scope].label}</span><span className={`result-mark ${item.status}`}>{item.status === "pass" ? "✓" : item.status === "warning" ? "!" : "×"}</span></div><h3>{item.label}</h3><div className="diagnostic-values"><span>实际</span><strong>{item.actual}</strong>{item.expected && <><span>预期</span><strong>{item.expected}</strong></>}</div><p>{item.explanation}</p></article>)}</div>

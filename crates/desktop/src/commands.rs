@@ -800,8 +800,13 @@ pub(crate) async fn session_observe(state: State<'_, AppState>, request: Session
 }
 
 #[tauri::command]
-pub(crate) fn session_list(state: State<'_, AppState>) -> IpcResult<Vec<SessionDto>> {
-    ipc(state.sessions.list())
+pub(crate) async fn session_list(state: State<'_, AppState>) -> IpcResult<Vec<SessionDto>> {
+    let sessions = state.sessions.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || {
+        sessions.reconcile_exits()?;
+        sessions.list()
+    }).await.map_err(|_| ErrorDto { code: ErrorCode::Internal, message: "session supervisor task failed".to_owned(), violations: Vec::new() })?;
+    ipc(result)
 }
 
 #[cfg(test)]

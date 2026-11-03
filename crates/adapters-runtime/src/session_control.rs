@@ -11,7 +11,7 @@ const MAX_TARGETS:usize=128;
 #[derive(Debug)]
 struct Wire {
  process:Arc<win_pipe::Process>, next:AtomicU64, closing:AtomicBool,
- writer:mpsc::SyncSender<Vec<u8>>,
+ version:Mutex<String>, writer:mpsc::SyncSender<Vec<u8>>,
  pending:Mutex<BTreeMap<u64,mpsc::Sender<Value>>>,
 }
 impl Wire {
@@ -44,7 +44,7 @@ impl Controller {
   let (process,mut output,mut input)=win_pipe::spawn(executable,args).map_err(|_| internal("cannot start private session control"))?;
   let (writer,write_receive)=mpsc::sync_channel::<Vec<u8>>(8);
   let (events,event_receive)=mpsc::sync_channel::<Value>(128);
-  let wire=Arc::new(Wire { process:Arc::new(process), next:AtomicU64::new(1), closing:AtomicBool::new(false), writer, pending:Mutex::new(BTreeMap::new()) });
+  let wire=Arc::new(Wire { process:Arc::new(process), next:AtomicU64::new(1), closing:AtomicBool::new(false), version:Mutex::new(String::new()), writer, pending:Mutex::new(BTreeMap::new()) });
   let targets=Arc::new((Mutex::new(Targets::default()),Condvar::new()));
   let w=wire.clone(); let write_thread=thread::spawn(move || {
    while !w.closing.load(Ordering::Acquire) { match write_receive.recv_timeout(Duration::from_millis(200)) {
@@ -89,7 +89,9 @@ impl Controller {
    }
   });
   let controller=Self{wire,targets,threads:vec![write_thread,read_thread,actor]};
-  controller.wire.call("Browser.getVersion",json!({}),None)?;
+  let version=controller.wire.call("Browser.getVersion",json!({}),None)?;
+  let actual=version["product"].as_str().and_then(|v| v.split('/').nth(1)).filter(|v| v.split('.').all(|p| !p.is_empty() && p.bytes().all(|c|c.is_ascii_digit()))).ok_or_else(|| internal("cannot verify running browser version"))?;
+  *controller.wire.version.lock().map_err(|_| internal("version lock poisoned"))?=actual.to_owned();
   controller.wire.call("Target.setAutoAttach",auto_attach(),None)?;
   for url in if urls.is_empty() { vec!["about:blank".to_owned()] } else { urls.to_vec() } {
    let target=controller.wire.call("Target.createTarget",json!({"url":"about:blank"}),None)?;
@@ -141,8 +143,10 @@ fn configure(wire:&Wire,session:&str,kind:&str,policy:&SessionFingerprintConfig)
  let platform_string=match policy.platform { PlatformKind::Windows=>"Win32",PlatformKind::MacOs=>"MacIntel",PlatformKind::Linux=>"Linux x86_64" };
  let version=policy.user_agent.split("Chrome/").nth(1).and_then(|s| s.split(' ').next()).ok_or_else(|| invalid_data("missing Chromium version in policy"))?;
  let major=version.split('.').next().unwrap_or_default();
+ let actual=wire.version.lock().map_err(|_| internal("version lock poisoned"))?.clone();
+ if actual.split('.').next()!=Some(major) { return Err(internal("registered and running browser versions differ")); }
  wire.call("Network.setUserAgentOverride",json!({"userAgent":policy.user_agent,"acceptLanguage":policy.languages.join(","),"platform":platform_string,
-  "userAgentMetadata":{"brands":[{"brand":"Chromium","version":major},{"brand":"Google Chrome","version":major}],"fullVersionList":[{"brand":"Chromium","version":version},{"brand":"Google Chrome","version":version}],"fullVersion":version,"platform":platform,"platformVersion":platform_version,"architecture":"x86","bitness":"64","model":"","mobile":false,"wow64":false}}),Some(session))?;
+  "userAgentMetadata":{"brands":[{"brand":"Chromium","version":major},{"brand":"Google Chrome","version":major}],"fullVersionList":[{"brand":"Chromium","version":actual},{"brand":"Google Chrome","version":actual}],"fullVersion":actual,"platform":platform,"platformVersion":platform_version,"architecture":"x86","bitness":"64","model":"","mobile":false,"wow64":false}}),Some(session))?;
  let is_page=kind=="page"||kind=="iframe";
  if let Some(timezone)=&policy.timezone {
   let result=wire.call("Emulation.setTimezoneOverride",json!({"timezoneId":timezone}),Some(session));

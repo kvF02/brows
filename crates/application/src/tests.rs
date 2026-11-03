@@ -545,3 +545,19 @@ fn all_ports_are_object_safe() {
     assert_clock(clock.as_ref());
     assert_ids(&SequentialIdGenerator::default());
 }
+
+#[test]
+fn process_reconciliation_releases_failed_session_and_promotes_queue() {
+    let h = Harness::new(1);
+    let first = h.create_profile("first"); let second = h.create_profile("second");
+    let running = h.session_service.launch(SessionLaunchRequest { profile_id: first.id }).unwrap();
+    h.session_service.launch(SessionLaunchRequest { profile_id: second.id.clone() }).unwrap();
+    let SessionLaunchOutcome::Started { session, .. } = running else { panic!("expected running") };
+    let id: SessionId = session.id.clone().try_into().unwrap();
+    h.browsers.stop(&id).unwrap();
+    h.session_service.reconcile_exits().unwrap();
+    let list = h.session_service.list().unwrap();
+    assert_eq!(list.iter().find(|s| s.id == session.id).unwrap().state, SessionStateDto::Failed);
+    assert_eq!(list.iter().find(|s| s.profile_id == second.id).unwrap().state, SessionStateDto::Running);
+    h.session_service.reconcile_exits().unwrap();
+}

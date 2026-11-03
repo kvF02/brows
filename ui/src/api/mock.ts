@@ -19,6 +19,7 @@ import {
   type RuntimeFingerprintProbeResult,
   type Settings,
   type SessionSummary,
+  type SessionObservation,
 } from "../types";
 
 const now = () => new Date().toISOString();
@@ -146,6 +147,10 @@ export class MockApiClient implements ApiClient {
     return [];
   }
 
+  async observeSession(_profileId: string): Promise<SessionObservation> {
+    throw new ApiError("CAPABILITY_UNSUPPORTED", "网页版不能读取真实会话设备信号，请使用桌面版");
+  }
+
   async listProfiles(includeArchived = false): Promise<Profile[]> {
     return this.profiles
       .filter((profile) => includeArchived || profile.status !== "archived")
@@ -176,6 +181,7 @@ export class MockApiClient implements ApiClient {
       diagnostic: { overall: "not-run", issueCount: 0 },
       persona: input.persona ?? { kind: "system_native" },
       acceptLanguages: [...(input.acceptLanguages ?? ["zh-CN", "zh"])],
+      timezone: input.persona?.kind === "seedable_noise" ? input.timezone : undefined,
       windowWidth: input.windowWidth ?? 1280,
       windowHeight: input.windowHeight ?? 800,
     };
@@ -209,6 +215,7 @@ export class MockApiClient implements ApiClient {
       runtimeId: source.runtimeId,
       persona: source.persona,
       acceptLanguages: source.acceptLanguages ? [...source.acceptLanguages] : undefined,
+      timezone: source.timezone,
       windowWidth: source.windowWidth,
       windowHeight: source.windowHeight,
     });
@@ -444,3 +451,4 @@ export class MockApiClient implements ApiClient {
     return profile;
   }
 }
+

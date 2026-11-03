@@ -20,6 +20,7 @@ import {
   type ProxySummary,
   type RuntimeFingerprintProbeResult,
   type SessionSummary,
+  type SessionObservation,
   type Settings,
 } from "../types";
 
@@ -146,6 +147,7 @@ const handlers = Object.freeze({
   sessionStop: "session_stop",
   sessionCancelQueued: "session_cancel_queued",
   sessionList: "session_list",
+  sessionObserve: "session_observe",
   moreLoginPreview: "morelogin_preview",
   moreLoginImport: "morelogin_import",
   proxyList: "proxy_list",
@@ -380,6 +382,13 @@ export class TauriApiClient implements ApiClient {
     return this.getProfileView(profileId);
   }
 
+  async observeSession(profileId: string): Promise<SessionObservation> {
+    await this.refreshSessions();
+    const session = newestActiveSession(this.sessions, profileId);
+    if (!session || session.state !== "running") throw new ApiError("INVALID_PROFILE_STATE", "请先启动要观测的环境");
+    return this.call<SessionObservation>(handlers.sessionObserve, { request: { sessionId: session.id } });
+  }
+
   async cancelQueuedSession(sessionId: string): Promise<SessionSummary> {
     const session = await this.call<SessionDto>(handlers.sessionCancelQueued, {
       request: { sessionId },
@@ -524,6 +533,7 @@ export class TauriApiClient implements ApiClient {
       diagnostic: { overall: "not-run", issueCount: 0 },
       persona: personaFromDto(dto.persona),
       acceptLanguages: [...dto.locale.acceptLanguages],
+      timezone: dto.locale.timezone,
       windowWidth: dto.window.width,
       windowHeight: dto.window.height,
     };
@@ -607,7 +617,7 @@ function draftFromInput(input: ProfileInput): ProfileDraftDto {
     proxyId: input.proxyId,
     browser: { mode: "pinned", value: { buildId: input.runtimeId } },
     persona: buildPersonaDto(input.persona) as ProfileDraftDto extends never ? never : ProfileDraftDto["persona"],
-    locale: { acceptLanguages: [...(input.acceptLanguages ?? ["zh-CN", "zh"])] },
+    locale: { acceptLanguages: [...(input.acceptLanguages ?? ["zh-CN", "zh"])], timezone: input.persona?.kind === "seedable_noise" ? input.timezone : undefined },
     window: { width: input.windowWidth ?? 1280, height: input.windowHeight ?? 800, startMaximized: false },
     startupUrls: [],
   };
@@ -685,6 +695,8 @@ function mergeDraft(dto: ProfileDto, changes: Partial<ProfileInput>): ProfileDra
     locale: {
       ...dto.locale,
       acceptLanguages: [...(changes.acceptLanguages ?? dto.locale.acceptLanguages)],
+      timezone: changes.persona?.kind === "system_native" ? undefined
+        : Object.prototype.hasOwnProperty.call(changes, "timezone") ? changes.timezone : dto.locale.timezone,
     },
     window: {
       ...dto.window,

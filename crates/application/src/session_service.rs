@@ -264,14 +264,28 @@ impl SessionApplicationService {
         message: impl Into<String>,
     ) -> ApplicationResult<SessionDto> {
         let _operation = self.lock_operations()?;
-        let message = message.into();
+        self.record_exit_locked(session_id, message.into())
+    }
+
+    pub fn reconcile_exits(&self) -> ApplicationResult<()> {
+        let _operation = self.lock_operations()?;
+        let active: Vec<_> = self.lock_registry()?.processes.keys().cloned().collect();
+        for id in active {
+            if !self.browsers.is_running(&id)? {
+                self.record_exit_locked(&id, "browser process or session policy controller exited".to_owned())?;
+            }
+        }
+        Ok(())
+    }
+
+    fn record_exit_locked(&self, session_id: &SessionId, message: String) -> ApplicationResult<SessionDto> {
         let (session, promoted, lease) =
             {
                 let mut registry = self.lock_registry()?;
                 let current = registry.sessions.get(session_id).ok_or_else(|| {
                     ApplicationError::new(ErrorCode::NotFound, "session not found")
                 })?;
-                if !current.state.is_active() {
+                if !matches!(current.state, SessionState::Starting | SessionState::Running | SessionState::Stopping) {
                     return Err(ApplicationError::new(
                         ErrorCode::InvalidProfileState,
                         "session is not active",
