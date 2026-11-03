@@ -464,12 +464,24 @@ mod tests {
         fn wait_proofs(&self, prefix: &str) -> Vec<(String, String, serde_json::Value)> {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
             loop {
-                let proofs: Vec<_> = self.proofs.lock().unwrap().iter()
-                    .filter(|(path, _, _)| path.starts_with(prefix)).cloned().collect();
-                if ["page", "frame", "worker"].iter().all(|kind| proofs.iter().any(|(_, _, value)| value["kind"] == *kind)) {
+                let proofs: Vec<_> = self
+                    .proofs
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .filter(|(path, _, _)| path.starts_with(prefix))
+                    .cloned()
+                    .collect();
+                if ["page", "frame", "cross_frame", "worker", "shared_worker", "service_worker"]
+                    .iter()
+                    .all(|kind| proofs.iter().any(|(_, _, value)| value["kind"] == *kind))
+                {
                     return proofs;
                 }
-                assert!(std::time::Instant::now() < deadline, "missing first-script evidence for {prefix}");
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "missing first-script evidence for {prefix}"
+                );
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
@@ -478,6 +490,7 @@ mod tests {
             use std::io::{Read, Write};
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
+            let cross_origin = format!("http://localhost:{}", listener.local_addr().unwrap().port());
             listener.set_nonblocking(true).unwrap();
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let proofs = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -524,9 +537,13 @@ mod tests {
                         continue;
                     };
                     let path = headers.split_whitespace().nth(1).unwrap_or("/").to_owned();
-                    let capture = "({kind:typeof document==='undefined'?'worker':window===top?'page':'frame',userAgent:navigator.userAgent,platform:navigator.platform,languages:Array.from(navigator.languages),hardwareConcurrency:navigator.hardwareConcurrency,deviceMemory:navigator.deviceMemory,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,hints:navigator.userAgentData?.toJSON()})";
-                    let script = format!("const first={capture};fetch('./proof',{{method:'POST',body:JSON.stringify(first)}});");
-                    let (content, kind) = if path.ends_with("worker.js") {
+                    let capture = "({kind:typeof document==='undefined'?(typeof ServiceWorkerGlobalScope!=='undefined'&&self instanceof ServiceWorkerGlobalScope?'service_worker':typeof SharedWorkerGlobalScope!=='undefined'&&self instanceof SharedWorkerGlobalScope?'shared_worker':'worker'):window===top?'page':location.hostname==='localhost'?'cross_frame':'frame',userAgent:navigator.userAgent,platform:navigator.platform,languages:Array.from(navigator.languages),hardwareConcurrency:navigator.hardwareConcurrency,deviceMemory:navigator.deviceMemory,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,hints:navigator.userAgentData?.toJSON()})";
+                    let script = format!("const first={capture};const proof=fetch('./proof',{{method:'POST',body:JSON.stringify(first)}});");
+                    let (content, kind) = if path.ends_with("shared.js") {
+                        (format!("{script}onconnect=event=>event.ports[0].start();"), "text/javascript")
+                    } else if path.ends_with("service.js") {
+                        (format!("{script}addEventListener('install',event=>event.waitUntil(proof));"), "text/javascript")
+                    } else if path.ends_with("worker.js") {
                         (
                             format!("{script}setInterval(()=>{{}},1000);"),
                             "text/javascript",
@@ -538,14 +555,14 @@ mod tests {
                         ("ok".to_owned(), "text/plain")
                     } else {
                         let worker = if path.ends_with("page") {
-                            "globalThis.worker=new Worker('./worker.js');"
+                            "globalThis.worker=new Worker('./worker.js');globalThis.shared=new SharedWorker('./shared.js');shared.port.start();navigator.serviceWorker.register('./service.js');"
                         } else {
                             ""
                         };
                         let frame = if path.ends_with("page") {
-                            "<iframe src='./frame'></iframe>"
+                            format!("<iframe src='./frame'></iframe><iframe src='{cross_origin}{}frame'></iframe>", path.trim_end_matches("page"))
                         } else {
-                            ""
+                            String::new()
                         };
                         (format!("<!doctype html><meta charset='utf-8'><script>{script}{worker}</script>{frame}"), "text/html")
                     };
@@ -803,26 +820,53 @@ mod tests {
         );
         let fixture = ControlFixture::start();
         let header = |headers: &str, key: &str| -> Option<String> {
-            headers.lines().find_map(|line| line.split_once(':')
-                .filter(|(name, _)| name.eq_ignore_ascii_case(key)).map(|(_, value)| value.trim().to_owned()))
+            headers.lines().find_map(|line| {
+                line.split_once(':')
+                    .filter(|(name, _)| name.eq_ignore_ascii_case(key))
+                    .map(|(_, value)| value.trim().to_owned())
+            })
         };
         // Header presence is compared against an unmodified instance of the
         // same signed build; missing native Worker hints are not invented.
         let mut native = draft("Edge native header baseline");
-        native.browser = BrowserSelectorDto::Pinned { build_id: (&build.id).into() };
+        native.browser = BrowserSelectorDto::Pinned {
+            build_id: (&build.id).into(),
+        };
         native.startup_urls = vec![format!("{}/native/page", fixture.url)];
-        let native = state.profiles.create(ProfileCreateRequest { profile: native }).unwrap();
-        let native_session = match state.sessions.launch(SessionLaunchRequest { profile_id: native.id }).unwrap() {
+        let native = state
+            .profiles
+            .create(ProfileCreateRequest { profile: native })
+            .unwrap();
+        let native_session = match state
+            .sessions
+            .launch(SessionLaunchRequest {
+                profile_id: native.id,
+            })
+            .unwrap()
+        {
             SessionLaunchOutcome::Started { session, .. } => session,
             _ => panic!("native baseline unexpectedly queued"),
         };
         let baseline = fixture.wait_proofs("/native/");
-        let native_hints: std::collections::BTreeMap<_, _> = baseline.iter().map(|(_, headers, first)|
-            (first["kind"].as_str().unwrap().to_owned(), header(headers, "sec-ch-ua-platform"))).collect();
+        let native_hints: std::collections::BTreeMap<_, _> = baseline
+            .iter()
+            .map(|(_, headers, first)| {
+                (
+                    first["kind"].as_str().unwrap().to_owned(),
+                    header(headers, "sec-ch-ua-platform"),
+                )
+            })
+            .collect();
         println!("native Client Hints header availability: {native_hints:?}");
-        state.sessions.stop(SessionStopRequest { session_id: native_session.id }).unwrap();
+        state
+            .sessions
+            .stop(SessionStopRequest {
+                session_id: native_session.id,
+            })
+            .unwrap();
         let mut started = Vec::new();
         let mut evidence = Vec::new();
+        let mut invalid_policy = None;
         for (index, name) in ["Edge acceptance A", "Edge acceptance B"]
             .into_iter()
             .enumerate()
@@ -866,6 +910,7 @@ mod tests {
                 .to_owned(),
             );
             profile.startup_urls = vec![format!("{}/{index}/page", fixture.url)];
+            if index == 0 { invalid_policy = Some(profile.clone()); }
             let profile = state
                 .profiles
                 .create(ProfileCreateRequest { profile })
@@ -895,6 +940,9 @@ mod tests {
                 observed.targets.iter().any(|t| t.kind == "worker"),
                 "worker must be observed"
             );
+            for kind in ["shared_worker", "service_worker", "iframe"] {
+                assert!(observed.targets.iter().any(|target| target.kind == kind), "{kind} must be observed");
+            }
             let cpu = if index == 0 { 3 } else { 6 };
             let timezone = if index == 0 {
                 "Asia/Tokyo"
@@ -914,18 +962,47 @@ mod tests {
                 assert_eq!(first["hardwareConcurrency"], cpu);
                 assert_eq!(first["deviceMemory"], if index == 0 { 0.5 } else { 2.0 });
                 assert_eq!(first["timezone"], timezone);
-                let allowed_headers: Vec<_> = headers.lines().filter(|line| {
-                    let lower = line.to_ascii_lowercase();
-                    ["user-agent:", "accept-language:", "sec-ch-ua"].iter().any(|key| lower.starts_with(key))
-                }).collect();
-                println!("session {index} {} allowed headers: {allowed_headers:?}", first["kind"]);
+                let allowed_headers: Vec<_> = headers
+                    .lines()
+                    .filter(|line| {
+                        let lower = line.to_ascii_lowercase();
+                        ["user-agent:", "accept-language:", "sec-ch-ua"]
+                            .iter()
+                            .any(|key| lower.starts_with(key))
+                    })
+                    .collect();
+                println!(
+                    "session {index} {} allowed headers: {allowed_headers:?}",
+                    first["kind"]
+                );
                 let hints = header(&headers, "sec-ch-ua-platform");
-                let native_has_hints = native_hints.get(first["kind"].as_str().unwrap()).unwrap().is_some();
+                let native_has_hints = native_hints
+                    .get(first["kind"].as_str().unwrap())
+                    .unwrap()
+                    .is_some();
                 if hints.is_some() || native_has_hints {
-                    assert_eq!(hints.as_deref(), Some("\"Windows\""), "{} Client Hints", first["kind"]);
+                    assert_eq!(
+                        hints.as_deref(),
+                        Some("\"Windows\""),
+                        "{} Client Hints",
+                        first["kind"]
+                    );
                 }
-                assert_eq!(header(&headers, "user-agent").as_deref(), first["userAgent"].as_str());
-                assert_eq!(header(&headers, "accept-language").unwrap().split(',').next().unwrap().split(';').next().unwrap(), first["languages"][0].as_str().unwrap());
+                assert_eq!(
+                    header(&headers, "user-agent").as_deref(),
+                    first["userAgent"].as_str()
+                );
+                assert_eq!(
+                    header(&headers, "accept-language")
+                        .unwrap()
+                        .split(',')
+                        .next()
+                        .unwrap()
+                        .split(';')
+                        .next()
+                        .unwrap(),
+                    first["languages"][0].as_str().unwrap()
+                );
                 evidence.push(serde_json::json!({"profile": index, "first": first, "allowedHeaders": allowed_headers,
                     "clientHintsHeaderStatus": if hints.is_some() { "pass" } else { "not_checked" }}));
             }
@@ -937,9 +1014,20 @@ mod tests {
                 .unwrap();
             assert_eq!(stopped.state, SessionStateDto::Stopped);
         }
+        let mut invalid = invalid_policy.unwrap();
+        invalid.name = "Edge invalid timezone rejection".to_owned();
+        invalid.locale.timezone = Some("Asia/Not_A_Timezone".to_owned());
+        invalid.startup_urls.clear();
+        let invalid = state.profiles.create(ProfileCreateRequest { profile: invalid }).unwrap();
+        assert!(state.sessions.launch(SessionLaunchRequest { profile_id: invalid.id.clone() }).is_err(), "invalid native timezone must fail closed");
+        let failed = state.sessions.list().unwrap().into_iter().find(|session| session.profile_id == invalid.id).unwrap();
+        assert_eq!(failed.state, SessionStateDto::Failed);
+        let failed_id: brows_domain::SessionId = failed.id.try_into().unwrap();
+        assert!(!state.browsers.is_running(&failed_id).unwrap());
         let report = serde_json::json!({"scope":"signed Edge production sessions; native header baseline", "assertionsPassed":true, "complete":false,
-            "observations":evidence,"uncovered":["cross-origin iframe", "Shared/Service Worker", "public DNS/ICE", "fonts/GPU/network stack"]});
-        let output = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fingerprint-session-acceptance.json");
+            "observations":evidence,"uncovered":["public DNS/ICE", "fonts/GPU/network stack", "Worker Canvas/Audio"]});
+        let output = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/fingerprint-session-acceptance.json");
         std::fs::write(output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }
 
