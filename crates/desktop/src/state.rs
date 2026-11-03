@@ -500,16 +500,21 @@ mod tests {
             use std::io::{Read, Write};
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
             let url = format!("http://{}", listener.local_addr().unwrap());
+            let listener_v6 = std::net::TcpListener::bind(("::1", listener.local_addr().unwrap().port())).unwrap();
             let cross_origin =
                 format!("http://localhost:{}", listener.local_addr().unwrap().port());
             listener.set_nonblocking(true).unwrap();
+            listener_v6.set_nonblocking(true).unwrap();
             let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let proofs = Arc::new(std::sync::Mutex::new(Vec::new()));
             let halt = stop.clone();
             let output = proofs.clone();
             let thread = std::thread::spawn(move || {
                 while !halt.load(std::sync::atomic::Ordering::Acquire) {
-                    let (mut stream, _) = match listener.accept() {
+                    let accepted = listener.accept().or_else(|error| {
+                        if error.kind() == std::io::ErrorKind::WouldBlock { listener_v6.accept() } else { Err(error) }
+                    });
+                    let (mut stream, _) = match accepted {
                         Ok(value) => value,
                         Err(_) => {
                             std::thread::sleep(std::time::Duration::from_millis(10));
@@ -565,7 +570,10 @@ mod tests {
                         )
                     } else if path.ends_with("proof") {
                         if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) {
-                            println!("local first-script sample: {} CPU {} timezone {}", value["kind"], value["hardwareConcurrency"], value["timezone"]);
+                            println!(
+                                "local first-script sample: {} CPU {} timezone {}",
+                                value["kind"], value["hardwareConcurrency"], value["timezone"]
+                            );
                             output.lock().unwrap().push((path.clone(), headers, value));
                         }
                         ("ok".to_owned(), "text/plain")
@@ -1001,6 +1009,8 @@ mod tests {
             } else {
                 "America/New_York"
             };
+            let page_signals = matching.iter().find(|(_, _, first)| first["kind"] == "page").unwrap().2.clone();
+            assert!(!page_signals["hints"].is_null());
             for target in observed.targets {
                 assert_eq!(target.hardware_concurrency, cpu, "{} CPU", target.kind);
                 assert_eq!(target.timezone, timezone, "{} timezone", target.kind);
@@ -1011,6 +1021,10 @@ mod tests {
                 );
             }
             for (_, headers, first) in matching {
+                assert_eq!(first["userAgent"], page_signals["userAgent"]);
+                assert_eq!(first["hints"], page_signals["hints"]);
+                assert_eq!(first["platform"], "Win32");
+                assert_eq!(first["languages"], if index == 0 { serde_json::json!(["ja-JP", "ja"]) } else { serde_json::json!(["en-US", "en"]) });
                 assert_eq!(first["hardwareConcurrency"], cpu);
                 assert_eq!(first["deviceMemory"], if index == 0 { 0.5 } else { 2.0 });
                 assert_eq!(first["timezone"], timezone);

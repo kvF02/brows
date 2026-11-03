@@ -649,8 +649,11 @@ fn auto_attach(root: bool) -> Value {
     // Browser owns pages and origin-wide workers. Recursive sessions own only
     // their frame/dedicated-worker children, preventing duplicate controllers
     // from racing to pause and resume the same Service Worker.
-    let filter = if root { json!([{"type":"page"},{"type":"shared_worker"},{"type":"service_worker"}]) }
-        else { json!([{"type":"iframe"},{"type":"worker"}]) };
+    let filter = if root {
+        json!([{"type":"page"},{"type":"shared_worker"},{"type":"service_worker"}])
+    } else {
+        json!([{"type":"iframe"},{"type":"worker"}])
+    };
     json!({"autoAttach":true,"waitForDebuggerOnStart":true,"flatten":true,"filter":filter})
 }
 fn configure(
