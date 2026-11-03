@@ -6,6 +6,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: windows-acceptance-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   windows:
     runs-on: windows-latest
@@ -18,6 +21,7 @@ jobs:
           cache: npm
           cache-dependency-path: ui/package-lock.json
       - name: Unit and adapter tests
+        timeout-minutes: 3
         run: npm test
       - name: UI type check and build
         run: |
@@ -59,6 +63,7 @@ jobs:
           cargo +1.97.1 clippy --workspace --all-targets --locked -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Production registration and capability probe
+        timeout-minutes: 3
         run: cargo +1.97.1 test -p brows-desktop signed_runtime_acceptance -- --ignored --nocapture
       - uses: actions/cache/save@v4
         if: always()

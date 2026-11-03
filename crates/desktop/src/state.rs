@@ -29,6 +29,7 @@ use brows_domain::{
     SecretRef, SessionId, DEFAULT_MAX_CONCURRENT_SESSIONS,
 };
 use std::{
+    io::Read,
     path::PathBuf,
     sync::Arc,
     time::{SystemTime, UNIX_EPOCH},
@@ -108,12 +109,15 @@ impl AppState {
         )?);
         let probe_settings = data_root.join("network-probe.json");
         if probe_settings.is_file() {
-            let bytes = std::fs::read(&probe_settings).map_err(|_| {
-                PortError::new(
-                    PortErrorKind::InvalidData,
-                    "cannot read network probe settings",
-                )
-            })?;
+            let mut bytes = Vec::new();
+            std::fs::File::open(&probe_settings)
+                .and_then(|file| file.take(4097).read_to_end(&mut bytes))
+                .map_err(|_| {
+                    PortError::new(
+                        PortErrorKind::InvalidData,
+                        "cannot read network probe settings",
+                    )
+                })?;
             if bytes.len() > 4096 {
                 return Err(PortError::new(
                     PortErrorKind::InvalidData,
