@@ -851,6 +851,7 @@ mod tests {
         let fp =
             brows_application::persona_fingerprint::PersonaFingerprint::derive(&persona, &version)
                 .unwrap();
+        let expected_webgl = json!({"vendor":fp.webgl_vendor,"renderer":fp.webgl_renderer});
         let policy = SessionFingerprintConfig {
             user_agent: fp.user_agent,
             persona,
@@ -886,6 +887,9 @@ mod tests {
             .unwrap()
             .2
             .clone();
+        if !first["webgl"].is_null() {
+            assert_eq!(first["webgl"], expected_webgl);
+        }
         let page = controller
             .targets
             .0
@@ -942,6 +946,7 @@ mod tests {
             updated.len() >= 3,
             "updated Worker must run its first script"
         );
+        assert_eq!(updated.last().unwrap().2["fixtureVersion"], 1);
         for (_, _, value) in updated {
             assert_eq!(value["hardwareConcurrency"], 3);
             assert_eq!(value["timezone"], "Asia/Tokyo");

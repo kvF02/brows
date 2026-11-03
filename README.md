@@ -14,8 +14,8 @@ applies UA metadata, hardware declarations, languages and native timezone policy
 before attached page/Worker scripts resume. Both use the same rendering hook,
 including Worker OffscreenCanvas reads/exports and WebGL vendor/renderer reads.
 Diagnostics can read fixed device fields from an active session. Fonts, actual
-GPU rendering, live audio, unavailable Worker audio APIs and the network stack
-remain host/runtime signals. Extension loading must be verified for each runtime, especially
+GPU rendering, live audio and the network stack remain host/runtime signals.
+Missing Worker APIs remain absent. Extension loading must be verified for each runtime, especially
 official Google Chrome 137+ with `--load-extension` restrictions. Settings offers
 an isolated local capability probe, and SeedableNoise launch is blocked unless
 it passes. An earlier system Chrome 154 did not load the extension in the

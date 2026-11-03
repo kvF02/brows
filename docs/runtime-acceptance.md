@@ -84,7 +84,7 @@ Rust workspace 测试和 clippy，并验证 Edge 签名、生产登记/能力探
 Canvas 与页面是否一致，并在基线支持 WebGL 时要求该上下文仍支持且声明一致。
 JSON 报告作为 Actions artifact 保存；Rust 工具链与仓库的 1.97.1 保持一致。
 
-[生产会话验收记录](https://github.com/kvF02/brows/actions/runs/41650595409) 已通过。
+[生产会话及 Worker 生命周期验收记录](https://github.com/kvF02/brows/actions/runs/41665123143) 已通过。
 样本包括页面、同源 iframe、跨源 OOPIF、Dedicated/Shared/Service Worker 的首段脚本。
 两组会话分别使用 CPU 3 / Memory 0.5GB / Asia/Tokyo 与 CPU 6 / Memory 2GB /
 US/Eastern，核对 UA、低熵 UA-CH、完整语言列表、平台、硬件字段、原生 Intl 时区，

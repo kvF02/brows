@@ -115,8 +115,9 @@ P0：已安装签名 Edge 的发现、准入、能力探针与生产会话验收
 安全更新与签名目录仍是后续工作；本机 Chrome 的既有负向探针结果继续保留。
 
 P1：session 内固定字段观测和私有 Client Hints 策略已实现，并已实测页面、同源 frame、
-跨源 OOPIF、Dedicated/Shared/Service Worker 的首段脚本。继续扩展更多站点、模块
-Worker、更新/崩溃重启和其他 API；缺失请求头保留未检查。
+跨源 OOPIF、Dedicated/Shared/Service Worker 的首段脚本。六种上下文的 Canvas 读取
+一致性，以及 Service Worker 停止、消息唤醒和版本更新已纳入原生验收。
+继续扩展更多站点、模块 Worker、强制进程崩溃与并发重载和其他 API；缺失请求头保留未检查。
 
 P2：原生时区、Worker 核对、别名规范化及 Intl/Date 冬夏偏移验收已通过。
 公网 DNS/ICE 服务代码与配置入口已加入，部署和公网浏览器实测仍是独立门槛。

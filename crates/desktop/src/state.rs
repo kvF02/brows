@@ -1021,7 +1021,7 @@ mod tests {
         let failed_id: brows_domain::SessionId = failed.id.try_into().unwrap();
         assert!(!state.browsers.is_running(&failed_id).unwrap());
         let report = serde_json::json!({"scope":"signed Edge production sessions; native header baseline", "assertionsPassed":true, "complete":false,
-            "observations":evidence,"uncovered":["public DNS/ICE", "fonts/GPU/network stack", "Worker Canvas/Audio"]});
+            "observations":evidence,"uncovered":["public DNS/ICE", "fonts/GPU/network stack", "uncovered rendering APIs and live Audio"]});
         let output = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../target/fingerprint-session-acceptance.json");
         std::fs::write(output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
