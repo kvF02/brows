@@ -11,7 +11,7 @@ const MAX_TARGETS:usize=128;
 #[derive(Debug)]
 struct Wire {
  process:Arc<win_pipe::Process>, next:AtomicU64, closing:AtomicBool,
- version:Mutex<String>, writer:mpsc::SyncSender<Vec<u8>>,
+ version:Mutex<String>, policy_failure:Mutex<Option<String>>, writer:mpsc::SyncSender<Vec<u8>>,
  pending:Mutex<BTreeMap<u64,mpsc::Sender<Value>>>,
 }
 impl Wire {
@@ -29,7 +29,7 @@ impl Wire {
   let result=receive.recv_timeout(TIMEOUT);
   if let Ok(mut p)=self.pending.lock() { p.remove(&id); }
   let value=result.map_err(|_| { self.fail(); internal("session control response timeout") })?;
-  if value.get("error").is_some() { return Err(internal(format!("browser cannot apply {method}"))); }
+  if let Some(error)=value.get("error") { return Err(internal(format!("browser cannot apply {method} (code {})",error["code"].as_i64().unwrap_or(0)))); }
   Ok(value["result"].clone())
  }
 }
@@ -44,7 +44,7 @@ impl Controller {
   let (process,mut output,mut input)=win_pipe::spawn(executable,args).map_err(|_| internal("cannot start private session control"))?;
   let (writer,write_receive)=mpsc::sync_channel::<Vec<u8>>(8);
   let (events,event_receive)=mpsc::sync_channel::<Value>(128);
-  let wire=Arc::new(Wire { process:Arc::new(process), next:AtomicU64::new(1), closing:AtomicBool::new(false), version:Mutex::new(String::new()), writer, pending:Mutex::new(BTreeMap::new()) });
+  let wire=Arc::new(Wire { process:Arc::new(process), next:AtomicU64::new(1), closing:AtomicBool::new(false), version:Mutex::new(String::new()), policy_failure:Mutex::new(None), writer, pending:Mutex::new(BTreeMap::new()) });
   let targets=Arc::new((Mutex::new(Targets::default()),Condvar::new()));
   let w=wire.clone(); let write_thread=thread::spawn(move || {
    while !w.closing.load(Ordering::Acquire) { match write_receive.recv_timeout(Duration::from_millis(200)) {
@@ -80,7 +80,7 @@ impl Controller {
         if w.call("Runtime.runIfWaitingForDebugger",json!({}),Some(session)).is_err() { w.fail();break; }
         continue;
     }
-    if configure(&w,session,kind,&policy).is_err() { w.fail(); t.1.notify_all(); break; }
+    if let Err(error)=configure(&w,session,kind,&policy) { if let Ok(mut reason)=w.policy_failure.lock() { *reason=Some(format!("{kind} policy failed: {}",error.message)); } w.fail(); t.1.notify_all(); break; }
     { let Ok(mut state)=t.0.lock() else { w.fail();break; };
       if state.configured.len()>=MAX_TARGETS { w.fail();break; }
       state.configured.insert(id.to_owned(),Target{session:session.to_owned(),kind:kind.to_owned()}); }
@@ -105,7 +105,7 @@ impl Controller {
   let deadline=Instant::now()+TIMEOUT; let mut targets=self.targets.0.lock().map_err(|_| internal("target lock poisoned"))?;
   loop {
    if let Some(target)=targets.configured.get(id) { return Ok(target.clone()); }
-   if self.wire.closing.load(Ordering::Acquire) || Instant::now()>=deadline { return Err(internal("browser target policy failed before navigation")); }
+   if self.wire.closing.load(Ordering::Acquire) || Instant::now()>=deadline { return Err(internal(self.wire.policy_failure.lock().ok().and_then(|v|v.clone()).unwrap_or_else(|| "browser target policy failed before navigation".to_owned()))); }
    targets=self.targets.1.wait_timeout(targets,Duration::from_millis(100)).map_err(|_| internal("target lock poisoned"))?.0;
   }
  }

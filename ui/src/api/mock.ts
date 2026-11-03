@@ -209,6 +209,7 @@ export class MockApiClient implements ApiClient {
       throw new ApiError("INVALID_PROFILE_STATE", "运行中的环境不能修改配置");
     }
     Object.assign(profile, changes, { revision: profile.revision + 1 });
+    if (profile.persona?.kind === "system_native") profile.timezone = undefined;
     return { ...profile, tags: [...profile.tags] };
   }
 

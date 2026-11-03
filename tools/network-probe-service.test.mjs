@@ -12,6 +12,7 @@ test('CIDR rules and no-observation cases do not manufacture passing evidence',(
  assert.equal(leak.dns,'fail');assert.equal(leak.webRtc,'fail');assert.equal(leak.httpEgress,'pass');
  const expected=assessNetwork({dns:new Set(['192.0.2.1']),stun:new Set(['203.0.113.1']),http:new Set()},config);
  assert.equal(expected.webRtc,'not_checked','STUN success also needs browser candidate correlation');
+ assert.equal(assessNetwork({dns:new Set(['192.0.2.1']),dnsOverflow:true,stun:new Set(),http:new Set()},config).dns,'not_checked','bounded samples cannot conceal unobserved addresses');
 });
 test('STUN response preserves transaction and correctly encodes XOR-MAPPED-ADDRESS',()=>{
  const request=Buffer.alloc(20);request.writeUInt16BE(1);request.writeUInt32BE(0x2112a442,4);request.fill(7,8);

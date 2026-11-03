@@ -22,3 +22,18 @@ test('queued and stopped sessions cannot be observed',async()=>{
 test('browser mock refuses to claim real session measurements',async()=>{
  await assert.rejects(new MockApiClient().observeSession('profile-demo-1'),e=>e.code==='CAPABILITY_UNSUPPORTED');
 });
+test('network diagnostics use operator configuration and a minimal acknowledged session request',async()=>{
+ const service={origin:'https://probe.example',zone:'probe.example',stunMin:40000,stunMax:40127};
+ const report={dns:'not_checked',webRtc:'fail',httpEgress:'pass'};
+ const api=new TauriApiClient({invoke:async(handler,args)=>{
+  if(handler==='network_probe_service')return service;
+  if(handler==='session_list')return [{id:'s',profileId:'p',state:'running',createdAtMs:1}];
+  assert.equal(handler,'session_probe_network');
+  assert.deepEqual(JSON.parse(JSON.stringify(args)),{request:{sessionId:'s',acknowledgeExternal:true}});
+  return report;
+ }});
+ assert.equal(await api.getNetworkProbeService(),service);
+ assert.equal(await api.probeSessionNetwork('p'),report);
+ const mock=new MockApiClient();assert.equal(await mock.getNetworkProbeService(),undefined);
+ await assert.rejects(mock.probeSessionNetwork('profile-demo-1'),e=>e.code==='CAPABILITY_UNSUPPORTED');
+});

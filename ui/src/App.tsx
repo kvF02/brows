@@ -1580,10 +1580,11 @@ function DiagnosticsView({ api, profiles, reports, onRefresh, onError, onNotice 
   const [confirmNetwork, setConfirmNetwork] = useState(false);
   useEffect(() => { let disposed = false; void api.getNetworkProbeService().then(value => { if (!disposed) setNetworkService(value); }).catch(() => {}); return () => { disposed = true; }; }, [api]);
   const probeNetwork = async () => {
+    const request = ++observationRequest.current;
     setRunning(true); setNetworkResult(undefined);
-    try { setNetworkResult(await api.probeSessionNetwork(selectedId)); setConfirmNetwork(false); }
-    catch (cause) { onError(getErrorMessage(cause)); }
-    finally { setRunning(false); }
+    try { const result = await api.probeSessionNetwork(selectedId); if (request === observationRequest.current) { setNetworkResult(result); setConfirmNetwork(false); } }
+    catch (cause) { if (request === observationRequest.current) onError(getErrorMessage(cause)); }
+    finally { if (request === observationRequest.current) setRunning(false); }
   };
   const [observation, setObservation] = useState<SessionObservation>();
   const observationRequest = useRef(0);

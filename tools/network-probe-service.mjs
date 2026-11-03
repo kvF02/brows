@@ -63,12 +63,13 @@ function apexReply(packet,q,zone,address){
  if(q.name===zone||q.name==='ns.'+zone)return dnsReply(packet,q,address,true);
  return null;
 }
-function status(addresses,cidrs){return addresses.length&&cidrs.length?(addresses.every(a=>allowed(a,cidrs))?'pass':'fail'):'not_checked';}
+function status(addresses,cidrs,overflow){if(!addresses.length||!cidrs.length)return 'not_checked';if(!addresses.every(a=>allowed(a,cidrs)))return 'fail';return overflow?'not_checked':'pass';}
+function record(entry,key,address){if(entry[key].has(address))return;if(entry[key].size<16)entry[key].add(address);else entry[key+'Overflow']=true;}
 export function assessNetwork(entry,config,srflx=[]) {
  const dns=[...entry.dns],stun=[...entry.stun],http=[...entry.http];
- let rtc=status(stun,config.egressCidrs);
+ let rtc=status(stun,config.egressCidrs,entry.stunOverflow);
  if(rtc==='pass'&&!stun.some(ip=>srflx.some(candidate=>ipv4(ip)===ipv4(candidate))))rtc='not_checked';
- return {dns:status(dns,config.dnsCidrs),webRtc:rtc,httpEgress:status(http,config.egressCidrs),
+ return {dns:status(dns,config.dnsCidrs,entry.dnsOverflow),webRtc:rtc,httpEgress:status(http,config.egressCidrs,entry.httpOverflow),
   observed:{dnsResolvers:dns,stunSources:stun,httpSources:http},scope:'IPv4 challenge correlation only; no-packet observations are not proof of no leakage'};
 }
 const bind=(socket,port,host)=>new Promise((yes,no)=>{socket.once('error',no);socket.bind(port,host,()=>{socket.off('error',no);yes();});});
@@ -84,7 +85,7 @@ export async function startProbeService(config) {
  dns.on('message',(packet,peer)=>{const q=dnsQuestion(packet);if(!q)return;
   const apex=apexReply(packet,q,zone,config.publicIPv4);if(apex){dns.send(apex,peer.port,peer.address);return;}
   const entry=q.name.endsWith(`.${zone}`)?challenges.get(q.name.slice(0,-zone.length-1)):undefined;
-  if(entry&&entry.dns.size<16)entry.dns.add(peer.address);
+  if(entry)record(entry,'dns',peer.address);
   dns.send(dnsReply(packet,q,config.publicIPv4,Boolean(entry)),peer.port,peer.address);
  });
  dns.on('error',()=>{});
@@ -103,13 +104,13 @@ export async function startProbeService(config) {
     if(!bound){await closeSocket(socket);finish(503,{error:'no probe port'});return;}
     if(closed){await closeSocket(socket);finish(503,{error:'closed'});return;}
     const entry={socket,dns:new Set(),stun:new Set(),http:new Set(),until:Date.now()+ttl};challenges.set(token,entry);
-    socket.on('message',(packet,peer)=>{const response=stunReply(packet,peer.address,peer.port);if(response){if(entry.stun.size<16)entry.stun.add(peer.address);socket.send(response,peer.port,peer.address);}});
+    socket.on('message',(packet,peer)=>{const response=stunReply(packet,peer.address,peer.port);if(response){record(entry,'stun',peer.address);socket.send(response,peer.port,peer.address);}});
     finish(200,{token,hostname:`${token}.${zone}`,stunPort:socket.address().port});return;
     } finally {pending--;}
    }
    const ping=req.url==='/v1/ping'&&(req.headers.host??'').split(':')[0].endsWith(`.${zone}`);
    if(ping){const token=req.headers.host.split('.')[0];const entry=challenges.get(token);if(!entry){finish(404,{error:'expired'});return;}
-    if(entry.http.size<16)entry.http.add(req.socket.remoteAddress);finish(200,{ok:true});return;}
+    record(entry,'http',req.socket.remoteAddress);finish(200,{ok:true});return;}
    const token=req.url?.match(/^\/v1\/result\/([0-9a-f]{32})$/)?.[1];const entry=challenges.get(token);
    if(req.method==='POST'&&entry){let size=0;const chunks=[];for await(const chunk of req){size+=chunk.length;if(size>4096){finish(413,{error:'too large'});return;}chunks.push(chunk);}
     const body=JSON.parse(Buffer.concat(chunks).toString()||'{}');const srflx=Array.isArray(body.srflx)?body.srflx.filter(v=>typeof v==='string'&&ipv4(v)!==null).slice(0,32):[];
