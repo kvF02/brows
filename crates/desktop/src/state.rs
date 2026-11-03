@@ -870,7 +870,13 @@ mod tests {
             _ => panic!("native baseline unexpectedly queued"),
         };
         let baseline = fixture.wait_proofs("/native/");
-        println!("native contexts: {:?}", baseline.iter().map(|(_, _, value)| &value["kind"]).collect::<Vec<_>>());
+        println!(
+            "native contexts: {:?}",
+            baseline
+                .iter()
+                .map(|(_, _, value)| &value["kind"])
+                .collect::<Vec<_>>()
+        );
         assert_eq!(
             baseline
                 .iter()

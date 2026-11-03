@@ -1,7 +1,9 @@
 //! Session-scoped control and observation over private inherited pipes.
 //! No generic command/evaluate surface is exposed through application ports.
 use super::{internal, invalid_data, now_ms, win_pipe};
-use brows_application::{PortError, PortErrorKind, PortResult, SessionObservation, TargetObservation};
+use brows_application::{
+    PortError, PortErrorKind, PortResult, SessionObservation, TargetObservation,
+};
 use brows_domain::{PlatformKind, SessionFingerprintConfig, SessionId};
 use serde_json::{json, Value};
 use std::{
@@ -29,7 +31,11 @@ struct Wire {
     policy_failure: Mutex<Option<String>>,
     writer: mpsc::SyncSender<Vec<u8>>,
     pending: Mutex<BTreeMap<u64, mpsc::Sender<Value>>>,
+    paused: Mutex<BTreeSet<String>>,
+    pause_ready: Condvar,
 }
+#[derive(Debug)]
+struct PendingReply { id: u64, method: String, receive: mpsc::Receiver<Value> }
 impl Wire {
     fn fail(&self) {
         self.closing.store(true, Ordering::Release);
@@ -38,7 +44,7 @@ impl Wire {
             p.clear();
         }
     }
-    fn call(&self, method: &str, params: Value, session: Option<&str>) -> PortResult<Value> {
+    fn begin(&self, method: &str, params: Value, session: Option<&str>) -> PortResult<PendingReply> {
         if self.closing.load(Ordering::Acquire) {
             return Err(internal(
                 self.policy_failure
@@ -74,6 +80,10 @@ impl Wire {
             self.fail();
             return Err(internal("session control writer unavailable"));
         }
+        Ok(PendingReply { id, method: method.to_owned(), receive })
+    }
+    fn finish(&self, reply: PendingReply) -> PortResult<Value> {
+        let PendingReply { id, method, receive } = reply;
         let result = receive.recv_timeout(TIMEOUT);
         if let Ok(mut p) = self.pending.lock() {
             p.remove(&id);
@@ -83,7 +93,15 @@ impl Wire {
             internal(format!("session control response timeout: {method}"))
         })?;
         if let Some(error) = value.get("error") {
-            if error["code"] == -32001 || matches!(error["message"].as_str(), Some("Session with given id not found." | "No target with given id found")) {
+            if method == "Emulation.setTimezoneOverride" && error["message"].as_str().is_some_and(|message| message.trim_end_matches('.') == "Timezone override is already in effect") {
+                return Err(PortError::new(PortErrorKind::AlreadyExists, "native timezone override is already active"));
+            }
+            if error["code"] == -32001
+                || matches!(
+                    error["message"].as_str(),
+                    Some("Session with given id not found." | "No target with given id found")
+                )
+            {
                 return Err(PortError::not_found("browser target"));
             }
             return Err(internal(format!(
@@ -92,6 +110,29 @@ impl Wire {
             )));
         }
         Ok(value["result"].clone())
+    }
+    fn call(&self, method: &str, params: Value, session: Option<&str>) -> PortResult<Value> {
+        self.finish(self.begin(method, params, session)?)
+    }
+    fn pause_service_worker(&self, session: &str) -> PortResult<()> {
+        self.paused.lock().map_err(|_| internal("pause lock poisoned"))?.remove(session);
+        // Startup must be released so the Service Worker agent can initialize.
+        // Queue a V8 pause first; its first statement stays blocked until policy
+        // installation has completed. No call-frame data is retained.
+        let enabled = self.begin("Debugger.enable", json!({}), Some(session))?;
+        let stopped = self.begin("Debugger.pause", json!({}), Some(session))?;
+        self.call("Runtime.runIfWaitingForDebugger", json!({}), Some(session))?;
+        self.finish(enabled)?;
+        self.finish(stopped)?;
+        let deadline = Instant::now() + TIMEOUT;
+        let mut paused = self.paused.lock().map_err(|_| internal("pause lock poisoned"))?;
+        while !paused.contains(session) {
+            if self.closing.load(Ordering::Acquire) || Instant::now() >= deadline {
+                self.fail(); return Err(internal("Service Worker did not pause before its first script"));
+            }
+            paused = self.pause_ready.wait_timeout(paused, Duration::from_millis(100)).map_err(|_| internal("pause lock poisoned"))?.0;
+        }
+        Ok(())
     }
 }
 #[derive(Debug, Clone)]
@@ -105,7 +146,11 @@ struct Targets {
     attached: BTreeSet<String>,
 }
 #[derive(Debug)]
-struct TargetJob { id: String, target: Target, extension: bool }
+struct TargetJob {
+    id: String,
+    target: Target,
+    extension: bool,
+}
 #[derive(Debug)]
 pub(super) struct Controller {
     wire: Arc<Wire>,
@@ -131,6 +176,8 @@ impl Controller {
             policy_failure: Mutex::new(None),
             writer,
             pending: Mutex::new(BTreeMap::new()),
+            paused: Mutex::new(BTreeSet::new()),
+            pause_ready: Condvar::new(),
         });
         let targets = Arc::new((Mutex::new(Targets::default()), Condvar::new()));
         let w = wire.clone();
@@ -170,6 +217,14 @@ impl Controller {
                                     let _ = sender.send(value);
                                 }
                             }
+                        } else if value["method"] == "Debugger.paused" {
+                            if let Some(session) = value["sessionId"].as_str() {
+                                if let Ok(mut paused) = w.paused.lock() {
+                                    if paused.len() >= MAX_TARGETS { break 'read; }
+                                    paused.insert(session.to_owned());
+                                    w.pause_ready.notify_all();
+                                }
+                            }
                         } else if matches!(
                             value["method"].as_str(),
                             Some("Target.attachedToTarget" | "Target.detachedFromTarget")
@@ -202,7 +257,10 @@ impl Controller {
                 while !w.closing.load(Ordering::Acquire) {
                     let job = match receive.lock() {
                         Ok(receiver) => receiver.recv_timeout(Duration::from_millis(200)),
-                        Err(_) => { w.fail(); break; }
+                        Err(_) => {
+                            w.fail();
+                            break;
+                        }
                     };
                     let job = match job {
                         Ok(job) => job,
@@ -211,25 +269,48 @@ impl Controller {
                     };
                     let session = &job.target.session;
                     let result: PortResult<()> = (|| {
-                        if !job.extension { configure(&w, session, &job.target.kind, &policy)?; }
+                        if !job.extension {
+                            if job.target.kind == "service_worker" { w.pause_service_worker(session)?; }
+                            configure(&w, session, &job.target.kind, &policy)?;
+                            if job.target.kind == "service_worker" {
+                                w.call("Debugger.resume", json!({}), Some(session))?;
+                                w.call("Debugger.disable", json!({}), Some(session))?;
+                                w.paused.lock().map_err(|_| internal("pause lock poisoned"))?.remove(session);
+                            }
+                        }
                         w.call("Runtime.runIfWaitingForDebugger", json!({}), Some(session))?;
                         Ok(())
                     })();
                     if let Err(error) = result {
-                        let Ok(mut state) = t.0.lock() else { w.fail(); break; };
-                        if error.kind == PortErrorKind::NotFound || !state.attached.contains(session) {
+                        let Ok(mut state) = t.0.lock() else {
+                            w.fail();
+                            break;
+                        };
+                        if error.kind == PortErrorKind::NotFound
+                            || !state.attached.contains(session)
+                        {
                             state.attached.remove(session);
-                            state.configured.retain(|_, value| &value.session != session);
+                            state
+                                .configured
+                                .retain(|_, value| &value.session != session);
                             continue;
                         }
                         if let Ok(mut reason) = w.policy_failure.lock() {
                             if reason.is_none() && error.message != "session control is closed" {
-                                *reason = Some(format!("{} policy failed: {}", job.target.kind, error.message));
+                                *reason = Some(format!(
+                                    "{} policy failed: {}",
+                                    job.target.kind, error.message
+                                ));
                             }
                         }
-                        w.fail(); t.1.notify_all(); break;
+                        w.fail();
+                        t.1.notify_all();
+                        break;
                     }
-                    let Ok(mut state) = t.0.lock() else { w.fail(); break; };
+                    let Ok(mut state) = t.0.lock() else {
+                        w.fail();
+                        break;
+                    };
                     if !job.extension && state.attached.contains(session) {
                         state.configured.insert(job.id, job.target);
                         t.1.notify_all();
@@ -248,6 +329,7 @@ impl Controller {
                 };
                 if event["method"] == "Target.detachedFromTarget" {
                     if let Some(session) = event["params"]["sessionId"].as_str() {
+                        if let Ok(mut paused) = w.paused.lock() { paused.remove(session); }
                         if let Ok(mut state) = t.0.lock() {
                             state.attached.remove(session);
                             state.configured.retain(|_, value| value.session != session);
@@ -256,24 +338,54 @@ impl Controller {
                     continue;
                 }
                 let params = &event["params"];
-                let Some(session) = params["sessionId"].as_str() else { w.fail(); break; };
-                let Some(id) = params["targetInfo"]["targetId"].as_str() else { w.fail(); break; };
+                let Some(session) = params["sessionId"].as_str() else {
+                    w.fail();
+                    break;
+                };
+                let Some(id) = params["targetInfo"]["targetId"].as_str() else {
+                    w.fail();
+                    break;
+                };
                 {
-                    let Ok(mut state) = t.0.lock() else { w.fail(); break; };
-                    if state.attached.contains(session) { continue; }
-                    if state.attached.len() >= MAX_TARGETS { w.fail(); break; }
+                    let Ok(mut state) = t.0.lock() else {
+                        w.fail();
+                        break;
+                    };
+                    if state.attached.contains(session) {
+                        continue;
+                    }
+                    if state.attached.len() >= MAX_TARGETS {
+                        w.fail();
+                        break;
+                    }
                     state.attached.insert(session.to_owned());
                 }
                 // WebUI new tabs retain their policy when navigating to sites.
                 let job = TargetJob {
                     id: id.to_owned(),
-                    target: Target { session: session.to_owned(), kind: params["targetInfo"]["type"].as_str().unwrap_or("").to_owned() },
-                    extension: params["targetInfo"]["url"].as_str().unwrap_or("").starts_with("chrome-extension://"),
+                    target: Target {
+                        session: session.to_owned(),
+                        kind: params["targetInfo"]["type"]
+                            .as_str()
+                            .unwrap_or("")
+                            .to_owned(),
+                    },
+                    extension: params["targetInfo"]["url"]
+                        .as_str()
+                        .unwrap_or("")
+                        .starts_with("chrome-extension://"),
                 };
-                if jobs.try_send(job).is_err() { w.fail(); break; }
+                if jobs.try_send(job).is_err() {
+                    w.fail();
+                    break;
+                }
             }
         }));
-        let controller = Self { wire, targets, threads };
+        let controller = Self {
+            wire,
+            targets,
+            threads,
+        };
         let version = controller
             .wire
             .call("Browser.getVersion", json!({}), None)?;
@@ -531,9 +643,10 @@ fn configure(
             json!({"timezoneId":timezone}),
             Some(session),
         );
-        if result.is_err() {
+        if let Err(error) = result {
+            if is_page && error.kind != PortErrorKind::AlreadyExists { return Err(error); }
             let verify = format!("Intl.DateTimeFormat().resolvedOptions().timeZone===Intl.DateTimeFormat('en',{{timeZone:{}}}).resolvedOptions().timeZone", json!(timezone));
-            if evaluate(wire, session, &verify)? != true {
+            if !is_page && evaluate(wire, session, &verify)? != true {
                 return Err(internal("native timezone is unavailable for this target"));
             }
         }
@@ -545,11 +658,11 @@ fn configure(
         if is_page {
             wire.call(
                 "Page.addScriptToEvaluateOnNewDocument",
-                json!({"source":script}),
+                json!({"source":script,"runImmediately":true}),
                 Some(session),
             )?;
         }
-        if evaluate(wire, session, &script)? != true {
+        if !is_page && evaluate(wire, session, &script)? != true {
             return Err(internal("target hardware policy did not apply"));
         }
     }
