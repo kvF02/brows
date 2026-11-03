@@ -170,7 +170,9 @@ impl Wire {
             .map_err(|_| internal("pause lock poisoned"))?;
         while !paused.contains(session) {
             if self.closing.load(Ordering::Acquire) || Instant::now() >= deadline {
-                self.fail();
+                // The event actor may have invalidated this generation while
+                // startup was pending. The policy worker decides whether this
+                // error still belongs to an active target and must fail closed.
                 return Err(internal(
                     "Service Worker did not pause before its first script",
                 ));
