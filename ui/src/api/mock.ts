@@ -19,6 +19,9 @@ import {
   type RuntimeFingerprintProbeResult,
   type Settings,
   type SessionSummary,
+  type SessionObservation,
+  type NetworkProbeService,
+  type NetworkProbeObservation,
 } from "../types";
 
 const now = () => new Date().toISOString();
@@ -146,6 +149,15 @@ export class MockApiClient implements ApiClient {
     return [];
   }
 
+  async getNetworkProbeService(): Promise<NetworkProbeService | undefined> { return undefined; }
+  async probeSessionNetwork(_profileId: string): Promise<NetworkProbeObservation> {
+    throw new ApiError("CAPABILITY_UNSUPPORTED", "网页版不能执行真实 DNS/ICE 检测");
+  }
+
+  async observeSession(_profileId: string): Promise<SessionObservation> {
+    throw new ApiError("CAPABILITY_UNSUPPORTED", "网页版不能读取真实会话设备信号，请使用桌面版");
+  }
+
   async listProfiles(includeArchived = false): Promise<Profile[]> {
     return this.profiles
       .filter((profile) => includeArchived || profile.status !== "archived")
@@ -176,6 +188,7 @@ export class MockApiClient implements ApiClient {
       diagnostic: { overall: "not-run", issueCount: 0 },
       persona: input.persona ?? { kind: "system_native" },
       acceptLanguages: [...(input.acceptLanguages ?? ["zh-CN", "zh"])],
+      timezone: input.persona?.kind === "seedable_noise" ? input.timezone : undefined,
       windowWidth: input.windowWidth ?? 1280,
       windowHeight: input.windowHeight ?? 800,
     };
@@ -196,6 +209,7 @@ export class MockApiClient implements ApiClient {
       throw new ApiError("INVALID_PROFILE_STATE", "运行中的环境不能修改配置");
     }
     Object.assign(profile, changes, { revision: profile.revision + 1 });
+    if (profile.persona?.kind === "system_native") profile.timezone = undefined;
     return { ...profile, tags: [...profile.tags] };
   }
 
@@ -209,6 +223,7 @@ export class MockApiClient implements ApiClient {
       runtimeId: source.runtimeId,
       persona: source.persona,
       acceptLanguages: source.acceptLanguages ? [...source.acceptLanguages] : undefined,
+      timezone: source.timezone,
       windowWidth: source.windowWidth,
       windowHeight: source.windowHeight,
     });
@@ -444,3 +459,4 @@ export class MockApiClient implements ApiClient {
     return profile;
   }
 }
+

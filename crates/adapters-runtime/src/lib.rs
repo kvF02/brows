@@ -29,6 +29,57 @@ use std::{
 
 mod authenticode;
 mod fingerprint_probe;
+#[cfg(windows)]
+mod session_control;
+#[cfg(windows)]
+mod win_pipe;
+
+static LAUNCH_LOCK: Mutex<()> = Mutex::new(());
+fn spawn_browser(command: &mut Command) -> std::io::Result<Child> {
+    let _guard = LAUNCH_LOCK
+        .lock()
+        .map_err(|_| std::io::Error::other("launch lock poisoned"))?;
+    command.spawn()
+}
+
+#[derive(Debug)]
+enum ManagedProcess {
+    Plain(Child),
+    #[cfg(windows)]
+    Controlled(std::sync::Arc<session_control::Controller>),
+}
+impl ManagedProcess {
+    fn id(&self) -> u32 {
+        match self {
+            Self::Plain(child) => child.id(),
+            #[cfg(windows)]
+            Self::Controlled(child) => child.id(),
+        }
+    }
+    fn kill(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Plain(child) => child.kill(),
+            #[cfg(windows)]
+            Self::Controlled(child) => child.kill(),
+        }
+    }
+    fn wait(&mut self) -> std::io::Result<()> {
+        match self {
+            Self::Plain(child) => child.wait().map(|_| ()),
+            #[cfg(windows)]
+            Self::Controlled(child) => child.wait(),
+        }
+    }
+    fn try_wait(&mut self) -> std::io::Result<Option<u32>> {
+        match self {
+            Self::Plain(child) => child
+                .try_wait()
+                .map(|v| v.map(|s| s.code().unwrap_or(1) as u32)),
+            #[cfg(windows)]
+            Self::Controlled(child) => child.try_wait(),
+        }
+    }
+}
 
 pub use authenticode::verify_authenticode_publisher;
 
@@ -45,8 +96,9 @@ struct BuildRegistry {
 pub struct ManagedChromiumRuntime {
     runtime_roots: Vec<PathBuf>,
     profile_root: PathBuf,
+    network_probe: RwLock<Option<brows_application::NetworkProbeConfig>>,
     builds: RwLock<BuildRegistry>,
-    processes: Mutex<HashMap<SessionId, Child>>,
+    processes: Mutex<HashMap<SessionId, ManagedProcess>>,
     probing: Mutex<HashSet<BrowserBuildId>>,
 }
 
@@ -66,17 +118,51 @@ impl ManagedChromiumRuntime {
         if runtime_roots.is_empty() {
             return Err(invalid_data("no admitted runtime roots"));
         }
-        let runtime_roots = runtime_roots.into_iter()
+        let runtime_roots = runtime_roots
+            .into_iter()
             .map(|root| create_and_canonicalize(root, "runtime root"))
             .collect::<PortResult<Vec<_>>>()?;
         let profile_root = create_and_canonicalize(profile_root.into(), "profile root")?;
         Ok(Self {
             runtime_roots,
             profile_root,
+            network_probe: RwLock::new(None),
             builds: RwLock::new(BuildRegistry::default()),
             processes: Mutex::new(HashMap::new()),
             probing: Mutex::new(HashSet::new()),
         })
+    }
+
+    pub fn set_network_probe_config(
+        &self,
+        mut config: brows_application::NetworkProbeConfig,
+    ) -> PortResult<()> {
+        config.validate()?;
+        config.zone.make_ascii_lowercase();
+        *self
+            .network_probe
+            .write()
+            .map_err(|_| internal("network probe settings lock poisoned"))? = Some(config);
+        Ok(())
+    }
+
+    #[cfg(windows)]
+    fn controlled_session(
+        &self,
+        id: &SessionId,
+    ) -> PortResult<std::sync::Arc<session_control::Controller>> {
+        let processes = self
+            .processes
+            .lock()
+            .map_err(|_| internal("process registry lock poisoned"))?;
+        match processes.get(id) {
+            Some(ManagedProcess::Controlled(controller)) => Ok(controller.clone()),
+            Some(_) => Err(PortError::new(
+                PortErrorKind::CapabilityUnsupported,
+                "this session does not use private fingerprint control",
+            )),
+            None => Err(PortError::not_found("browser session")),
+        }
     }
 
     /// Registers a build only after checking its trust, location and digest.
@@ -129,10 +215,16 @@ impl ManagedChromiumRuntime {
     }
 
     fn ensure_runtime_path(&self, executable: &Path) -> PortResult<()> {
-        if self.runtime_roots.iter().any(|root| executable.starts_with(root)) {
+        if self
+            .runtime_roots
+            .iter()
+            .any(|root| executable.starts_with(root))
+        {
             Ok(())
         } else {
-            Err(invalid_data("browser executable is outside admitted runtime roots"))
+            Err(invalid_data(
+                "browser executable is outside admitted runtime roots",
+            ))
         }
     }
 
@@ -245,6 +337,7 @@ impl ManagedChromiumRuntime {
 
         for argument in &plan.arguments {
             match argument {
+                LaunchArgument::SessionFingerprint(_) => {}
                 LaunchArgument::UserDataDirectory(path) => {
                     if path != &plan.user_data_dir || saw_user_data_dir {
                         return Err(invalid_data("invalid user data directory argument"));
@@ -440,18 +533,43 @@ impl BrowserRuntime for ManagedChromiumRuntime {
             ));
         }
 
-        let child = Command::new(&build.executable_path)
-            .args(arguments)
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| {
-                PortError::new(
-                    PortErrorKind::Unavailable,
-                    format!("failed to launch browser process: {error}"),
+        let policy = plan.arguments.iter().find_map(|arg| match arg {
+            LaunchArgument::SessionFingerprint(policy) => Some(policy.as_ref()),
+            _ => None,
+        });
+        let child = if let Some(policy) = policy {
+            #[cfg(windows)]
+            {
+                let mut arguments = arguments;
+                arguments.truncate(arguments.len() - plan.preferences.startup_urls.len());
+                arguments.push(OsString::from("--no-startup-window"));
+                ManagedProcess::Controlled(std::sync::Arc::new(session_control::Controller::start(
+                    &build.executable_path,
+                    &arguments,
+                    policy.clone(),
+                    &plan.preferences.startup_urls,
+                )?))
+            }
+            #[cfg(not(windows))]
+            {
+                let _ = policy;
+                return Err(PortError::new(
+                    PortErrorKind::CapabilityUnsupported,
+                    "private fingerprint control currently requires Windows",
+                ));
+            }
+        } else {
+            ManagedProcess::Plain(
+                spawn_browser(
+                    Command::new(&build.executable_path)
+                        .args(arguments)
+                        .stdin(Stdio::null())
+                        .stdout(Stdio::null())
+                        .stderr(Stdio::null()),
                 )
-            })?;
+                .map_err(|_| internal("failed to launch browser process"))?,
+            )
+        };
         let process_id = child.id();
         processes.insert(plan.session_id.clone(), child);
         Ok(BrowserProcess {
@@ -486,6 +604,55 @@ impl BrowserRuntime for ManagedChromiumRuntime {
             .map_err(|error| internal(format!("failed to reap browser process: {error}")))?;
         processes.remove(session_id);
         Ok(())
+    }
+
+    fn network_probe_config(&self) -> PortResult<Option<brows_application::NetworkProbeConfig>> {
+        Ok(self
+            .network_probe
+            .read()
+            .map_err(|_| internal("network probe settings lock poisoned"))?
+            .clone())
+    }
+    fn probe_session_network(
+        &self,
+        session_id: &SessionId,
+    ) -> PortResult<brows_application::NetworkProbeObservation> {
+        let config = self.network_probe_config()?.ok_or_else(|| {
+            PortError::new(
+                PortErrorKind::CapabilityUnsupported,
+                "public DNS/STUN probe service is not configured",
+            )
+        })?;
+        #[cfg(windows)]
+        {
+            self.controlled_session(session_id)?.probe_network(&config)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = (session_id, config);
+            Err(PortError::new(
+                PortErrorKind::CapabilityUnsupported,
+                "private session control requires Windows",
+            ))
+        }
+    }
+
+    fn observe_session(
+        &self,
+        session_id: &SessionId,
+    ) -> PortResult<brows_application::SessionObservation> {
+        #[cfg(windows)]
+        {
+            self.controlled_session(session_id)?.observe(session_id)
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = session_id;
+            Err(PortError::new(
+                PortErrorKind::CapabilityUnsupported,
+                "private session control requires Windows",
+            ))
+        }
     }
 
     fn is_running(&self, session_id: &SessionId) -> PortResult<bool> {
@@ -841,11 +1008,21 @@ mod tests {
         let chrome = root.join("chrome");
         let edge = root.join("edge");
         let runtime = ManagedChromiumRuntime::with_runtime_roots(
-            vec![chrome.clone(), edge.clone()], root.join("profiles")).unwrap();
-        for (name, folder) in [("chrome", chrome), ("edge", edge), ("outside", root.clone())] {
+            vec![chrome.clone(), edge.clone()],
+            root.join("profiles"),
+        )
+        .unwrap();
+        for (name, folder) in [
+            ("chrome", chrome),
+            ("edge", edge),
+            ("outside", root.clone()),
+        ] {
             let executable = folder.join("browser.exe");
             fs::write(&executable, b"fixture").unwrap();
-            let result = runtime.register_build(sample_build(name, executable, b"fixture", BrowserChannel::Stable), false);
+            let result = runtime.register_build(
+                sample_build(name, executable, b"fixture", BrowserChannel::Stable),
+                false,
+            );
             assert_eq!(result.is_ok(), name != "outside");
         }
         fs::remove_dir_all(root).unwrap();

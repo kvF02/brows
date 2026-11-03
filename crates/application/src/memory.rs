@@ -785,12 +785,6 @@ impl SeedableNoiseFingerprintRuntime {
         window
             .validate()
             .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
-        if locale.timezone.is_some() {
-            return Err(PortError::new(
-                PortErrorKind::CapabilityUnsupported,
-                "timezone override is not implemented",
-            ));
-        }
         let fp = PersonaFingerprint::derive(p, &build.version)
             .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
         // Keep the UA major aligned with the concrete Chromium binary. A
@@ -1151,7 +1145,7 @@ mod seedable_noise_tests {
     }
 
     #[test]
-    fn unsupported_timezone_and_invalid_version_fail_explicitly() {
+    fn timezone_delegates_to_session_policy_and_invalid_version_fails() {
         let runtime = SeedableNoiseFingerprintRuntime::new(
             std::env::temp_dir(),
             ProfileId::new("validation").unwrap(),
@@ -1162,19 +1156,15 @@ mod seedable_noise_tests {
             accept_languages: vec!["en".to_owned()],
             timezone: Some("Europe/London".to_owned()),
         };
-        assert_eq!(
-            runtime
-                .compile_inner(
-                    &runtime.profile_id,
-                    &persona,
-                    &verified_build(),
-                    &locale,
-                    &WindowConfig::default()
-                )
-                .unwrap_err()
-                .kind,
-            PortErrorKind::CapabilityUnsupported
-        );
+        assert!(runtime
+            .compile_inner(
+                &runtime.profile_id,
+                &persona,
+                &verified_build(),
+                &locale,
+                &WindowConfig::default()
+            )
+            .is_ok());
         let mut build = verified_build();
         build.version = "installed".to_owned();
         assert_eq!(

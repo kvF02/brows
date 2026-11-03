@@ -3,8 +3,8 @@
   "private": true,
   "version": "0.1.0",
   "scripts": {
-    "test": "node --test tools/*.test.mjs && npm run test:ui",
-    "test:ui": "node --experimental-vm-modules --test ui/tests/*.test.mjs",
+    "test": "node --test --test-timeout=30000 tools/*.test.mjs && npm run test:ui",
+    "test:ui": "node --experimental-vm-modules --test --test-timeout=30000 ui/tests/*.test.mjs",
     "test:fingerprint": "node --test tools/fingerprint-hook.test.mjs && node --experimental-vm-modules --test ui/tests/fingerprint-api.test.mjs",
     "ui:dev": "npm --prefix ui run dev",
     "ui:typecheck": "npm --prefix ui run typecheck",

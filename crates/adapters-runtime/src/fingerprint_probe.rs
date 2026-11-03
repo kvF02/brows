@@ -114,7 +114,7 @@ pub(super) fn run(build: &BrowserBuild, profile_root: &Path) -> PortResult<Obser
             use std::os::windows::process::CommandExt;
             command.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
         }
-        let child = command.spawn().map_err(|_| {
+        let child = super::spawn_browser(&mut command).map_err(|_| {
             PortError::new(
                 PortErrorKind::Unavailable,
                 "无法启动隔离的指纹能力探针；仍可使用系统原生模式",

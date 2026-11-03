@@ -624,9 +624,21 @@ fn validate_path(path: &Path) -> Result<(), DomainError> {
     Ok(())
 }
 
+/// Fixed session control policy; never caller-provided protocol commands.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionFingerprintConfig {
+    pub user_agent: String,
+    pub platform: PlatformKind,
+    pub hardware_concurrency: u8,
+    pub device_memory: DeviceMemoryGb,
+    pub languages: Vec<String>,
+    pub timezone: Option<String>,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LaunchArgument {
     UserDataDirectory(PathBuf),
+    SessionFingerprint(Box<SessionFingerprintConfig>),
     ProxyServer {
         scheme: ProxyScheme,
         host: String,
@@ -656,6 +668,25 @@ impl LaunchArgument {
     pub fn validate(&self) -> Result<(), DomainError> {
         match self {
             Self::UserDataDirectory(path) => validate_path(path),
+            Self::SessionFingerprint(config) => {
+                Self::UserAgentOverride(config.user_agent.clone()).validate()?;
+                Self::AcceptLanguages(config.languages.clone()).validate()?;
+                if config.hardware_concurrency == 0
+                    || config.hardware_concurrency > 64
+                    || config.timezone.as_ref().is_some_and(|tz| {
+                        tz.is_empty()
+                            || tz.len() > 64
+                            || !tz
+                                .bytes()
+                                .all(|c| c.is_ascii_alphanumeric() || b"/_-+".contains(&c))
+                    })
+                {
+                    return Err(DomainError::InvalidLaunchArgument(
+                        "session fingerprint policy".to_owned(),
+                    ));
+                }
+                Ok(())
+            }
             Self::ProxyServer { host, port, .. } => {
                 if host.trim().is_empty()
                     || host
@@ -804,6 +835,26 @@ impl ResolvedLaunchPlan {
             return Err(DomainError::InvalidHash);
         }
         self.proxy.validate()?;
+        let controls: Vec<_> = self
+            .arguments
+            .iter()
+            .filter_map(|a| match a {
+                LaunchArgument::SessionFingerprint(policy) => Some(policy),
+                _ => None,
+            })
+            .collect();
+        if controls.len() > 1 {
+            return Err(DomainError::InvalidLaunchArgument(
+                "duplicate session policy".to_owned(),
+            ));
+        }
+        if let Some(policy) = controls.first() {
+            if !self.arguments.iter().any(|arg| matches!(arg, LaunchArgument::LoadExtension(_)))
+                || !self.arguments.iter().any(|arg| matches!(arg, LaunchArgument::UserAgentOverride(ua) if ua == &policy.user_agent))
+                || policy.languages != self.preferences.accept_languages {
+                return Err(DomainError::InvalidLaunchArgument("inconsistent session policy".to_owned()));
+            }
+        }
         for argument in &self.arguments {
             argument.validate()?;
         }

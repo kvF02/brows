@@ -1,6 +1,7 @@
 # 指纹配置设计与验收边界
 
-更新：2026-10-06。本文取代早期 `v0.2-anti-detect-plan.md` 的实现说明。
+本文取代早期 `v0.2-anti-detect-plan.md` 的实现说明。真实内核验收状态见
+[运行时验收流程](runtime-acceptance.md)。
 
 Brows 的当前基础能力是多环境数据隔离；`SeedableNoise` 是可选的页面读取覆盖层，
 不是定制 Chromium 内核，也不代表不同物理设备。默认 `SystemNative` 保留主机信号。
@@ -32,15 +33,17 @@ Brows 的当前基础能力是多环境数据隔离；`SeedableNoise` 是可选�
 
 | 信号 | 配置机制 | 实际边界 |
 |---|---|---|
-| UA | Chromium `--user-agent` | 主版本来自选中内核；UA-CH 未统一覆盖 |
-| 语言 | 参数、Preferences、MAIN-world getter | 请求行为仍须实测；worker 未覆盖 |
+| UA / UA-CH | Chromium 参数与私有 CDP 会话策略 | 主版本来自选中内核；UA-CH 完整版本取自运行中的浏览器 |
+| 语言 | 参数、Preferences、各目标会话策略 | 请求行为仍须在实际内核验收 |
 | platform、CPU 核数、Memory、Touch | Navigator getter | 页面读取覆盖，不改变实际 OS 或设备 |
 | Screen | Screen getter | 声明宽高、色深；可用区按声明尺寸返回，不模拟系统任务栏 |
 | 窗口与比例 | Chromium 参数 | 不是物理显示器替换；缩放和最大化影响实际视口 |
 | WebGL vendor/renderer | WebGL1/2 `getParameter` | 仅有效的 unmasked 字符串；GPU 像素、扩展、能力仍真实 |
 | Canvas | 2D `getImageData`、HTML `toDataURL/toBlob`、Offscreen `convertToBlob` | 稳定 RGB 低位扰动，导出用副本；未覆盖所有绘制/读取 API |
 | Audio | `OfflineAudioContext.startRendering` 与完成事件 buffer | 离线输出稀疏微扰；实时播放、设备采样率保持真实 |
-| 时区、字体、worker、TLS/HTTP2 | 无覆盖 | 继续依赖主机/运行时 |
+| 时区 | 原生 Emulation 与 Worker 读取核对 | 不支持或不一致时关闭会话 |
+| Worker | 私有 target 暂停与配置 | UA、语言、平台、CPU、Memory 与时区；Canvas/Audio 旁路仍未完整覆盖 |
+| 字体、TLS/HTTP2 | 无覆盖 | 继续依赖主机/运行时 |
 
 Canvas 的扰动由 seed 与绝对像素坐标确定，使普通数值参数的局部读取与整幅读取一致。
 不改变 alpha 或透明黑，不累计扰动，不改原画布；Float16/HDR 读取保留原值。
@@ -55,7 +58,7 @@ hook 保持原生 receiver 校验和参数转发，不伪造 `chrome.runtime`，
 不尝试隐藏 `Function.prototype.toString` 的 JS 痕迹。代理的 WebRTC 策略通过既有 typed
 Chromium 参数实施，指纹扩展不自行更改 TURN/ICE 行为。
 
-显式时区覆盖目前没有完整实现；启动编译拒绝此能力，避免保存的声明被静默忽略。
+显式时区进入 typed 启动策略，由私有控制器原生实施并核对 Worker；不能仅保存声明。
 读取覆盖字段和主机共享字段应同时展示；启用 Canvas/Audio 也不能清空共享字段列表。
 
 ## 运行时加载是独立验收门槛
@@ -70,7 +73,7 @@ Chromium 参数实施，指纹扩展不自行更改 TURN/ICE 行为。
 状态仅保留当前 App 进程；重启登记时恢复未验证，文件摘要变更也必须重新登记和检测。
 检测通过只代表 document_start 样本通过，不代表完整 API 或所有 frame 覆盖。
 
-本机官方 Chrome 154 的真实冒烟未观测到 --load-extension 注入；兼容 feature 开关
+此前官方 Chrome 154 的真实冒烟未观测到 --load-extension 注入；兼容 feature 开关
 也未恢复注入。因此当前系统 Chrome 不能被标记为 SeedableNoise 可用。
 后续扩展探针的 frame/API 覆盖并引入可信且实测支持的内核。不要通过关闭
 Chromium sandbox、长期锁定旧版或信任未知下载源来规避问题。受控 Chromium/Chrome
@@ -82,7 +85,7 @@ for Testing 的支持路线仍需可信发布者、安装来源与更新校验�
 
 1. Domain/契约：seed、平台/GPU、语言、窗口校验；共享信号列表；预览 DTO 可序列化。
 2. Application：所选内核版本决定 UA；语言/数值 Memory 贯通；窗口与屏幕分离；
-   同配置稳定，同 seed 不同配置不覆盖目录；时区覆盖明确报错。
+   同配置稳定，同 seed 不同配置不覆盖目录；时区进入会话策略。
 3. 页面 hook 行为：API 缺失互不影响、原生非法 receiver/异常语义、重复读取一致、
    局部/导出一致、透明像素/原画布不变、Canvas/Audio 开关有效、音频不累计。
 4. UI：内核/语言/窗口修改后必须重预览；重复选择当前 persona 不重置 seed；显示
@@ -100,14 +103,15 @@ for Testing 的支持路线仍需可信发布者、安装来源与更新校验�
 Unsupported，拒绝 SeedableNoise，现有环境及会话未修改，临时目录清理通过。
 这是负向能力结果被正确识别的测试，不代表该内核指纹功能已经可用。
 
-P0：完成可信、可注入运行时的选择/安装路径，并对其真实内核验收。基础能力探针与
-失败门禁已落地，但当前系统 Chrome 未通过；此阶段不等于指纹功能完整可用。
+P0：已安装签名 Edge 的发现、准入、能力探针与生产会话验收已通过。托管内核安装、
+安全更新与签名目录仍是后续工作；本机 Chrome 的既有负向探针结果继续保留。
 
-P1：增加 session 内只读观测报告，区分“配置、实测、共享、未覆盖”，覆盖
-UA/UA-CH 请求头、iframe/worker、窗口/屏幕与语言差异；逐步统一 Client Hints。
+P1：session 内固定字段观测和私有 Client Hints 策略已实现，并已实测页面、同源 frame、
+跨源 OOPIF、Dedicated/Shared/Service Worker 的首段脚本。继续扩展更多站点、模块
+Worker、更新/崩溃重启和其他 API；缺失请求头保留未检查。
 
-P2：真实时区机制及多 API 一致性。需要评估 page、worker、Intl/Date 与网络信号的
-一致实现，不能仅增加一个 getter 便宣称完整支持。
+P2：原生时区、Worker 核对、别名规范化及 Intl/Date 冬夏偏移验收已通过。
+公网 DNS/ICE 服务代码与配置入口已加入，部署和公网浏览器实测仍是独立门槛。
 
 P3：如需内核级字体、GPU、Audio、网络栈一致性，评估受控 Chromium 内核路线及
 安全更新成本。Canvas 输出扰动可以继续改进，但不能替代这项工作。

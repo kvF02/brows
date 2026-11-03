@@ -35,6 +35,9 @@
     "allow-session-stop",
     "allow-session-cancel-queued",
     "allow-session-list",
+    "allow-session-observe",
+    "allow-network-probe-service",
+    "allow-session-probe-network",
     "allow-backup-list",
     "allow-backup-export",
     "allow-backup-import"
