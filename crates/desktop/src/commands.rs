@@ -935,9 +935,13 @@ mod tests {
 
     #[test]
     fn session_diagnostics_reject_script_and_endpoint_arguments() {
-        assert!(serde_json::from_value::<SessionObserveRequest>(serde_json::json!({"sessionId":"s", "expression":"document.cookie"})).is_err());
+        assert!(serde_json::from_value::<SessionObserveRequest>(
+            serde_json::json!({"sessionId":"s", "expression":"document.cookie"})
+        )
+        .is_err());
         assert!(serde_json::from_value::<SessionNetworkProbeRequest>(serde_json::json!({"sessionId":"s", "acknowledgeExternal":true, "origin":"https://other.example"})).is_err());
-        let request: SessionNetworkProbeRequest = serde_json::from_value(serde_json::json!({"sessionId":"s"})).unwrap();
+        let request: SessionNetworkProbeRequest =
+            serde_json::from_value(serde_json::json!({"sessionId":"s"})).unwrap();
         assert!(!request.acknowledge_external);
     }
 

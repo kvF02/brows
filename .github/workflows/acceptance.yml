@@ -70,5 +70,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: fingerprint-observation-windows
-          path: target/fingerprint-observation.json
+          path: |
+            target/fingerprint-observation.json
+            target/fingerprint-session-acceptance.json
           if-no-files-found: ignore

@@ -461,6 +461,19 @@ mod tests {
         thread: Option<std::thread::JoinHandle<()>>,
     }
     impl ControlFixture {
+        fn wait_proofs(&self, prefix: &str) -> Vec<(String, String, serde_json::Value)> {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            loop {
+                let proofs: Vec<_> = self.proofs.lock().unwrap().iter()
+                    .filter(|(path, _, _)| path.starts_with(prefix)).cloned().collect();
+                if ["page", "frame", "worker"].iter().all(|kind| proofs.iter().any(|(_, _, value)| value["kind"] == *kind)) {
+                    return proofs;
+                }
+                assert!(std::time::Instant::now() < deadline, "missing first-script evidence for {prefix}");
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+
         fn start() -> Self {
             use std::io::{Read, Write};
             let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -789,7 +802,27 @@ mod tests {
             result.detail
         );
         let fixture = ControlFixture::start();
+        let header = |headers: &str, key: &str| -> Option<String> {
+            headers.lines().find_map(|line| line.split_once(':')
+                .filter(|(name, _)| name.eq_ignore_ascii_case(key)).map(|(_, value)| value.trim().to_owned()))
+        };
+        // Header presence is compared against an unmodified instance of the
+        // same signed build; missing native Worker hints are not invented.
+        let mut native = draft("Edge native header baseline");
+        native.browser = BrowserSelectorDto::Pinned { build_id: (&build.id).into() };
+        native.startup_urls = vec![format!("{}/native/page", fixture.url)];
+        let native = state.profiles.create(ProfileCreateRequest { profile: native }).unwrap();
+        let native_session = match state.sessions.launch(SessionLaunchRequest { profile_id: native.id }).unwrap() {
+            SessionLaunchOutcome::Started { session, .. } => session,
+            _ => panic!("native baseline unexpectedly queued"),
+        };
+        let baseline = fixture.wait_proofs("/native/");
+        let native_hints: std::collections::BTreeMap<_, _> = baseline.iter().map(|(_, headers, first)|
+            (first["kind"].as_str().unwrap().to_owned(), header(headers, "sec-ch-ua-platform"))).collect();
+        println!("native Client Hints header availability: {native_hints:?}");
+        state.sessions.stop(SessionStopRequest { session_id: native_session.id }).unwrap();
         let mut started = Vec::new();
+        let mut evidence = Vec::new();
         for (index, name) in ["Edge acceptance A", "Edge acceptance B"]
             .into_iter()
             .enumerate()
@@ -850,8 +883,8 @@ mod tests {
                 }
             }
         }
-        std::thread::sleep(std::time::Duration::from_secs(2));
         for (index, session) in started.into_iter().enumerate() {
+            let matching = fixture.wait_proofs(&format!("/{index}/"));
             let id: brows_domain::SessionId = session.id.clone().try_into().unwrap();
             assert!(
                 state.browsers.is_running(&id).unwrap(),
@@ -877,15 +910,6 @@ mod tests {
                     target.kind
                 );
             }
-            let proofs = fixture.proofs.lock().unwrap();
-            let matching: Vec<_> = proofs
-                .iter()
-                .filter(|(path, _, _)| path.starts_with(&format!("/{index}/")))
-                .collect();
-            assert!(
-                matching.len() >= 3,
-                "page/frame/worker first-script proofs are required"
-            );
             for (_, headers, first) in matching {
                 assert_eq!(first["hardwareConcurrency"], cpu);
                 assert_eq!(first["deviceMemory"], if index == 0 { 0.5 } else { 2.0 });
@@ -895,11 +919,16 @@ mod tests {
                     ["user-agent:", "accept-language:", "sec-ch-ua"].iter().any(|key| lower.starts_with(key))
                 }).collect();
                 println!("session {index} {} allowed headers: {allowed_headers:?}", first["kind"]);
-                assert!(headers
-                    .to_ascii_lowercase()
-                    .contains("sec-ch-ua-platform: \"windows\""), "{} missing Client Hints: {allowed_headers:?}", first["kind"]);
+                let hints = header(&headers, "sec-ch-ua-platform");
+                let native_has_hints = native_hints.get(first["kind"].as_str().unwrap()).unwrap().is_some();
+                if hints.is_some() || native_has_hints {
+                    assert_eq!(hints.as_deref(), Some("\"Windows\""), "{} Client Hints", first["kind"]);
+                }
+                assert_eq!(header(&headers, "user-agent").as_deref(), first["userAgent"].as_str());
+                assert_eq!(header(&headers, "accept-language").unwrap().split(',').next().unwrap().split(';').next().unwrap(), first["languages"][0].as_str().unwrap());
+                evidence.push(serde_json::json!({"profile": index, "first": first, "allowedHeaders": allowed_headers,
+                    "clientHintsHeaderStatus": if hints.is_some() { "pass" } else { "not_checked" }}));
             }
-            drop(proofs);
             let stopped = state
                 .sessions
                 .stop(SessionStopRequest {
@@ -908,6 +937,10 @@ mod tests {
                 .unwrap();
             assert_eq!(stopped.state, SessionStateDto::Stopped);
         }
+        let report = serde_json::json!({"scope":"signed Edge production sessions; native header baseline", "assertionsPassed":true, "complete":false,
+            "observations":evidence,"uncovered":["cross-origin iframe", "Shared/Service Worker", "public DNS/ICE", "fonts/GPU/network stack"]});
+        let output = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/fingerprint-session-acceptance.json");
+        std::fs::write(output, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }
 
     #[test]

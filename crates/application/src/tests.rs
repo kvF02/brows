@@ -587,10 +587,25 @@ fn process_reconciliation_releases_failed_session_and_promotes_queue() {
 }
 #[test]
 fn network_probe_configuration_confines_protocol_and_ports() {
-    let valid = crate::NetworkProbeConfig { origin: "https://probe.example:8443".to_owned(), zone: "probe.example".to_owned(), stun_min: 40000, stun_max: 40127 };
+    let valid = crate::NetworkProbeConfig {
+        origin: "https://probe.example:8443".to_owned(),
+        zone: "probe.example".to_owned(),
+        stun_min: 40000,
+        stun_max: 40127,
+    };
     assert!(valid.validate().is_ok());
-    for origin in ["http://probe.example", "https://user:pass@probe.example", "https://probe.example/path", "https://probe.example?x", "https://probe.example:0"] {
-        let mut config = valid.clone(); config.origin = origin.to_owned(); assert!(config.validate().is_err(), "{origin}");
+    for origin in [
+        "http://probe.example",
+        "https://user:pass@probe.example",
+        "https://probe.example/path",
+        "https://probe.example?x",
+        "https://probe.example:0",
+    ] {
+        let mut config = valid.clone();
+        config.origin = origin.to_owned();
+        assert!(config.validate().is_err(), "{origin}");
     }
-    let mut config = valid; config.stun_max = 50000; assert!(config.validate().is_err());
+    let mut config = valid;
+    config.stun_max = 50000;
+    assert!(config.validate().is_err());
 }
