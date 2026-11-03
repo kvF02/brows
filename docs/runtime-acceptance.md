@@ -46,8 +46,9 @@ SeedableNoise 的生产启动计划增加 typed 会话策略。Windows 核心通
 iframe、Dedicated/Shared/Service Worker 采用暂停、配置、恢复的顺序；不支持策略的
 目标会使会话失败，不静默跳过。
 
-控制器统一 UA、UA-CH、平台、CPU、Memory 和语言。时区使用原生 Emulation 覆盖，
-Worker 不支持该协议方法时必须实际读到期望时区，否则关闭会话。它不替代 Worker
+控制器统一 UA、UA-CH、平台、CPU、Memory 和语言。时区使用原生 Emulation 覆盖；
+多个目标共享进程时可能已存在覆盖，协议未重新应用成功时必须实际读到规范化后的
+期望时区，否则关闭会话。它不替代 Worker
 Canvas/Audio、字体、GPU 或网络栈。浏览器 API 在不安全上下文中本来缺失时，
 不会凭空添加 Device Memory。
 

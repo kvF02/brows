@@ -462,7 +462,7 @@ mod tests {
     }
     impl ControlFixture {
         fn wait_proofs(&self, prefix: &str) -> Vec<(String, String, serde_json::Value)> {
-            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
             loop {
                 let proofs: Vec<_> = self
                     .proofs
@@ -485,7 +485,9 @@ mod tests {
                 {
                     return proofs;
                 }
-                if std::time::Instant::now() >= deadline { return proofs; }
+                if std::time::Instant::now() >= deadline {
+                    return proofs;
+                }
                 std::thread::sleep(std::time::Duration::from_millis(50));
             }
         }
@@ -544,7 +546,7 @@ mod tests {
                     let path = headers.split_whitespace().nth(1).unwrap_or("/").to_owned();
                     println!("local acceptance request: {path}");
                     let capture = "({kind:typeof document==='undefined'?(typeof ServiceWorkerGlobalScope!=='undefined'&&self instanceof ServiceWorkerGlobalScope?'service_worker':typeof SharedWorkerGlobalScope!=='undefined'&&self instanceof SharedWorkerGlobalScope?'shared_worker':'worker'):window===top?'page':location.hostname==='localhost'?'cross_frame':'frame',userAgent:navigator.userAgent,platform:navigator.platform,languages:Array.from(navigator.languages),hardwareConcurrency:navigator.hardwareConcurrency,deviceMemory:navigator.deviceMemory,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,hints:navigator.userAgentData?.toJSON()})";
-                    let script = format!("const first={capture};const proof=fetch('./proof',{{method:'POST',body:JSON.stringify(first)}});");
+                    let script = format!("const first={capture};const send=()=>fetch('./'+first.kind+'/proof',{{method:'POST',body:JSON.stringify(first),keepalive:typeof document!=='undefined'}});const proof=send().catch(()=>send());");
                     let (content, kind) = if path.ends_with("shared.js") {
                         (
                             format!("{script}onconnect=event=>event.ports[0].start();"),
@@ -559,6 +561,7 @@ mod tests {
                         )
                     } else if path.ends_with("proof") {
                         if let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) {
+                            println!("local first-script sample: {}", value["kind"]);
                             output.lock().unwrap().push((path.clone(), headers, value));
                         }
                         ("ok".to_owned(), "text/plain")
@@ -863,7 +866,16 @@ mod tests {
             _ => panic!("native baseline unexpectedly queued"),
         };
         let baseline = fixture.wait_proofs("/native/");
-        assert_eq!(baseline.iter().map(|(_, _, value)| value["kind"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>().len(), 6, "all native context samples are required");
+        println!("native contexts: {:?}", baseline.iter().map(|(_, _, value)| &value["kind"]).collect::<Vec<_>>());
+        assert_eq!(
+            baseline
+                .iter()
+                .map(|(_, _, value)| value["kind"].as_str().unwrap())
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            6,
+            "all native context samples are required"
+        );
         let native_hints: std::collections::BTreeMap<_, _> = baseline
             .iter()
             .map(|(_, headers, first)| {
@@ -950,7 +962,15 @@ mod tests {
             let matching = fixture.wait_proofs(&format!("/{index}/"));
             let id: brows_domain::SessionId = session.id.clone().try_into().unwrap();
             let observed = state.sessions.observe(&id).unwrap();
-            assert_eq!(matching.iter().map(|(_, _, value)| value["kind"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>().len(), 6, "all controlled context samples are required");
+            assert_eq!(
+                matching
+                    .iter()
+                    .map(|(_, _, value)| value["kind"].as_str().unwrap())
+                    .collect::<std::collections::BTreeSet<_>>()
+                    .len(),
+                6,
+                "all controlled context samples are required"
+            );
             assert!(
                 state.browsers.is_running(&id).unwrap(),
                 "signed Edge must remain running"

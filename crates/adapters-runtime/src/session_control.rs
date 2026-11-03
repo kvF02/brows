@@ -208,7 +208,9 @@ impl Controller {
                 };
                 let kind = params["targetInfo"]["type"].as_str().unwrap_or("");
                 let url = params["targetInfo"]["url"].as_str().unwrap_or("");
-                if url.starts_with("chrome-extension://") || url.starts_with("edge://") {
+                // New-tab WebUI pages can later navigate to ordinary sites;
+                // keep their page policy installed across that navigation.
+                if url.starts_with("chrome-extension://") {
                     if w.call("Runtime.runIfWaitingForDebugger", json!({}), Some(session))
                         .is_err()
                     {
