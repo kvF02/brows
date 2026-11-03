@@ -1,11 +1,11 @@
 //! Session-scoped control and observation over private inherited pipes.
 //! No generic command/evaluate surface is exposed through application ports.
 use super::{internal, invalid_data, now_ms, win_pipe};
-use brows_application::{PortResult, SessionObservation, TargetObservation};
+use brows_application::{PortError, PortErrorKind, PortResult, SessionObservation, TargetObservation};
 use brows_domain::{PlatformKind, SessionFingerprintConfig, SessionId};
 use serde_json::{json, Value};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     io::{Read, Write},
     path::Path,
@@ -19,6 +19,7 @@ use std::{
 const TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_FRAME: usize = 2 * 1024 * 1024;
 const MAX_TARGETS: usize = 128;
+const POLICY_WORKERS: usize = 8;
 #[derive(Debug)]
 struct Wire {
     process: Arc<win_pipe::Process>,
@@ -82,6 +83,9 @@ impl Wire {
             internal(format!("session control response timeout: {method}"))
         })?;
         if let Some(error) = value.get("error") {
+            if error["code"] == -32001 || matches!(error["message"].as_str(), Some("Session with given id not found." | "No target with given id found")) {
+                return Err(PortError::not_found("browser target"));
+            }
             return Err(internal(format!(
                 "browser cannot apply {method} (code {})",
                 error["code"].as_i64().unwrap_or(0)
@@ -98,7 +102,10 @@ struct Target {
 #[derive(Debug, Default)]
 struct Targets {
     configured: BTreeMap<String, Target>,
+    attached: BTreeSet<String>,
 }
+#[derive(Debug)]
+struct TargetJob { id: String, target: Target, extension: bool }
 #[derive(Debug)]
 pub(super) struct Controller {
     wire: Arc<Wire>,
@@ -114,7 +121,7 @@ impl Controller {
     ) -> PortResult<Self> {
         let (process, mut output, mut input) = win_pipe::spawn(executable, args)
             .map_err(|_| internal("cannot start private session control"))?;
-        let (writer, write_receive) = mpsc::sync_channel::<Vec<u8>>(8);
+        let (writer, write_receive) = mpsc::sync_channel::<Vec<u8>>(64);
         let (events, event_receive) = mpsc::sync_channel::<Value>(128);
         let wire = Arc::new(Wire {
             process: Arc::new(process),
@@ -180,9 +187,59 @@ impl Controller {
             }
             w.fail();
         });
+        // A service-worker startup can depend on another paused target. Keep
+        // event dispatch independent of bounded, concurrent policy jobs.
+        let (jobs, job_receive) = mpsc::sync_channel::<TargetJob>(MAX_TARGETS);
+        let job_receive = Arc::new(Mutex::new(job_receive));
+        let policy = Arc::new(policy);
+        let mut threads = vec![write_thread, read_thread];
+        for _ in 0..POLICY_WORKERS {
+            let w = wire.clone();
+            let t = targets.clone();
+            let receive = job_receive.clone();
+            let policy = policy.clone();
+            threads.push(thread::spawn(move || {
+                while !w.closing.load(Ordering::Acquire) {
+                    let job = match receive.lock() {
+                        Ok(receiver) => receiver.recv_timeout(Duration::from_millis(200)),
+                        Err(_) => { w.fail(); break; }
+                    };
+                    let job = match job {
+                        Ok(job) => job,
+                        Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                        Err(_) => break,
+                    };
+                    let session = &job.target.session;
+                    let result: PortResult<()> = (|| {
+                        if !job.extension { configure(&w, session, &job.target.kind, &policy)?; }
+                        w.call("Runtime.runIfWaitingForDebugger", json!({}), Some(session))?;
+                        Ok(())
+                    })();
+                    if let Err(error) = result {
+                        let Ok(mut state) = t.0.lock() else { w.fail(); break; };
+                        if error.kind == PortErrorKind::NotFound || !state.attached.contains(session) {
+                            state.attached.remove(session);
+                            state.configured.retain(|_, value| &value.session != session);
+                            continue;
+                        }
+                        if let Ok(mut reason) = w.policy_failure.lock() {
+                            if reason.is_none() && error.message != "session control is closed" {
+                                *reason = Some(format!("{} policy failed: {}", job.target.kind, error.message));
+                            }
+                        }
+                        w.fail(); t.1.notify_all(); break;
+                    }
+                    let Ok(mut state) = t.0.lock() else { w.fail(); break; };
+                    if !job.extension && state.attached.contains(session) {
+                        state.configured.insert(job.id, job.target);
+                        t.1.notify_all();
+                    }
+                }
+            }));
+        }
         let w = wire.clone();
         let t = targets.clone();
-        let actor = thread::spawn(move || {
+        threads.push(thread::spawn(move || {
             while !w.closing.load(Ordering::Acquire) {
                 let event = match event_receive.recv_timeout(Duration::from_millis(200)) {
                     Ok(v) => v,
@@ -192,72 +249,31 @@ impl Controller {
                 if event["method"] == "Target.detachedFromTarget" {
                     if let Some(session) = event["params"]["sessionId"].as_str() {
                         if let Ok(mut state) = t.0.lock() {
+                            state.attached.remove(session);
                             state.configured.retain(|_, value| value.session != session);
                         }
                     }
                     continue;
                 }
                 let params = &event["params"];
-                let Some(session) = params["sessionId"].as_str() else {
-                    w.fail();
-                    break;
-                };
-                let Some(id) = params["targetInfo"]["targetId"].as_str() else {
-                    w.fail();
-                    break;
-                };
-                let kind = params["targetInfo"]["type"].as_str().unwrap_or("");
-                let url = params["targetInfo"]["url"].as_str().unwrap_or("");
-                // New-tab WebUI pages can later navigate to ordinary sites;
-                // keep their page policy installed across that navigation.
-                if url.starts_with("chrome-extension://") {
-                    if w.call("Runtime.runIfWaitingForDebugger", json!({}), Some(session))
-                        .is_err()
-                    {
-                        w.fail();
-                        break;
-                    }
-                    continue;
-                }
-                if let Err(error) = configure(&w, session, kind, &policy) {
-                    if let Ok(mut reason) = w.policy_failure.lock() {
-                        *reason = Some(format!("{kind} policy failed: {}", error.message));
-                    }
-                    w.fail();
-                    t.1.notify_all();
-                    break;
-                }
+                let Some(session) = params["sessionId"].as_str() else { w.fail(); break; };
+                let Some(id) = params["targetInfo"]["targetId"].as_str() else { w.fail(); break; };
                 {
-                    let Ok(mut state) = t.0.lock() else {
-                        w.fail();
-                        break;
-                    };
-                    if state.configured.len() >= MAX_TARGETS {
-                        w.fail();
-                        break;
-                    }
-                    state.configured.insert(
-                        id.to_owned(),
-                        Target {
-                            session: session.to_owned(),
-                            kind: kind.to_owned(),
-                        },
-                    );
+                    let Ok(mut state) = t.0.lock() else { w.fail(); break; };
+                    if state.attached.contains(session) { continue; }
+                    if state.attached.len() >= MAX_TARGETS { w.fail(); break; }
+                    state.attached.insert(session.to_owned());
                 }
-                t.1.notify_all();
-                if w.call("Runtime.runIfWaitingForDebugger", json!({}), Some(session))
-                    .is_err()
-                {
-                    w.fail();
-                    break;
-                }
+                // WebUI new tabs retain their policy when navigating to sites.
+                let job = TargetJob {
+                    id: id.to_owned(),
+                    target: Target { session: session.to_owned(), kind: params["targetInfo"]["type"].as_str().unwrap_or("").to_owned() },
+                    extension: params["targetInfo"]["url"].as_str().unwrap_or("").starts_with("chrome-extension://"),
+                };
+                if jobs.try_send(job).is_err() { w.fail(); break; }
             }
-        });
-        let controller = Self {
-            wire,
-            targets,
-            threads: vec![write_thread, read_thread, actor],
-        };
+        }));
+        let controller = Self { wire, targets, threads };
         let version = controller
             .wire
             .call("Browser.getVersion", json!({}), None)?;
