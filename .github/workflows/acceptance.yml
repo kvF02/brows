@@ -49,13 +49,23 @@ jobs:
           path: target/debug
           key: windows-rust-1.97.1-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
           restore-keys: windows-rust-1.97.1-${{ hashFiles('Cargo.lock') }}-
-      - name: Rust formatting check
+      - name: Rust formatting evidence
         shell: pwsh
         run: |
-          cargo +1.97.1 fmt --all -- --check
+          cargo +1.97.1 fmt --all
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          rustfmt +1.97.1 --edition 2021 --check tools/test_support/controlled_browser.rs
+          rustfmt +1.97.1 --edition 2021 tools/test_support/controlled_browser.rs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          git diff --name-only -- '*.rs' | ForEach-Object {
+            $formatPath = $_
+            $encoded = [Convert]::ToBase64String([IO.File]::ReadAllBytes((Join-Path $PWD $formatPath)))
+            $parts = [int][Math]::Ceiling($encoded.Length / 12000)
+            for ($part = 0; $part -lt $parts; $part++) {
+              $offset = $part * 12000
+              $piece = $encoded.Substring($offset, [Math]::Min(12000, $encoded.Length - $offset))
+              Write-Output "BROWS_FORMAT_PART $formatPath $part $parts $piece"
+            }
+          }
       - name: Rust tests and lint
         id: rust_checks
         run: |
@@ -77,6 +87,14 @@ jobs:
         if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
         timeout-minutes: 3
         run: cargo +1.97.1 test -p brows-adapters-runtime private_worker_lifecycle_acceptance -- --ignored --nocapture
+      - name: Module Worker first-script acceptance
+        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
+        timeout-minutes: 3
+        run: cargo +1.97.1 test -p brows-adapters-runtime private_module_worker_acceptance -- --ignored --nocapture
+      - name: Renderer crash and reload acceptance
+        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
+        timeout-minutes: 3
+        run: cargo +1.97.1 test -p brows-adapters-runtime private_renderer_crash_acceptance -- --ignored --nocapture
       - uses: actions/cache/save@v4
         if: always()
         with:
@@ -91,4 +109,6 @@ jobs:
             target/fingerprint-observation.json
             target/fingerprint-session-acceptance.json
             target/fingerprint-session-acceptance-round-*.json
+            target/fingerprint-module-worker-acceptance.json
+            target/fingerprint-renderer-crash-acceptance.json
           if-no-files-found: ignore

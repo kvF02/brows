@@ -10,6 +10,7 @@ pub(crate) struct ControlFixture {
     stop: Arc<std::sync::atomic::AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
     service_version: Arc<std::sync::atomic::AtomicUsize>,
+    modules: bool,
 }
 impl ControlFixture {
     pub(crate) fn bump_service_version(&self) {
@@ -49,15 +50,18 @@ impl ControlFixture {
                 .filter(|(path, _, _)| path.starts_with(prefix))
                 .cloned()
                 .collect();
-            if [
+            let mut expected = vec![
                 "page",
                 "frame",
                 "cross_frame",
                 "worker",
                 "shared_worker",
                 "service_worker",
-            ]
-            .iter()
+            ];
+            if self.modules {
+                expected.extend(["module_worker", "module_shared_worker", "module_service_worker"]);
+            }
+            if expected.iter()
             .all(|kind| proofs.iter().any(|(_, _, value)| value["kind"] == *kind))
             {
                 return proofs;
@@ -74,6 +78,7 @@ impl ControlFixture {
         output: &std::sync::Mutex<Vec<CapturedProof>>,
         cross_origin: &str,
         service_version: &std::sync::atomic::AtomicUsize,
+        modules: bool,
     ) {
         use std::io::{Read, Write};
         // Accepted sockets inherit FIONBIO on Windows. Switch only this
@@ -115,11 +120,19 @@ impl ControlFixture {
         };
         let path = headers.split_whitespace().nth(1).unwrap_or("/").to_owned();
         println!("local acceptance request: {path}");
-        let capture = "({kind:typeof document==='undefined'?(typeof ServiceWorkerGlobalScope!=='undefined'&&self instanceof ServiceWorkerGlobalScope?'service_worker':typeof SharedWorkerGlobalScope!=='undefined'&&self instanceof SharedWorkerGlobalScope?'shared_worker':'worker'):window===top?'page':location.hostname==='localhost'?'cross_frame':'frame',userAgent:navigator.userAgent,platform:navigator.platform,languages:Array.from(navigator.languages),hardwareConcurrency:navigator.hardwareConcurrency,deviceMemory:navigator.deviceMemory,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,offsetWinter:new Date('2024-01-15T12:00:00Z').getTimezoneOffset(),offsetSummer:new Date('2024-07-15T12:00:00Z').getTimezoneOffset(),hints:navigator.userAgentData?.toJSON()})";
-        let rendering = "(()=>{const c=typeof document==='undefined'?new OffscreenCanvas(16,16):document.createElement('canvas');c.width=16;c.height=16;const ctx=c.getContext('2d');ctx.fillStyle='#a42367';ctx.fillRect(0,0,16,16);const read=()=>Array.from(ctx.getImageData(0,0,16,16).data,b=>b.toString(16).padStart(2,'0')).join('');const canvas=read();const repeat=read();const g=new OffscreenCanvas(1,1).getContext('webgl');const ext=g?.getExtension('WEBGL_debug_renderer_info');const webgl=ext?{vendor:g.getParameter(ext.UNMASKED_VENDOR_WEBGL),renderer:g.getParameter(ext.UNMASKED_RENDERER_WEBGL)}:null;g?.getExtension('WEBGL_lose_context')?.loseContext();return{canvas,repeat,webgl};})()";
         let revision = service_version.load(std::sync::atomic::Ordering::Acquire);
-        let script = format!("const first={{...{capture},fixtureVersion:{revision}}};Object.assign(first,{rendering});const send=()=>fetch('./'+first.kind+'/proof',{{method:'POST',body:JSON.stringify(first),keepalive:typeof document!=='undefined'}});const proof=send().catch(()=>send());");
-        let (content, kind) = if path.ends_with("shared.js") {
+        let script = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/test_support/first_observation.js"))
+            .replace("__BROWS_FIXTURE_VERSION__", &revision.to_string())
+            .replace("__BROWS_FIXTURE_PHASE__", if path.ends_with("dependency.mjs") { "module_dependency" } else { "first_script" });
+        let (content, kind) = if path.ends_with("dependency.mjs") {
+            (format!("{script}\nexport {{first,proof}};"), "text/javascript")
+        } else if path.ends_with("shared.mjs") {
+            ("import './dependency.mjs';onconnect=event=>event.ports[0].start();".to_owned(), "text/javascript")
+        } else if path.ends_with("service.mjs") {
+            ("import {proof} from './dependency.mjs';addEventListener('install',event=>event.waitUntil(Promise.all([proof,skipWaiting()])));addEventListener('activate',event=>event.waitUntil(clients.claim()));addEventListener('message',event=>event.waitUntil(proof));".to_owned(), "text/javascript")
+        } else if path.ends_with("worker.mjs") {
+            ("import './dependency.mjs';setInterval(()=>{},1000);".to_owned(), "text/javascript")
+        } else if path.ends_with("shared.js") {
             (
                 format!("{script}onconnect=event=>event.ports[0].start();"),
                 "text/javascript",
@@ -153,9 +166,10 @@ impl ControlFixture {
             ("ok".to_owned(), "text/plain")
         } else {
             let worker = if path.ends_with("page") {
-                "addEventListener('error',event=>fetch('./error',{method:'POST',body:String(event.message)}));addEventListener('unhandledrejection',event=>fetch('./error',{method:'POST',body:String(event.reason)}));globalThis.worker=new Worker('./worker.js');globalThis.shared=new SharedWorker('./shared.js');shared.port.start();const registration=navigator.serviceWorker.register('./service.js');let revision=first.fixtureVersion;setInterval(()=>fetch('./version',{cache:'no-store'}).then(response=>response.json()).then(async next=>{if(next!==revision){revision=next;await(await registration).update();}}).catch(()=>{}),500);"
+                include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/test_support/fixture_page.js"))
+                    .replace("__BROWS_FIXTURE_MODULES__", if modules { "true" } else { "false" })
             } else {
-                ""
+                String::new()
             };
             let frame = if path.ends_with("page") {
                 format!(
@@ -176,7 +190,7 @@ impl ControlFixture {
         let _ = stream.write_all(response.as_bytes());
     }
 
-    pub(crate) fn start() -> Self {
+    pub(crate) fn start(modules: bool) -> Self {
         let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
         let listener_v6 =
@@ -209,7 +223,7 @@ impl ControlFixture {
                                 .unwrap()
                                 .recv_timeout(std::time::Duration::from_millis(100));
                             match next {
-                                Ok(stream) => Self::serve(stream, &output, cross_origin, &version),
+                                Ok(stream) => Self::serve(stream, &output, cross_origin, &version, modules),
                                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                                 Err(_) => break,
                             }
@@ -240,6 +254,7 @@ impl ControlFixture {
             stop,
             thread: Some(thread),
             service_version,
+            modules,
         }
     }
 }
@@ -274,6 +289,7 @@ mod tests {
                 &Mutex::new(Vec::new()),
                 "http://localhost",
                 &AtomicUsize::new(0),
+                false,
             );
         });
         let mut client = TcpStream::connect(address).unwrap();
