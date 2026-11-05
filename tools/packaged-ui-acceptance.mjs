@@ -23,8 +23,10 @@ server.listen(0, "127.0.0.1");
 await once(server, "listening");
 const port = server.address().port;
 await new Promise((resolve, reject) => server.close(error => error ? reject(error) : resolve()));
-const driver = spawn(path.resolve(driverArg), ["--port=" + port, "--allowed-ips=127.0.0.1"], { stdio: "ignore", windowsHide: true });
+const driver = spawn(path.resolve(driverArg), ["--port=" + port, "--allowed-ips=127.0.0.1"], { stdio: ["ignore", "pipe", "pipe"], windowsHide: true });
 let driverError;
+let driverLog = "";
+for (const stream of [driver.stdout, driver.stderr]) stream.on("data", chunk => { driverLog = (driverLog + chunk.toString()).slice(-8192); });
 driver.on("error", error => { driverError = error; });
 const origin = "http://127.0.0.1:" + port;
 const elementKey = "element-6066-11e4-a52e-4f735466cecf";
@@ -127,7 +129,7 @@ try {
   await click(await css(".archive-filter input"));
   const restore = await waitFor("archived card", () => xpath("//article[contains(@class,'profile-card')][.//h2[@title='UI acceptance renamed']]//button[normalize-space(.)='恢复']"));
   await click(restore);
-  await waitFor("restored card", () => namedCard("UI acceptance renamed"));
+  await waitFor("restored card", () => text(".profile-card .status-pill"), result => result.includes("已停止"));
   checks.push("create-edit-archive-and-restore");
   stage = "browser-launch-and-stop";
   await cardAction("UI acceptance renamed", "启动");
@@ -164,6 +166,7 @@ try {
   await writeFile(reportPath.replace(/\.json$/, ".png"), Buffer.from(screenshot, "base64"));
 } catch (error) {
   failure = { stage, message: error.message.slice(0, 250) };
+  if (stage === "packaged-launch") console.error("WebDriver startup diagnostics: " + driverLog);
 } finally {
   if (session) {
     try { await request("DELETE", "/session/" + session, undefined, 10000); } catch {}

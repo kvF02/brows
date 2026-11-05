@@ -1385,7 +1385,9 @@ mod tests {
                 let updates = fixture.wait_kind_count("/0/", "service_worker", 2);
                 assert!(
                     updates.len() >= 2,
-                    "updated Service Worker first-script evidence is required"
+                    "updated Service Worker first-script evidence is required; running={:?}; observation={:?}",
+                    state.browsers.is_running(&id),
+                    state.sessions.observe(&id)
                 );
                 let updated = &updates.last().unwrap().2;
                 assert_eq!(updated["fixtureVersion"], 1);

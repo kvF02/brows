@@ -22,4 +22,4 @@ setInterval(() => fetch('./version', { cache: 'no-store' })
       revision = next;
       await Promise.all(registrations.map(async registration => (await registration).update()));
     }
-  }).catch(() => {}), 500);
+  }).catch(error => reportError(error?.message || error)), 500);
