@@ -573,7 +573,9 @@ mod tests {
             .find(|build| build.provider == "Microsoft Edge")
             .unwrap();
         let management = state.runtime_management.as_ref().unwrap();
+        let timer = std::time::Instant::now();
         let snapshot = management.capture(installed.id.clone()).unwrap();
+        println!("managed capture completed: {:?}", timer.elapsed());
         assert_eq!(
             snapshot.capabilities.fingerprint_support,
             brows_domain::FingerprintSupport::Unverified
@@ -582,6 +584,7 @@ mod tests {
             management.capture(installed.id.clone()).unwrap().id,
             snapshot.id
         );
+        println!("managed reuse completed: {:?}", timer.elapsed());
         management.activate(snapshot.id.clone()).unwrap();
         assert_eq!(
             state.settings.get().unwrap().active_runtime_id.as_deref(),
@@ -600,6 +603,7 @@ mod tests {
                 .id,
             snapshot.id
         );
+        println!("managed restart completed: {:?}", timer.elapsed());
         let probe = state
             .browsers
             .probe_fingerprint_support(&snapshot.id)
@@ -610,6 +614,7 @@ mod tests {
             "{}",
             probe.detail
         );
+        println!("managed probe completed: {:?}", timer.elapsed());
         let fixture = ControlFixture::start(true);
         let mut profile = draft("managed acceptance");
         profile.browser = BrowserSelectorDto::Pinned {

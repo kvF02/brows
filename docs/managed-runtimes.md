@@ -11,6 +11,11 @@
 目标可执行文件的发行者和文件版本后，写入有大小上限的清单，通过同卷 rename 发布。
 失败清理 staging，不覆盖已有版本。ID 绑定供应商、原生版本及完整文件清单摘要。
 
+Windows 快照目录授予 `ALL RESTRICTED APPLICATION PACKAGES` 读取/执行权限，让
+Chromium LPAC 子进程能够加载自身二进制和资源。权限只作用于经过验证的快照子树，
+不修改父目录、Profile、数据库或凭据目录；不授予写权限，不关闭浏览器沙箱。
+依据：[Chromium 官方 LPAC 文件权限说明](https://chromium.googlesource.com/chromium/src/+/main/docs/design/sandbox.md)。
+
 已保存版本可并存；应用重启后重新准入，每次启动或能力探针前重新核对全部资源文件。
 资源变更、额外 DLL、文件丢失均拒绝启动。损坏快照排除出登记表，固定到它的环境不会
 自动改用其他版本。当前不提供自动修复或删除快照的 UI。
