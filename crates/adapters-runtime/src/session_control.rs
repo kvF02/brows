@@ -912,6 +912,7 @@ fn configure(
     kind: &str,
     policy: &SessionFingerprintConfig,
 ) -> PortResult<()> {
+    wire.call("Inspector.enable", json!({}), Some(session))?;
     wire.call("Target.setAutoAttach", auto_attach(false), Some(session))?;
     let (platform, platform_version) = match policy.persona.platform {
         PlatformKind::Windows => ("Windows", "10.0.0"),

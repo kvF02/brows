@@ -80,10 +80,10 @@ jobs:
           cargo +1.97.1 clippy --workspace --all-targets --locked -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Production registration and capability probe
-        timeout-minutes: 3
+        timeout-minutes: 5
         shell: pwsh
         run: |
-          foreach ($round in 1..3) {
+          foreach ($round in 1..6) {
             Write-Output "Production acceptance round $round"
             cargo +1.97.1 test -p brows-desktop signed_runtime_acceptance -- --ignored --nocapture
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -106,7 +106,13 @@ jobs:
       - name: Renderer crash and reload acceptance
         if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
         timeout-minutes: 3
-        run: cargo +1.97.1 test -p brows-adapters-runtime private_renderer_crash_acceptance -- --ignored --nocapture
+        shell: pwsh
+        run: |
+          foreach ($round in 1..3) {
+            Write-Output "Renderer crash acceptance round $round"
+            cargo +1.97.1 test -p brows-adapters-runtime private_renderer_crash_acceptance -- --ignored --nocapture
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Managed runtime capture and restart acceptance
         if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
         timeout-minutes: 7
