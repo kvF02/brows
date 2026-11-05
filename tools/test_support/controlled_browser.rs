@@ -76,6 +76,9 @@ impl ControlFixture {
         service_version: &std::sync::atomic::AtomicUsize,
     ) {
         use std::io::{Read, Write};
+        // Accepted sockets inherit FIONBIO on Windows. Switch only this
+        // connection back to blocking I/O before applying bounded timeouts.
+        stream.set_nonblocking(false).unwrap();
         stream
             .set_read_timeout(Some(std::time::Duration::from_secs(3)))
             .unwrap();
@@ -246,5 +249,46 @@ impl Drop for ControlFixture {
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::{Read, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::{atomic::AtomicUsize, mpsc, Mutex};
+    use std::time::Duration;
+
+    #[test]
+    fn fixture_accepts_delayed_headers_on_a_nonblocking_accepted_socket() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (send, ready) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            stream.set_nonblocking(true).unwrap();
+            send.send(()).unwrap();
+            ControlFixture::serve(
+                stream,
+                &Mutex::new(Vec::new()),
+                "http://localhost",
+                &AtomicUsize::new(0),
+            );
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        std::thread::sleep(Duration::from_millis(50));
+        client
+            .write_all(b"GET /version HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        server.join().unwrap();
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.ends_with("\r\n\r\n0"));
     }
 }

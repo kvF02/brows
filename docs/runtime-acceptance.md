@@ -89,6 +89,8 @@ Service Worker 初次就绪和重复就绪通知不会重复排队配置；只�
 `.github/workflows/acceptance.yml` 在 Windows 执行 JavaScript 测试、完整 UI 构建、
 Rust workspace 测试和 clippy，并验证 Edge 签名、生产登记/能力探针、两个真实 SeedableNoise 会话的启动/停止及跨上下文观测。
 生产会话验收连续执行三轮，每轮均须通过；任一轮失败即停止，不将重试成功记作本轮通过。
+能力探针与验收 HTTP 服务均在接受连接后显式恢复阻塞 I/O，再设置有界读写超时。
+延迟首个请求字节的 socket 回归用例防止 Windows 继承非阻塞模式导致预连接被提前关闭。
 新增 `private_worker_lifecycle_acceptance` 使用同一个 loopback fixture，验证 Service Worker
 停止后不被诊断读取唤醒、消息唤醒后的首段脚本、版本更新后的首段脚本，以及硬件、
 时区、Canvas 重复读取和 WebGL 声明的一致性。生产会话验收同时比较六种上下文的
