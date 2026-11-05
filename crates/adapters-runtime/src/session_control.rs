@@ -468,8 +468,10 @@ impl Controller {
                         w.fail();
                         break;
                     };
-                    if let Ok(mut paused) = w.paused.lock() {
-                        paused.remove(session);
+                    if event["method"] == "Inspector.targetCrashed" {
+                        if let Ok(mut paused) = w.paused.lock() {
+                            paused.remove(session);
+                        }
                     }
                     let outcome = match t.0.lock() {
                         Ok(mut state) => {
@@ -486,6 +488,9 @@ impl Controller {
                     };
                     match outcome {
                         Ok(Some(job)) => {
+                            if let Ok(mut paused) = w.paused.lock() {
+                                paused.remove(session);
+                            }
                             if jobs.try_send(job).is_err() {
                                 w.fail();
                                 break;
