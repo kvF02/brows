@@ -309,6 +309,7 @@ impl Controller {
                             Some(
                                 "Target.attachedToTarget"
                                     | "Target.detachedFromTarget"
+                                    | "ServiceWorker.workerVersionUpdated"
                                     | "Inspector.targetCrashed"
                                     | "Inspector.targetReloadedAfterCrash"
                             )
@@ -449,6 +450,39 @@ impl Controller {
                     Err(mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(_) => break,
                 };
+                if event["method"] == "ServiceWorker.workerVersionUpdated" {
+                    let outcome: PortResult<Vec<String>> = (|| {
+                        let versions = event["params"]["versions"].as_array()
+                            .filter(|versions| versions.len() <= MAX_TARGETS * 4)
+                            .ok_or_else(|| internal("invalid Service Worker version update"))?;
+                        let mut state = t.0.lock().map_err(|_| internal("target lock poisoned"))?;
+                        let mut retired = Vec::new();
+                        for version in versions {
+                            let id = version["versionId"].as_str()
+                                .ok_or_else(|| internal("missing Service Worker version"))?;
+                            let status = version["status"].as_str()
+                                .ok_or_else(|| internal("missing Service Worker status"))?;
+                            let target = version["targetId"].as_str().filter(|id| !id.is_empty());
+                            retired.extend(state.worker_version(id, target, status == "redundant")?);
+                        }
+                        Ok(retired)
+                    })();
+                    match outcome {
+                        Ok(retired) => {
+                            if let Ok(mut paused) = w.paused.lock() {
+                                for session in retired {
+                                    paused.remove(&session);
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            w.fail();
+                            break;
+                        }
+                    }
+                    t.1.notify_all();
+                    continue;
+                }
                 if event["method"] == "Target.detachedFromTarget" {
                     if let Some(session) = event["params"]["sessionId"].as_str() {
                         if let Ok(mut paused) = w.paused.lock() {
@@ -845,7 +879,8 @@ fn evaluate_before(
         json!({"expression":expression,"returnByValue":true,"silent":true,"timeout":timeout_ms}),
         Some(session),
     )?;
-    let result = wire.finish_until(reply, deadline)?;
+    let read_deadline = deadline.min(Instant::now() + Duration::from_millis(1500));
+    let result = wire.finish_until(reply, read_deadline)?;
     if result.get("exceptionDetails").is_some() {
         return Err(internal(
             "session observation could not read the requested APIs",
@@ -923,6 +958,9 @@ fn configure(
         let script = format!("{hardware_script};\n{rendering_script}");
         if is_page {
             wire.call("Page.enable", json!({}), Some(session))?;
+            if kind == "page" {
+                wire.call("ServiceWorker.enable", json!({}), Some(session))?;
+            }
             wire.call(
                 "Page.addScriptToEvaluateOnNewDocument",
                 json!({"source":script,"runImmediately":true}),
