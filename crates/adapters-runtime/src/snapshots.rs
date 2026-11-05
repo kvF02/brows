@@ -113,7 +113,9 @@ fn inventory(root: &Path) -> PortResult<BTreeMap<String, FileRecord>> {
         {
             let entry = entry.map_err(|_| invalid_data("cannot inspect runtime entry"))?;
             visited += 1;
-            if visited > MAX_FILES * 2 { return Err(invalid_data("runtime entry count exceeds budget")); }
+            if visited > MAX_FILES * 2 {
+                return Err(invalid_data("runtime entry count exceeds budget"));
+            }
             let path = entry.path();
             let relative = path
                 .strip_prefix(root)
@@ -308,16 +310,14 @@ impl ManagedChromiumRuntime {
             .executable_path
             .parent()
             .ok_or_else(|| invalid_data("source runtime root missing"))?;
-        let stage = Staging(
-            store.root.join(format!(
+        let stage = Staging(store.root.join(format!(
                 "staging-{}-{}",
                 std::process::id(),
                 SystemTime::now()
                     .duration_since(UNIX_EPOCH)
                     .unwrap_or_default()
                     .as_nanos()
-            )),
-        );
+            )));
         fs::create_dir(&stage.0)
             .map_err(|_| internal("cannot allocate runtime staging directory"))?;
         // Select the executable, its matching native version directory and other
@@ -390,8 +390,16 @@ impl ManagedChromiumRuntime {
         verify_publisher_and_version(&candidate)?;
         let target = store.root.join(&manifest.id);
         if target.exists() {
-            let metadata = fs::symlink_metadata(&target).map_err(|_| invalid_data("cannot inspect existing snapshot"))?;
-            if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) { return Err(invalid_data("existing snapshot must be an ordinary directory")); }
+            let metadata = fs::symlink_metadata(&target)
+                .map_err(|_| invalid_data("cannot inspect existing snapshot"))?;
+            if !metadata.is_dir()
+                || metadata.file_type().is_symlink()
+                || is_reparse_point(&metadata)
+            {
+                return Err(invalid_data(
+                    "existing snapshot must be an ordinary directory",
+                ));
+            }
             let existing = read_manifest(&target)?;
             if existing.identity()? != manifest.id {
                 return Err(invalid_data("existing runtime snapshot identity mismatch"));

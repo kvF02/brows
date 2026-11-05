@@ -244,7 +244,10 @@ pub(crate) fn support_report(state: State<'_, AppState>) -> IpcResult<serde_json
 fn support_report_value(state: &AppState) -> IpcResult<serde_json::Value> {
     let settings = ipc(state.settings.get())?;
     let sessions = ipc(state.sessions.list())?;
-    let builds = state.browsers.list_builds().map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
+    let builds = state
+        .browsers
+        .list_builds()
+        .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
     Ok(serde_json::json!({
         "formatVersion": 1, "appVersion": env!("CARGO_PKG_VERSION"),
         "platform": std::env::consts::OS, "architecture": std::env::consts::ARCH,
@@ -1087,14 +1090,24 @@ mod tests {
 
     #[test]
     fn management_rejects_paths_and_support_export_omits_private_fields() {
-        assert!(serde_json::from_value::<RuntimeManagementRequest>(serde_json::json!({
-            "runtimeId": "edge", "path": "C:\\private\\browser.exe"
-        })).is_err());
+        assert!(
+            serde_json::from_value::<RuntimeManagementRequest>(serde_json::json!({
+                "runtimeId": "edge", "path": "C:\\private\\browser.exe"
+            }))
+            .is_err()
+        );
         let state = AppState::prototype(std::path::PathBuf::from("PRIVATE_HOST_PATH")).unwrap();
         let report = support_report_value(&state).unwrap();
         let encoded = serde_json::to_string(&report).unwrap();
         assert!(!encoded.contains("PRIVATE_HOST_PATH"));
-        for field in ["executablePath", "profileId", "startupUrls", "proxyId", "password", "cookie"] {
+        for field in [
+            "executablePath",
+            "profileId",
+            "startupUrls",
+            "proxyId",
+            "password",
+            "cookie",
+        ] {
             assert!(!encoded.contains(field), "unexpected support field {field}");
         }
         assert_eq!(report["formatVersion"], 1);

@@ -101,7 +101,12 @@ mod platform {
         }
         let start = data.as_ptr() as usize;
         let address = value as usize;
-        if address < start || address.checked_add(52).is_none_or(|end| end > start + size as usize) || address % 4 != 0 {
+        if address < start
+            || address
+                .checked_add(52)
+                .is_none_or(|end| end > start + size as usize)
+            || !address.is_multiple_of(4)
+        {
             return Err(untrusted("executable fixed version exceeds its buffer"));
         }
         // SAFETY: the root query returns a VS_FIXEDFILEINFO of at least 52 bytes.
