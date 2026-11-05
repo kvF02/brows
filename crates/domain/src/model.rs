@@ -846,7 +846,10 @@ impl ResolvedLaunchPlan {
         }
         if let Some(policy) = controls.first() {
             let has_bootstrap = self.capabilities.supports_devtools_pipe
-                || self.arguments.iter().any(|arg| matches!(arg, LaunchArgument::LoadExtension(_)));
+                || self
+                    .arguments
+                    .iter()
+                    .any(|arg| matches!(arg, LaunchArgument::LoadExtension(_)));
             if !has_bootstrap
                 || !self.arguments.iter().any(|arg| matches!(arg, LaunchArgument::UserAgentOverride(ua) if ua == &policy.user_agent))
                 || policy.languages != self.preferences.accept_languages {
