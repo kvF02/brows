@@ -22,7 +22,7 @@ jobs:
           cache-dependency-path: ui/package-lock.json
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
-      - uses: actions/cache@v4
+      - uses: actions/cache/restore@v4
         with:
           path: target/release
           key: windows-beta-1.97.1-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
@@ -44,6 +44,11 @@ jobs:
           $files | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Set-Content target/SHA256SUMS.txt
           $signature = Get-AuthenticodeSignature target/release/brows-desktop.exe
           @{ commit = '${{ github.sha }}'; channel = 'internal-beta'; authenticode = "$($signature.Status)"; autoUpdate = $false } | ConvertTo-Json | Set-Content target/beta-build.json
+      - uses: actions/cache/save@v4
+        if: always()
+        with:
+          path: target/release
+          key: windows-beta-1.97.1-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
