@@ -8,7 +8,7 @@ permissions:
   contents: read
 concurrency:
   group: windows-acceptance-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   format:
     runs-on: ubuntu-latest

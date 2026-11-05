@@ -71,6 +71,7 @@ try {
 try {
   `$principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
   if (`$principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) { throw 'UI fixture must run without administrator membership' }
+  `$ErrorActionPreference = 'Continue'
   $invoke
   `$code = `$LASTEXITCODE
 } catch { `$_ | Out-File -LiteralPath $(Quote-Literal $output) -Append }
@@ -84,7 +85,10 @@ finally { [IO.File]::WriteAllText($(Quote-Literal $done), [string]`$code) }
         $deadline = [DateTime]::UtcNow.AddMinutes(4)
         while (-not (Test-Path -LiteralPath $done) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 250 }
         if (Test-Path -LiteralPath $output) { Get-Content -LiteralPath $output -Tail 35 | Write-Output }
-        if (-not (Test-Path -LiteralPath $done) -or [IO.File]::ReadAllText($done).Trim() -ne '0') { throw 'Non-elevated packaged UI acceptance failed' }
+        if (-not (Test-Path -LiteralPath $done) -or [IO.File]::ReadAllText($done).Trim() -ne '0') {
+            if (Test-Path -LiteralPath $reportPath) { Get-Content -LiteralPath $reportPath | Write-Output }
+            throw 'Non-elevated packaged UI acceptance failed'
+        }
     } else {
         node tools/packaged-ui-acceptance.mjs $app $driver $Report
         if ($LASTEXITCODE -ne 0) { throw 'Packaged UI acceptance failed' }

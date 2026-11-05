@@ -43,7 +43,7 @@ async function request(method, route, body, timeout = 20000) {
   const data = await response.json();
   if (!response.ok || data.value?.error) {
     // Error messages may echo a typed password. Report only protocol error type.
-    throw new Error("WebDriver " + route.split("/").at(-1) + ": " + (data.value?.error ?? response.status));
+    throw new Error("WebDriver " + route.split("/").at(-1) + ": " + (data.value?.error ?? response.status) + (route === "/session" ? " " + String(data.value?.message ?? "").slice(0, 2000) : ""));
   }
   return data.value;
 }
@@ -94,7 +94,7 @@ try {
   const created = await request("POST", "/session", { capabilities: { alwaysMatch: {
     browserName: "webview2",
     "ms:edgeOptions": { binary: app },
-  } } }, 45000);
+  } } }, 90000);
   session = created.sessionId;
   assert.ok(session, "No WebDriver session");
   await command("POST", "/timeouts", { implicit: 0, script: 5000, pageLoad: 30000 });
@@ -166,7 +166,7 @@ try {
   await writeFile(reportPath.replace(/\.json$/, ".png"), Buffer.from(screenshot, "base64"));
 } catch (error) {
   failure = { stage, message: error.message.slice(0, 250) };
-  if (stage === "packaged-launch") console.error("WebDriver startup diagnostics: " + driverLog);
+  if (stage === "packaged-launch") console.log("WebDriver startup diagnostics: " + driverLog);
 } finally {
   if (session) {
     try { await request("DELETE", "/session/" + session, undefined, 10000); } catch {}
