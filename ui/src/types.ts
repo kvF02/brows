@@ -53,6 +53,7 @@ export interface EnvironmentPreset {
 }
 
 export interface BrowserRuntime {
+  managed?: boolean;
   id: string;
   name: string;
   version: string;
@@ -259,6 +260,7 @@ export interface BackupJob {
 }
 
 export interface Settings {
+  activeRuntimeId?: string;
   maxConcurrentSessions: number;
   telemetryEnabled: false;
   stopSessionsOnExit: boolean;
@@ -319,6 +321,9 @@ export interface SessionObservation {
 }
 
 export interface ApiClient {
+  captureRuntime(runtimeId: string): Promise<BrowserRuntime>;
+  activateRuntime(runtimeId: string): Promise<void>;
+  getSupportReport(): Promise<Record<string, unknown>>;
   /** Derive a draft configuration for the selected runtime; this is not a browser observation. */
   fingerprintPreview(input: FingerprintPreviewInput): Promise<FingerprintPreview>;
   /** Launch an isolated local probe to check extension injection; not an anti-detect guarantee. */

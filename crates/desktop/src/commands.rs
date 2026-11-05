@@ -167,7 +167,67 @@ pub(crate) fn list_runtimes(state: State<'_, AppState>) -> IpcResult<Vec<Browser
         .browsers
         .list_builds()
         .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
-    Ok(builds.iter().map(Into::into).collect())
+    Ok(builds.iter().map(|build| runtime_dto(state.browsers.as_ref(), build)).collect())
+}
+
+fn runtime_dto(browsers: &dyn brows_application::BrowserRuntime, build: &brows_domain::BrowserBuild) -> BrowserRuntimeDto {
+    let mut dto = BrowserRuntimeDto::from(build);
+    dto.active = browsers.resolve_build(&brows_domain::BrowserBuildSelector::Channel(build.channel))
+        .is_ok_and(|active| active.id == build.id);
+    dto
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct RuntimeManagementRequest { runtime_id: String }
+
+#[tauri::command]
+pub(crate) async fn runtime_capture(
+    state: State<'_, AppState>, request: RuntimeManagementRequest,
+) -> IpcResult<BrowserRuntimeDto> {
+    let management = state.runtime_management.clone().ok_or_else(|| ErrorDto { code: ErrorCode::CapabilityUnsupported, message: "managed runtime storage is unavailable".to_owned(), violations: Vec::new() })?;
+    let id = brows_domain::BrowserBuildId::new(request.runtime_id).map_err(ErrorDto::from_domain)?;
+    let browsers = state.browsers.clone();
+    let build = tauri::async_runtime::spawn_blocking(move || management.capture(id)).await
+        .map_err(|_| ErrorDto { code: ErrorCode::Internal, message: "runtime capture task failed".to_owned(), violations: Vec::new() })?;
+    Ok(runtime_dto(browsers.as_ref(), &ipc(build)?))
+}
+
+#[tauri::command]
+pub(crate) async fn runtime_activate(
+    state: State<'_, AppState>, request: RuntimeManagementRequest,
+) -> IpcResult<()> {
+    let management = state.runtime_management.clone().ok_or_else(|| ErrorDto { code: ErrorCode::CapabilityUnsupported, message: "runtime management is unavailable".to_owned(), violations: Vec::new() })?;
+    let id = brows_domain::BrowserBuildId::new(request.runtime_id).map_err(ErrorDto::from_domain)?;
+    let result = tauri::async_runtime::spawn_blocking(move || management.activate(id)).await
+        .map_err(|_| ErrorDto { code: ErrorCode::Internal, message: "runtime activation task failed".to_owned(), violations: Vec::new() })?;
+    ipc(result)
+}
+
+/// Fixed support export: no raw profile DTOs, paths, endpoints or browser data.
+#[tauri::command]
+pub(crate) fn support_report(state: State<'_, AppState>) -> IpcResult<serde_json::Value> {
+    let settings = ipc(state.settings.get())?;
+    let sessions = ipc(state.sessions.list())?;
+    let builds = state.browsers.list_builds().map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
+    Ok(serde_json::json!({
+        "formatVersion": 1, "appVersion": env!("CARGO_PKG_VERSION"),
+        "platform": std::env::consts::OS, "architecture": std::env::consts::ARCH,
+        "databaseSchema": brows_adapters_sqlite::CURRENT_SCHEMA_VERSION,
+        "settings": { "maxConcurrentSessions": settings.max_concurrent_sessions, "telemetryEnabled": false, "stopSessionsOnExit": true, "automaticUpdates": false },
+        "sessions": {
+            "total": sessions.len(),
+            "running": sessions.iter().filter(|s| s.state == SessionStateDto::Running).count(),
+            "queued": sessions.iter().filter(|s| s.state == SessionStateDto::Queued).count(),
+            "failed": sessions.iter().filter(|s| s.state == SessionStateDto::Failed).count()
+        },
+        "runtimes": builds.iter().map(|build| {
+            let dto = runtime_dto(state.browsers.as_ref(), build);
+            serde_json::json!({ "provider": build.provider, "version": build.version, "managed": dto.managed, "active": dto.active, "trusted": dto.trusted, "fingerprintSupport": dto.fingerprint_support })
+        }).collect::<Vec<_>>(),
+        "runtimeIssues": state.runtime_issues,
+        "limitations": ["local inventory is not a publisher-signed release catalog", "no automatic downloads", "public DNS/ICE Internet acceptance remains separate", "fonts, real GPU, realtime audio and network stack remain host/runtime signals"]
+    }))
 }
 
 #[tauri::command]
@@ -215,7 +275,7 @@ pub(crate) async fn probe_runtime_fingerprint(
             })?
             .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
     Ok(brows_contracts::FingerprintProbeResultDto {
-        runtime: (&result.build).into(),
+        runtime: runtime_dto(state.browsers.as_ref(), &result.build),
         detail: result.detail,
     })
 }

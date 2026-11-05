@@ -171,6 +171,9 @@ const handlers = Object.freeze({
   backupImport: "backup_import",
   settingsGet: "settings_get",
   settingsUpdate: "settings_update",
+  runtimeCapture: "runtime_capture",
+  runtimeActivate: "runtime_activate",
+  supportReport: "support_report",
 });
 
 const prototypeRuntime: BrowserRuntime = {
@@ -244,6 +247,8 @@ export class TauriApiClient implements ApiClient {
       trusted: boolean;
       active: boolean;
       fingerprintSupport?: BrowserRuntime["fingerprintSupport"];
+      managed?: boolean;
+      sha256?: string;
     }>;
     return raw.map((r) => ({
       id: r.id,
@@ -253,6 +258,8 @@ export class TauriApiClient implements ApiClient {
       trusted: r.trusted,
       active: r.active,
       fingerprintSupport: r.fingerprintSupport ?? "unverified",
+      managed: r.managed ?? false,
+      sha256: r.sha256,
     }));
   }
 
@@ -506,6 +513,15 @@ export class TauriApiClient implements ApiClient {
   }
   async getSettings(): Promise<Settings> {
     return this.call<Settings>(handlers.settingsGet);
+  }
+  async captureRuntime(runtimeId: string): Promise<BrowserRuntime> {
+    return this.call<BrowserRuntime>(handlers.runtimeCapture, { request: { runtimeId } });
+  }
+  async activateRuntime(runtimeId: string): Promise<void> {
+    await this.call<void>(handlers.runtimeActivate, { request: { runtimeId } });
+  }
+  async getSupportReport(): Promise<Record<string, unknown>> {
+    return this.call<Record<string, unknown>>(handlers.supportReport);
   }
   async updateSettings(changes: Partial<Settings>): Promise<Settings> {
     return this.call<Settings>(handlers.settingsUpdate, { request: { changes } });

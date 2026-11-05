@@ -1703,6 +1703,7 @@ function RuntimeFingerprintRow({ api, runtime, onRefresh, onError, onNotice }: {
   onNotice(message: string): void;
 }) {
   const [probing, setProbing] = useState(false);
+  const [managing, setManaging] = useState(false);
   const [detail, setDetail] = useState("");
   const [probeError, setProbeError] = useState("");
   const mounted = useRef(true);
@@ -1712,7 +1713,7 @@ function RuntimeFingerprintRow({ api, runtime, onRefresh, onError, onNotice }: {
   }, []);
 
   const probe = async () => {
-    if (probing || !runtime.trusted) return;
+    if (probing || managing || !runtime.trusted) return;
     setProbing(true);
     setDetail("");
     setProbeError("");
@@ -1735,14 +1736,28 @@ function RuntimeFingerprintRow({ api, runtime, onRefresh, onError, onNotice }: {
     }
   };
 
+  const manage = async (action: "capture" | "activate") => {
+    if (managing || probing) return;
+    setManaging(true);
+    try {
+      if (action === "capture") await api.captureRuntime(runtime.id);
+      else await api.activateRuntime(runtime.id);
+      await onRefresh();
+      if (mounted.current) onNotice(action === "capture" ? "已保存独立内核快照；指纹能力需要对新快照重新检测。" : "默认运行时已保存；已固定内核的环境保持原选择。");
+    } catch (cause) { if (mounted.current) onError(getErrorMessage(cause)); }
+    finally { if (mounted.current) setManaging(false); }
+  };
+
   return (
     <div>
       <div className="runtime-row">
         <span className="runtime-logo" aria-hidden="true">C</span>
-        <div><strong>{runtime.name}</strong><small>{runtime.version} · {runtime.channel}</small><small>{fingerprintSupportLabel(runtime)}</small></div>
+        <div><strong>{runtime.name}</strong><small>{runtime.version} · {runtime.channel} · {runtime.managed ? "托管快照" : "本机安装"}{runtime.active ? " · 默认" : ""}</small><small>{fingerprintSupportLabel(runtime)}</small></div>
         <span className={`runtime-trust ${runtime.trusted ? "trusted" : "untrusted"}`}>{runtime.trusted ? "签名已校验" : "未登记"}</span>
       </div>
-      {runtime.trusted && <button className="secondary-button full" type="button" disabled={probing} aria-busy={probing} onClick={() => void probe()}>{probing ? "正在检测指纹加载…" : `检测 ${runtime.name} 指纹支持`}</button>}
+      {runtime.trusted && <button className="secondary-button full" type="button" disabled={probing || managing} aria-busy={probing} onClick={() => void probe()}>{probing ? "正在检测指纹加载…" : `检测 ${runtime.name} 指纹支持`}</button>}
+      {runtime.trusted && !runtime.managed && <button className="text-button" type="button" disabled={probing || managing} onClick={() => void manage("capture")}>{managing ? "正在处理内核…" : "保存为独立内核快照"}</button>}
+      {runtime.trusted && !runtime.active && <button className="text-button" type="button" disabled={probing || managing} onClick={() => void manage("activate")}>设为默认运行时</button>}
       {probing && <div className="form-info" role="status">正在启动独立临时浏览器进行本地探针检测，不使用已保存环境或访问外部检测站。</div>}
       {detail && <div className="form-info" role="status">{detail}</div>}
       {probeError && <div className="form-error" role="alert">{probeError}</div>}
@@ -1766,10 +1781,25 @@ function SettingsView({
   onNotice(message: string): void;
 }) {
   const [saving, setSaving] = useState(false);
+  const [exporting, setExporting] = useState(false);
   if (!settings) return <LoadingState />;
   const save = async (changes: Partial<Settings>) => {
     setSaving(true);
     try { await api.updateSettings(changes); await onRefresh(); onNotice("设置已保存。"); } catch (cause) { onError(getErrorMessage(cause)); } finally { setSaving(false); }
+  };
+  const exportSupport = async () => {
+    if (exporting) return;
+    setExporting(true);
+    try {
+      const report = await api.getSupportReport();
+      const url = URL.createObjectURL(new Blob([JSON.stringify(report, null, 2)], { type: "application/json" }));
+      const link = document.createElement("a");
+      link.href = url; link.download = "brows-support-report.json";
+      document.body.appendChild(link); link.click(); link.remove();
+      window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+      onNotice("诊断摘要已导出，仅包含版本、配置和会话计数，不包含环境名称、路径、网址或凭据。");
+    } catch (cause) { onError(getErrorMessage(cause)); }
+    finally { setExporting(false); }
   };
   return (
     <section className="view-section">
@@ -1784,14 +1814,16 @@ function SettingsView({
         <article className="settings-card">
           <div className="settings-card-head"><div><h2>浏览器运行时</h2><p>签名可信 ≠ 指纹支持；指纹加载检测通过 ≠ 完整 anti-detect。</p></div><span className="settings-icon">◉</span></div>
           {runtimes.length === 0 && <div className="form-info">没有可信浏览器运行时，请先安装受支持的浏览器并刷新。</div>}
+          {runtimes.length > 0 && !runtimes.some(runtime => runtime.active) && <div className="form-error">没有可用的默认运行时，请选择可信版本。缺失的固定版本不会自动替换。</div>}
           {runtimes.map((runtime) => <RuntimeFingerprintRow key={`${runtime.id}:${runtime.version}`} api={api} runtime={runtime} onRefresh={onRefresh} onError={onError} onNotice={onNotice} />)}
-          <div className="form-info">检测会创建独立临时环境，仅验证本地扩展注入。SeedableNoise 启动前必须通过；系统原生不受此限制。</div>
+          <div className="form-info">快照保存在本机并核对全部文件，不会覆盖已有版本或自动下载更新。切换默认版本前请停止全部会话；旧版本应配合新环境使用。每份快照都须单独检测指纹能力。</div>
           <button className="text-button" type="button" onClick={() => onNotice("启动时验证 Windows Authenticode 信任链与 Google LLC（Chrome）或 Microsoft Corporation（Edge）发行者，并在每次浏览器启动前重新核对 SHA-256。")}>查看运行时信任说明 →</button>
         </article>
         <article className="settings-card">
           <div className="settings-card-head"><div><h2>隐私与审计</h2><p>默认不向任何远程服务发送数据。</p></div><span className="settings-icon">⌁</span></div>
           <div className="privacy-row"><span className="privacy-check">✓</span><div><strong>遥测已关闭</strong><small>此设置由产品安全基线锁定。</small></div><span className="locked-label">锁定</span></div>
           <div className="privacy-row"><span className="privacy-check">✓</span><div><strong>日志自动脱敏</strong><small>不记录 Cookie、Token、密码或完整代理 URL。</small></div><span className="locked-label">默认</span></div>
+          <button className="secondary-button full" type="button" disabled={exporting || !isTauriRuntime()} onClick={() => void exportSupport()}>{exporting ? "正在导出…" : "导出不含凭据的诊断摘要"}</button>
           <button className="text-button" type="button" onClick={() => onNotice("Profile 与会话操作的脱敏审计记录保存在本机 SQLite；不记录 Cookie、Token、密码或代理 URL。")}>查看安全说明 →</button>
         </article>
       </div>

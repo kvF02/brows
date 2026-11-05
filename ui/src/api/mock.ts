@@ -440,6 +440,15 @@ export class MockApiClient implements ApiClient {
   async getSettings(): Promise<Settings> {
     return { ...this.settings };
   }
+  async captureRuntime(_runtimeId: string): Promise<BrowserRuntime> {
+    throw new ApiError("CAPABILITY_UNSUPPORTED", "演示模式不能保存真实浏览器快照");
+  }
+  async activateRuntime(_runtimeId: string): Promise<void> {
+    throw new ApiError("CAPABILITY_UNSUPPORTED", "演示模式不能切换真实浏览器");
+  }
+  async getSupportReport(): Promise<Record<string, unknown>> {
+    throw new ApiError("CAPABILITY_UNSUPPORTED", "演示模式不能导出真实诊断报告");
+  }
 
   async updateSettings(changes: Partial<Settings>): Promise<Settings> {
     if (changes.maxConcurrentSessions !== undefined) {

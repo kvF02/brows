@@ -26,7 +26,9 @@ jobs:
         with:
           path: target/release
           key: windows-beta-1.97.1-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: windows-beta-1.97.1-${{ hashFiles('Cargo.lock') }}-
+          restore-keys: |
+            windows-beta-1.97.1-${{ hashFiles('Cargo.lock') }}-
+            windows-beta-1.97.1-
       - name: Install UI dependencies
         run: npm ci --prefix ui
       - name: Build packaged application and NSIS installer

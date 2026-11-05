@@ -29,6 +29,8 @@ use std::{
 
 mod authenticode;
 mod fingerprint_probe;
+mod snapshots;
+mod profile_floor;
 #[cfg(windows)]
 mod session_control;
 #[cfg(windows)]
@@ -84,6 +86,7 @@ impl ManagedProcess {
 }
 
 pub use authenticode::verify_authenticode_publisher;
+pub use authenticode::read_file_version;
 
 const MAX_PREFERENCES_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -102,6 +105,9 @@ pub struct ManagedChromiumRuntime {
     builds: RwLock<BuildRegistry>,
     processes: Mutex<HashMap<SessionId, ManagedProcess>>,
     probing: Mutex<HashSet<BrowserBuildId>>,
+    snapshot_store: RwLock<Option<snapshots::SnapshotStore>>,
+    snapshot_operations: Mutex<()>,
+    snapshot_inventories: RwLock<HashMap<BrowserBuildId, snapshots::SnapshotManifest>>,
 }
 
 impl ManagedChromiumRuntime {
@@ -132,6 +138,9 @@ impl ManagedChromiumRuntime {
             builds: RwLock::new(BuildRegistry::default()),
             processes: Mutex::new(HashMap::new()),
             probing: Mutex::new(HashSet::new()),
+            snapshot_store: RwLock::new(None),
+            snapshot_operations: Mutex::new(()),
+            snapshot_inventories: RwLock::new(HashMap::new()),
         })
     }
 
@@ -317,6 +326,7 @@ impl ManagedChromiumRuntime {
         }
         self.ensure_runtime_path(&executable)?;
         verify_digest(&executable, &build.sha256)?;
+        self.verify_snapshot(&build)?;
         Ok(build)
     }
 
@@ -445,6 +455,7 @@ impl BrowserRuntime for ManagedChromiumRuntime {
                 ));
             }
             verify_digest(&build.executable_path, &build.sha256)?;
+            self.verify_snapshot(&build)?;
             let result = fingerprint_probe::run(&build, &self.profile_root);
             // Recheck even when browser execution failed; a changing binary
             // must never gain a capability result from an older executable.
@@ -521,6 +532,8 @@ impl BrowserRuntime for ManagedChromiumRuntime {
                 "所选运行时未通过指纹扩展检测；可使用系统原生模式，不能启动 SeedableNoise",
             ));
         }
+        let admitted_directory = create_confined_directory(&self.profile_root, &plan.user_data_dir)?;
+        profile_floor::admit(&admitted_directory, &build)?;
         let user_data_dir = self.prepare_profile(plan)?;
         let arguments = Self::render_arguments(plan, &user_data_dir)?;
 
@@ -863,7 +876,7 @@ fn verify_digest(path: &Path, expected: &str) -> PortResult<()> {
     if !actual.eq_ignore_ascii_case(expected) {
         return Err(PortError::new(
             PortErrorKind::RuntimeUntrusted,
-            "browser executable digest does not match the signed catalog",
+            "browser executable digest does not match its registered digest",
         ));
     }
     Ok(())
@@ -980,7 +993,7 @@ mod tests {
         }
     }
 
-    fn sample_build(
+    pub(super) fn sample_build(
         id: &str,
         executable_path: PathBuf,
         contents: &[u8],

@@ -7,9 +7,10 @@ const MIGRATION_6: &str = r#"
 CREATE TABLE app_settings (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     max_concurrent_sessions INTEGER NOT NULL CHECK (max_concurrent_sessions BETWEEN 1 AND 10),
-    retain_archived_days INTEGER NOT NULL CHECK (retain_archived_days BETWEEN 1 AND 3650)
+    retain_archived_days INTEGER NOT NULL CHECK (retain_archived_days BETWEEN 1 AND 3650),
+    active_runtime_id TEXT
 ) STRICT;
-INSERT INTO app_settings VALUES (1, 10, 7);
+INSERT INTO app_settings VALUES (1, 10, 7, NULL);
 "#;
 
 const MIGRATION_1: &str = r#"

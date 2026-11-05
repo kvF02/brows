@@ -39,6 +39,8 @@ use std::{
 /// assembled once and remain hidden behind the application's ports.
 #[derive(Debug)]
 pub(crate) struct AppState {
+    pub(crate) runtime_management: Option<Arc<crate::runtime_management::RuntimeManagementService>>,
+    pub(crate) runtime_issues: Vec<String>,
     pub(crate) settings: Arc<crate::settings::SettingsService>,
     pub(crate) browsers: Arc<dyn BrowserRuntime>,
     pub(crate) profiles: Arc<ProfileApplicationService>,
@@ -101,11 +103,14 @@ impl AppState {
             data_root.join("backups"),
             profile_root.clone(),
         )?);
-        let roots: Vec<_> = system_root
+        let managed_root = data_root.join("runtimes");
+        std::fs::create_dir_all(&managed_root).map_err(|_| PortError::new(PortErrorKind::Unavailable, "cannot create managed runtime directory"))?;
+        let mut roots: Vec<_> = system_root
             .iter()
             .chain(edge_root.iter())
             .cloned()
             .collect();
+        roots.push(managed_root.clone());
         let browsers = Arc::new(ManagedChromiumRuntime::with_runtime_roots(
             roots,
             &profile_root,
@@ -155,15 +160,26 @@ impl AppState {
             let mut build = discovered_chrome_build(&root)?;
             build.publisher =
                 verify_authenticode_publisher(&build.executable_path, &["Google LLC"])?;
+            build.version = brows_adapters_runtime::read_file_version(&build.executable_path)?;
             browsers.register_build_with_current_digest(build, true)?;
         }
         if let Some(root) = edge_root {
             let mut build = discovered_edge_build(&root)?;
             build.publisher =
                 verify_authenticode_publisher(&build.executable_path, &["Microsoft Corporation"])?;
+            build.version = brows_adapters_runtime::read_file_version(&build.executable_path)?;
             // Chrome remains the default for existing channel-based profiles.
             let activate = browsers.installed_builds()?.is_empty();
             browsers.register_build_with_current_digest(build, activate)?;
+        }
+
+        let mut runtime_issues = browsers.load_snapshots(managed_root)?;
+        if let Some(id) = &settings.active_runtime_id {
+            let id = BrowserBuildId::new(id.clone())?;
+            if browsers.activate(&id).is_err() {
+                browsers.clear_active_channel(BrowserChannel::Stable)?;
+                runtime_issues.push("Saved default runtime is unavailable; select an admitted build before launching channel-based profiles".to_owned());
+            }
         }
 
         let compiler = Arc::new(LaunchPlanCompiler::new(
@@ -210,6 +226,10 @@ impl AppState {
         ));
 
         Ok(Self {
+            runtime_management: Some(Arc::new(crate::runtime_management::RuntimeManagementService {
+                browsers: browsers.clone(), store: settings_store.clone(), sessions: session_service.clone(),
+            })),
+            runtime_issues,
             settings: Arc::new(crate::settings::SettingsService::new(
                 settings_store,
                 session_service.clone(),
@@ -274,6 +294,8 @@ impl AppState {
         )?);
 
         Ok(Self {
+            runtime_management: None,
+            runtime_issues: Vec::new(),
             settings: Arc::new(crate::settings::SettingsService::new(
                 Arc::new(SqliteSettingsStore::open(":memory:")?),
                 session_service.clone(),

@@ -48,7 +48,9 @@ jobs:
         with:
           path: target/debug
           key: windows-rust-1.97.1-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
-          restore-keys: windows-rust-1.97.1-${{ hashFiles('Cargo.lock') }}-
+          restore-keys: |
+            windows-rust-1.97.1-${{ hashFiles('Cargo.lock') }}-
+            windows-rust-1.97.1-
       - name: Rust formatting check
         shell: pwsh
         run: |
@@ -57,6 +59,7 @@ jobs:
           rustfmt +1.97.1 --edition 2021 --check tools/test_support/controlled_browser.rs
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Rust tests and lint
+        if: ${{ !cancelled() }}
         id: rust_checks
         run: |
           cargo +1.97.1 test --workspace --locked

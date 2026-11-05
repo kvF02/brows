@@ -3,6 +3,7 @@
 
 mod commands;
 mod settings;
+mod runtime_management;
 mod state;
 
 use brows_contracts::SessionStateDto;
@@ -14,6 +15,7 @@ use commands::{
     profile_create, profile_get, profile_list, profile_restore, profile_update, proxy_list,
     proxy_remove, proxy_save, proxy_test, session_cancel_queued, session_launch, session_list,
     session_observe, session_probe_network, session_stop, settings_get, settings_update,
+    runtime_capture, runtime_activate, support_report,
 };
 use state::AppState;
 use tauri::{Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder};
@@ -83,6 +85,9 @@ pub fn run() {
             backup_import,
             settings_get,
             settings_update,
+            runtime_capture,
+            runtime_activate,
+            support_report,
         ])
         .build(tauri::generate_context!())
         .expect("Brows desktop runtime failed to build")

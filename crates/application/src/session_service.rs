@@ -284,6 +284,20 @@ impl SessionApplicationService {
         Ok(())
     }
 
+    pub fn with_idle_runtime_change<T>(
+        &self,
+        change: impl FnOnce() -> ApplicationResult<T>,
+    ) -> ApplicationResult<T> {
+        let _operation = self.lock_operations()?;
+        let registry = self.lock_registry()?;
+        let snapshot = registry.scheduler.snapshot();
+        if snapshot.active != 0 || snapshot.queued != 0 {
+            return Err(ApplicationError::new(ErrorCode::RuntimeInUse,
+                "stop all running and queued sessions before changing the default runtime"));
+        }
+        change()
+    }
+
     pub fn has_active_profile(
         &self,
         profile_id: &brows_domain::ProfileId,

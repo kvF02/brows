@@ -32,11 +32,12 @@ impl SqliteSettingsStore {
     pub fn get(&self) -> PortResult<SettingsDto> {
         let connection = self.connection.lock().map_err(|_| unavailable())?;
         connection.query_row(
-            "SELECT max_concurrent_sessions, retain_archived_days FROM app_settings WHERE singleton=1",
+            "SELECT max_concurrent_sessions, retain_archived_days, active_runtime_id FROM app_settings WHERE singleton=1",
             [],
             |row| Ok(SettingsDto {
                 max_concurrent_sessions: row.get(0)?,
                 retain_archived_days: row.get(1)?,
+                active_runtime_id: row.get(2)?,
                 ..SettingsDto::default()
             }),
         ).map_err(|error| sqlite_error("read settings", error))
@@ -51,6 +52,13 @@ impl SqliteSettingsStore {
             "UPDATE app_settings SET max_concurrent_sessions=?1, retain_archived_days=?2 WHERE singleton=1",
             params![settings.max_concurrent_sessions, settings.retain_archived_days],
         ).map_err(|error| sqlite_error("save settings", error))?;
+        Ok(())
+    }
+
+    pub fn set_active_runtime(&self, id: &brows_domain::BrowserBuildId) -> PortResult<()> {
+        let connection = self.connection.lock().map_err(|_| unavailable())?;
+        connection.execute("UPDATE app_settings SET active_runtime_id=?1 WHERE singleton=1", [id.as_str()])
+            .map_err(|error| sqlite_error("save active runtime", error))?;
         Ok(())
     }
 }

@@ -1131,6 +1131,8 @@ pub struct LegacyMigrationRecordDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_runtime_id: Option<String>,
     pub max_concurrent_sessions: u32,
     pub retain_archived_days: u32,
     pub telemetry_enabled: bool,
@@ -1141,6 +1143,7 @@ pub struct SettingsDto {
 impl Default for SettingsDto {
     fn default() -> Self {
         Self {
+            active_runtime_id: None,
             max_concurrent_sessions: 10,
             retain_archived_days: 7,
             telemetry_enabled: false,
@@ -1192,6 +1195,7 @@ pub struct SettingsPatchDto {
 impl SettingsPatchDto {
     pub fn apply(&self, current: &SettingsDto) -> Result<SettingsDto, ContractError> {
         let next = SettingsDto {
+            active_runtime_id: current.active_runtime_id.clone(),
             max_concurrent_sessions: self
                 .max_concurrent_sessions
                 .unwrap_or(current.max_concurrent_sessions),
@@ -1218,6 +1222,8 @@ pub struct SettingsUpdateRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserRuntimeDto {
+    pub managed: bool,
+    pub sha256: String,
     pub id: String,
     pub name: String,
     pub version: String,
@@ -1258,6 +1264,8 @@ pub struct FingerprintProbeResultDto {
 impl From<&domain::BrowserBuild> for BrowserRuntimeDto {
     fn from(value: &domain::BrowserBuild) -> Self {
         Self {
+            managed: value.id.as_str().starts_with("managed-"),
+            sha256: value.sha256.clone(),
             id: value.id.as_str().to_owned(),
             name: format!("{} {}", value.provider, value.version),
             version: value.version.clone(),

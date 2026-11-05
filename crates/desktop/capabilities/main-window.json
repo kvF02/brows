@@ -46,6 +46,9 @@
     "allow-backup-export",
     "allow-backup-import",
     "allow-settings-get",
-    "allow-settings-update"
+    "allow-settings-update",
+    "allow-runtime-capture",
+    "allow-runtime-activate",
+    "allow-support-report"
   ]
 }
