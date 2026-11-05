@@ -794,4 +794,3 @@ function normalizeError(error: unknown): ApiError {
     error instanceof Error ? error.message : "桌面命令执行失败",
   );
 }
-

@@ -22,4 +22,3 @@ pub use settings::SqliteSettingsStore;
 
 #[cfg(test)]
 mod tests;
-

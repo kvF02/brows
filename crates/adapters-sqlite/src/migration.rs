@@ -209,4 +209,3 @@ pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
 pub(crate) fn sqlite_error(context: &'static str, error: rusqlite::Error) -> PortError {
     PortError::new(PortErrorKind::Internal, format!("{context}: {error}"))
 }
-

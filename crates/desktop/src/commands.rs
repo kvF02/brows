@@ -182,7 +182,12 @@ pub(crate) async fn settings_update(
 ) -> IpcResult<brows_contracts::SettingsDto> {
     let settings = state.settings.clone();
     let result = tauri::async_runtime::spawn_blocking(move || settings.update(request.changes))
-        .await.map_err(|_| ErrorDto { code: ErrorCode::Internal, message: "settings task failed".to_owned(), violations: Vec::new() })?;
+        .await
+        .map_err(|_| ErrorDto {
+            code: ErrorCode::Internal,
+            message: "settings task failed".to_owned(),
+            violations: Vec::new(),
+        })?;
     ipc(result)
 }
 

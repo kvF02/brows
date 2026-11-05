@@ -11,8 +11,15 @@ pub(crate) struct SettingsService {
 }
 
 impl SettingsService {
-    pub(crate) fn new(store: Arc<SqliteSettingsStore>, sessions: Arc<SessionApplicationService>) -> Self {
-        Self { store, sessions, operations: Mutex::new(()) }
+    pub(crate) fn new(
+        store: Arc<SqliteSettingsStore>,
+        sessions: Arc<SessionApplicationService>,
+    ) -> Self {
+        Self {
+            store,
+            sessions,
+            operations: Mutex::new(()),
+        }
     }
 
     pub(crate) fn get(&self) -> ApplicationResult<SettingsDto> {
@@ -20,11 +27,16 @@ impl SettingsService {
     }
 
     pub(crate) fn update(&self, patch: SettingsPatchDto) -> ApplicationResult<SettingsDto> {
-        let _operation = self.operations.lock().map_err(|_| ApplicationError::new(ErrorCode::Internal, "settings state unavailable"))?;
+        let _operation = self.operations.lock().map_err(|_| {
+            ApplicationError::new(ErrorCode::Internal, "settings state unavailable")
+        })?;
         let current = self.store.get()?;
         let next = patch.apply(&current)?;
         if current.max_concurrent_sessions != next.max_concurrent_sessions {
-            self.sessions.configure_idle_limit(next.max_concurrent_sessions as usize, || Ok(self.store.save(&next)?))?;
+            self.sessions
+                .configure_idle_limit(next.max_concurrent_sessions as usize, || {
+                    Ok(self.store.save(&next)?)
+                })?;
         } else {
             self.store.save(&next)?;
         }

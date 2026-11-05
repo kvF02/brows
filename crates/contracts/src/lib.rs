@@ -1153,13 +1153,22 @@ impl Default for SettingsDto {
 impl SettingsDto {
     pub fn validate(&self) -> Result<(), ContractError> {
         if !(1..=10).contains(&self.max_concurrent_sessions) {
-            return Err(ContractError::invalid_field("maxConcurrentSessions", "must be between 1 and 10"));
+            return Err(ContractError::invalid_field(
+                "maxConcurrentSessions",
+                "must be between 1 and 10",
+            ));
         }
         if !(1..=3650).contains(&self.retain_archived_days) {
-            return Err(ContractError::invalid_field("retainArchivedDays", "must be between 1 and 3650"));
+            return Err(ContractError::invalid_field(
+                "retainArchivedDays",
+                "must be between 1 and 3650",
+            ));
         }
         if self.telemetry_enabled || self.check_updates || !self.stop_sessions_on_exit {
-            return Err(ContractError::invalid_field("settings", "telemetry and automatic updates remain disabled; exit must stop owned sessions"));
+            return Err(ContractError::invalid_field(
+                "settings",
+                "telemetry and automatic updates remain disabled; exit must stop owned sessions",
+            ));
         }
         Ok(())
     }
@@ -1183,11 +1192,17 @@ pub struct SettingsPatchDto {
 impl SettingsPatchDto {
     pub fn apply(&self, current: &SettingsDto) -> Result<SettingsDto, ContractError> {
         let next = SettingsDto {
-            max_concurrent_sessions: self.max_concurrent_sessions.unwrap_or(current.max_concurrent_sessions),
-            retain_archived_days: self.retain_archived_days.unwrap_or(current.retain_archived_days),
+            max_concurrent_sessions: self
+                .max_concurrent_sessions
+                .unwrap_or(current.max_concurrent_sessions),
+            retain_archived_days: self
+                .retain_archived_days
+                .unwrap_or(current.retain_archived_days),
             telemetry_enabled: self.telemetry_enabled.unwrap_or(current.telemetry_enabled),
             check_updates: self.check_updates.unwrap_or(current.check_updates),
-            stop_sessions_on_exit: self.stop_sessions_on_exit.unwrap_or(current.stop_sessions_on_exit),
+            stop_sessions_on_exit: self
+                .stop_sessions_on_exit
+                .unwrap_or(current.stop_sessions_on_exit),
         };
         next.validate()?;
         Ok(next)
@@ -1753,4 +1768,3 @@ mod tests {
         assert!(CommandEnvelope::new("request-2", command).is_err());
     }
 }
-
