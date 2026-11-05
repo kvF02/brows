@@ -393,14 +393,27 @@ export class TauriApiClient implements ApiClient {
     await this.refreshSessions();
     const session = newestActiveSession(this.sessions, profileId);
     if (!session || session.state !== "running") throw new ApiError("INVALID_PROFILE_STATE", "请先启动要检测的环境");
-    return this.call<NetworkProbeObservation>(handlers.sessionProbeNetwork, { request: { sessionId: session.id, acknowledgeExternal: true } });
+    const report = await this.call<NetworkProbeObservation>(handlers.sessionProbeNetwork, { request: { sessionId: session.id, acknowledgeExternal: true } });
+    await this.ensureSameRunningSession(profileId, session.id);
+    return report;
   }
 
   async observeSession(profileId: string): Promise<SessionObservation> {
     await this.refreshSessions();
     const session = newestActiveSession(this.sessions, profileId);
     if (!session || session.state !== "running") throw new ApiError("INVALID_PROFILE_STATE", "请先启动要观测的环境");
-    return this.call<SessionObservation>(handlers.sessionObserve, { request: { sessionId: session.id } });
+    const report = await this.call<SessionObservation>(handlers.sessionObserve, { request: { sessionId: session.id } });
+    if (report.sessionId !== session.id) throw new ApiError("INVALID_PROFILE_STATE", "观测结果的会话已失效，请重新读取");
+    await this.ensureSameRunningSession(profileId, session.id);
+    return report;
+  }
+
+  private async ensureSameRunningSession(profileId: string, sessionId: string): Promise<void> {
+    await this.refreshSessions();
+    const current = newestActiveSession(this.sessions, profileId);
+    if (!current || current.state !== "running" || current.id !== sessionId) {
+      throw new ApiError("INVALID_PROFILE_STATE", "检测期间会话已停止或更换，请重新检查");
+    }
   }
 
   async cancelQueuedSession(sessionId: string): Promise<SessionSummary> {

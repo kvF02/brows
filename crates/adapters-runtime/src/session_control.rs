@@ -45,6 +45,14 @@ struct PendingReply {
     session: Option<String>,
     pending: Arc<Mutex<BTreeMap<u64, mpsc::Sender<Value>>>>,
 }
+impl PendingReply {
+    fn receive_until(&self, deadline: Instant) -> Result<Value, mpsc::RecvTimeoutError> {
+        let remaining = deadline
+            .checked_duration_since(Instant::now())
+            .ok_or(mpsc::RecvTimeoutError::Timeout)?;
+        self.receive.recv_timeout(remaining)
+    }
+}
 impl Drop for PendingReply {
     fn drop(&mut self) {
         if let Ok(mut pending) = self.pending.lock() {
@@ -114,8 +122,11 @@ impl Wire {
         })
     }
     fn finish(&self, reply: PendingReply) -> PortResult<Value> {
+        self.finish_until(reply, Instant::now() + TIMEOUT)
+    }
+    fn finish_until(&self, reply: PendingReply, deadline: Instant) -> PortResult<Value> {
         let method = &reply.method;
-        let result = reply.receive.recv_timeout(TIMEOUT);
+        let result = reply.receive_until(deadline);
         let value = result.map_err(|_| {
             if reply.session.is_none() {
                 self.fail();
@@ -625,6 +636,7 @@ impl Controller {
     }
     pub(super) fn observe(&self, session_id: &SessionId) -> PortResult<SessionObservation> {
         self.wire.ensure_open()?;
+        let deadline = Instant::now() + TIMEOUT;
         let targets: Vec<_> = self
             .targets
             .0
@@ -636,7 +648,7 @@ impl Controller {
         }
         let mut result = Vec::new();
         for target in targets {
-            let observed = evaluate(&self.wire, &target.session, OBSERVE);
+            let observed = evaluate_before(&self.wire, &target.session, OBSERVE, deadline);
             if !self
                 .targets
                 .0
@@ -647,8 +659,8 @@ impl Controller {
                 continue;
             }
             let signals = observed?;
-            result.push(TargetObservation {
-                kind: target.kind,
+            let reading = TargetObservation {
+                kind: target.kind.clone(),
                 user_agent: string(&signals, "userAgent")?,
                 platform: string(&signals, "platform")?,
                 languages: signals["languages"]
@@ -670,13 +682,22 @@ impl Controller {
                     .as_str()
                     .unwrap_or("")
                     .to_owned(),
-            });
+            };
+            result.push((target, reading));
+        }
+        let state = self
+            .targets
+            .0
+            .lock()
+            .map_err(|_| internal("target lock poisoned"))?;
+        if Instant::now() >= deadline {
+            return Err(observation_timeout());
         }
         self.wire.ensure_open()?;
         Ok(SessionObservation {
             session_id: session_id.clone(),
             observed_at_ms: now_ms(),
-            targets: result,
+            targets: state.current_values(result),
         })
     }
 }
@@ -696,11 +717,30 @@ fn string(value: &Value, key: &str) -> PortResult<String> {
         .ok_or_else(|| internal("invalid session observation"))
 }
 fn evaluate(wire: &Wire, session: &str, expression: &str) -> PortResult<Value> {
-    let result = wire.call(
+    evaluate_before(wire, session, expression, Instant::now() + TIMEOUT)
+}
+fn observation_timeout() -> PortError {
+    PortError::new(
+        PortErrorKind::Unavailable,
+        "session observation deadline exceeded",
+    )
+}
+fn evaluate_before(
+    wire: &Wire,
+    session: &str,
+    expression: &str,
+    deadline: Instant,
+) -> PortResult<Value> {
+    let remaining = deadline
+        .checked_duration_since(Instant::now())
+        .ok_or_else(observation_timeout)?;
+    let timeout_ms = remaining.as_millis().clamp(1, 1500) as u64;
+    let reply = wire.begin(
         "Runtime.evaluate",
-        json!({"expression":expression,"returnByValue":true,"silent":true,"timeout":1500}),
+        json!({"expression":expression,"returnByValue":true,"silent":true,"timeout":timeout_ms}),
         Some(session),
     )?;
+    let result = wire.finish_until(reply, deadline)?;
     if result.get("exceptionDetails").is_some() {
         return Err(internal(
             "session observation could not read the requested APIs",
@@ -814,6 +854,28 @@ mod tests {
             session: Some("s".to_owned()),
             pending: pending.clone(),
         };
+        drop(reply);
+        assert!(pending.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn expired_shared_deadline_rejects_even_an_already_queued_reply() {
+        let deadline = Instant::now();
+        let pending = Arc::new(Mutex::new(BTreeMap::new()));
+        let (send, receive) = mpsc::channel();
+        send.send(json!({"result":{"value":true}})).unwrap();
+        pending.lock().unwrap().insert(1, send);
+        let reply = PendingReply {
+            id: 1,
+            method: "Runtime.evaluate".to_owned(),
+            receive,
+            session: Some("s".to_owned()),
+            pending: pending.clone(),
+        };
+        assert!(matches!(
+            reply.receive_until(deadline),
+            Err(mpsc::RecvTimeoutError::Timeout)
+        ));
         drop(reply);
         assert!(pending.lock().unwrap().is_empty());
     }
