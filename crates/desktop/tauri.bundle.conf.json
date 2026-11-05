@@ -1,0 +1,13 @@
+{
+  "build": { "beforeBuildCommand": "" },
+  "bundle": {
+    "active": true,
+    "targets": ["nsis"],
+    "shortDescription": "Brows internal Windows beta",
+    "icon": ["icons/icon.ico", "icons/icon.png"],
+    "windows": {
+      "webviewInstallMode": { "type": "downloadBootstrapper", "silent": true },
+      "nsis": { "installMode": "currentUser", "languages": ["SimpChinese", "English"] }
+    }
+  }
+}
