@@ -81,12 +81,25 @@ pub(crate) async fn backup_export(
     let backups = owned_backup_service(&state)?;
     let profiles = state.profiles.clone();
     let sessions = state.sessions.clone();
-    tauri::async_runtime::spawn_blocking(move || export_backup(&profiles, &sessions, &backups, request))
-        .await.map_err(|_| ErrorDto { code: ErrorCode::Internal, message: "backup export task failed".to_owned(), violations: Vec::new() })?
+    tauri::async_runtime::spawn_blocking(move || {
+        export_backup(&profiles, &sessions, &backups, request)
+    })
+    .await
+    .map_err(|_| ErrorDto {
+        code: ErrorCode::Internal,
+        message: "backup export task failed".to_owned(),
+        violations: Vec::new(),
+    })?
 }
 
-fn owned_backup_service(state: &AppState) -> IpcResult<std::sync::Arc<brows_adapters_backup::EncryptedBackupService>> {
-    state.backups.clone().ok_or_else(|| ErrorDto { code: ErrorCode::CapabilityUnsupported, message: "encrypted backups are unavailable".to_owned(), violations: Vec::new() })
+fn owned_backup_service(
+    state: &AppState,
+) -> IpcResult<std::sync::Arc<brows_adapters_backup::EncryptedBackupService>> {
+    state.backups.clone().ok_or_else(|| ErrorDto {
+        code: ErrorCode::CapabilityUnsupported,
+        message: "encrypted backups are unavailable".to_owned(),
+        violations: Vec::new(),
+    })
 }
 
 fn export_backup(
@@ -96,7 +109,9 @@ fn export_backup(
     request: BackupExportRequest,
 ) -> IpcResult<BackupJobDto> {
     let id = profile_id(&request.profile_id)?;
-    let _lease = sessions.reserve_stopped_profile(id).map_err(|error| error.to_contract())?;
+    let _lease = sessions
+        .reserve_stopped_profile(id)
+        .map_err(|error| error.to_contract())?;
     let profile = ipc(profiles.get(ProfileIdRequest {
         profile_id: request.profile_id.clone(),
     }))?;
@@ -119,9 +134,7 @@ fn export_backup(
             include_proxy_credential: request.include_proxy_credential,
         })
         .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
-    let size_bytes = backups
-        .archive_size(&request.destination_name)
-        .ok();
+    let size_bytes = backups.archive_size(&request.destination_name).ok();
     Ok(BackupJobDto {
         id: format!("backup-{}", request.destination_name),
         profile_id: request.profile_id.as_str().to_owned(),
@@ -145,7 +158,12 @@ pub(crate) async fn backup_import(
     let backups = owned_backup_service(&state)?;
     let profiles = state.profiles.clone();
     tauri::async_runtime::spawn_blocking(move || import_backup(&profiles, &backups, request))
-        .await.map_err(|_| ErrorDto { code: ErrorCode::Internal, message: "backup import task failed".to_owned(), violations: Vec::new() })?
+        .await
+        .map_err(|_| ErrorDto {
+            code: ErrorCode::Internal,
+            message: "backup import task failed".to_owned(),
+            violations: Vec::new(),
+        })?
 }
 
 fn import_backup(
@@ -155,9 +173,14 @@ fn import_backup(
 ) -> IpcResult<BackupImportResultDto> {
     let password = SecretValue::new(request.password.expose().as_bytes().to_vec())
         .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
-    let payload = backups.import(&BackupImportSpec { source_name: request.source_name, password })
+    let payload = backups
+        .import(&BackupImportSpec {
+            source_name: request.source_name,
+            password,
+        })
         .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
-    let result = profiles.create_imported_with_data(payload.profile,
+    let result = profiles.create_imported_with_data(
+        payload.profile,
         |id| Ok(backups.install_restored_data(id.as_str(), &payload.restored_data_dir)?),
         |id| Ok(backups.remove_unpublished_data(id.as_str())?),
     );
@@ -726,40 +749,62 @@ fn profile_id(value: &brows_contracts::ProfileIdDto) -> IpcResult<ProfileId> {
     ProfileId::new(value.as_str().to_owned()).map_err(ErrorDto::from_domain)
 }
 
-fn owned_migration_service(state: &AppState) -> IpcResult<std::sync::Arc<brows_application::MigrationApplicationService>> {
-    state.migrations.clone().ok_or_else(|| ErrorDto { code: ErrorCode::CapabilityUnsupported, message: "migration service unavailable".to_owned(), violations: Vec::new() })
+fn owned_migration_service(
+    state: &AppState,
+) -> IpcResult<std::sync::Arc<brows_application::MigrationApplicationService>> {
+    state.migrations.clone().ok_or_else(|| ErrorDto {
+        code: ErrorCode::CapabilityUnsupported,
+        message: "migration service unavailable".to_owned(),
+        violations: Vec::new(),
+    })
 }
 
-async fn migration_task<T: Send + 'static>(task: impl FnOnce() -> ApplicationResult<T> + Send + 'static) -> IpcResult<T> {
-    let result = tauri::async_runtime::spawn_blocking(task).await
-        .map_err(|_| ErrorDto { code: ErrorCode::Internal, message: "migration task failed".to_owned(), violations: Vec::new() })?;
+async fn migration_task<T: Send + 'static>(
+    task: impl FnOnce() -> ApplicationResult<T> + Send + 'static,
+) -> IpcResult<T> {
+    let result = tauri::async_runtime::spawn_blocking(task)
+        .await
+        .map_err(|_| ErrorDto {
+            code: ErrorCode::Internal,
+            message: "migration task failed".to_owned(),
+            violations: Vec::new(),
+        })?;
     ipc(result)
 }
 
 #[tauri::command]
 pub(crate) async fn legacy_migration_inspect(
-    state: State<'_, AppState>, request: LegacyMigrationInspectRequest,
+    state: State<'_, AppState>,
+    request: LegacyMigrationInspectRequest,
 ) -> IpcResult<LegacyMigrationInspectionDto> {
     let service = owned_migration_service(&state)?;
     let id = profile_id(&request.profile_id)?;
-    migration_task(move || service.inspect(id, request.source_profile_id)).await.map(migration_inspection_dto)
+    migration_task(move || service.inspect(id, request.source_profile_id))
+        .await
+        .map(migration_inspection_dto)
 }
 
 #[tauri::command]
 pub(crate) async fn legacy_migration_execute(
-    state: State<'_, AppState>, request: LegacyMigrationExecuteRequest,
+    state: State<'_, AppState>,
+    request: LegacyMigrationExecuteRequest,
 ) -> IpcResult<LegacyMigrationRecordDto> {
     let service = owned_migration_service(&state)?;
     let id = profile_id(&request.profile_id)?;
-    migration_task(move || service.migrate(id, request.source_profile_id)).await.map(migration_record_dto)
+    migration_task(move || service.migrate(id, request.source_profile_id))
+        .await
+        .map(migration_record_dto)
 }
 
 #[tauri::command]
 pub(crate) async fn legacy_migration_rollback(
-    state: State<'_, AppState>, request: LegacyMigrationRollbackRequest,
+    state: State<'_, AppState>,
+    request: LegacyMigrationRollbackRequest,
 ) -> IpcResult<LegacyMigrationRecordDto> {
     let service = owned_migration_service(&state)?;
-    migration_task(move || service.rollback(request.migration_id)).await.map(migration_record_dto)
+    migration_task(move || service.rollback(request.migration_id))
+        .await
+        .map(migration_record_dto)
 }
 
 #[tauri::command]
@@ -1140,27 +1185,90 @@ mod tests {
 
     #[test]
     fn backup_commands_reject_running_profiles_and_restore_a_fresh_identity() {
-        let root = std::env::temp_dir().join(format!("brows-backup-commands-{}", uuid::Uuid::new_v4()));
+        let root =
+            std::env::temp_dir().join(format!("brows-backup-commands-{}", uuid::Uuid::new_v4()));
         let state = AppState::prototype(root.clone()).unwrap();
-        let backups = brows_adapters_backup::EncryptedBackupService::new(root.join("backups"), root.join("profiles")).unwrap();
-        let profile = state.profiles.create(ProfileCreateRequest { profile: ProfileDraftDto {
-            name: "backup command fixture".to_owned(), tags: Vec::new(), preset_id: PresetIdDto::new("system-native").unwrap(), preset_version: 1,
-            proxy_id: None, browser: BrowserSelectorDto::Channel { channel: brows_contracts::BrowserChannelDto::Stable },
-            persona: PersonaDto::default(), locale: LocaleDto { accept_languages: vec!["en-US".to_owned()], timezone: None },
-            window: WindowDto { width: 1280, height: 800, start_maximized: false }, startup_urls: Vec::new(),
-        } }).unwrap();
-        let request = BackupExportRequest { profile_id: profile.id.clone(), destination_name: "fixture.browsbak".to_owned(),
-            password: brows_contracts::SecretInput::new("correct horse battery").unwrap(), include_proxy_credential: false };
-        let outcome = state.sessions.launch(SessionLaunchRequest { profile_id: profile.id.clone() }).unwrap();
-        let session = match outcome { brows_application::SessionLaunchOutcome::Started { session, .. } => session, _ => panic!("fixture must start") };
-        assert_eq!(export_backup(&state.profiles, &state.sessions, &backups, request.clone()).unwrap_err().code, ErrorCode::ProfileLocked);
-        state.sessions.stop(SessionStopRequest { session_id: session.id }).unwrap();
+        let backups = brows_adapters_backup::EncryptedBackupService::new(
+            root.join("backups"),
+            root.join("profiles"),
+        )
+        .unwrap();
+        let profile = state
+            .profiles
+            .create(ProfileCreateRequest {
+                profile: ProfileDraftDto {
+                    name: "backup command fixture".to_owned(),
+                    tags: Vec::new(),
+                    preset_id: PresetIdDto::new("system-native").unwrap(),
+                    preset_version: 1,
+                    proxy_id: None,
+                    browser: BrowserSelectorDto::Channel {
+                        channel: brows_contracts::BrowserChannelDto::Stable,
+                    },
+                    persona: PersonaDto::default(),
+                    locale: LocaleDto {
+                        accept_languages: vec!["en-US".to_owned()],
+                        timezone: None,
+                    },
+                    window: WindowDto {
+                        width: 1280,
+                        height: 800,
+                        start_maximized: false,
+                    },
+                    startup_urls: Vec::new(),
+                },
+            })
+            .unwrap();
+        let request = BackupExportRequest {
+            profile_id: profile.id.clone(),
+            destination_name: "fixture.browsbak".to_owned(),
+            password: brows_contracts::SecretInput::new("correct horse battery").unwrap(),
+            include_proxy_credential: false,
+        };
+        let outcome = state
+            .sessions
+            .launch(SessionLaunchRequest {
+                profile_id: profile.id.clone(),
+            })
+            .unwrap();
+        let session = match outcome {
+            brows_application::SessionLaunchOutcome::Started { session, .. } => session,
+            _ => panic!("fixture must start"),
+        };
+        assert_eq!(
+            export_backup(&state.profiles, &state.sessions, &backups, request.clone())
+                .unwrap_err()
+                .code,
+            ErrorCode::ProfileLocked
+        );
+        state
+            .sessions
+            .stop(SessionStopRequest {
+                session_id: session.id,
+            })
+            .unwrap();
         export_backup(&state.profiles, &state.sessions, &backups, request).unwrap();
-        let restored = import_backup(&state.profiles, &backups, BackupImportRequest { source_name: "fixture.browsbak".to_owned(), password: brows_contracts::SecretInput::new("correct horse battery").unwrap() }).unwrap();
+        let restored = import_backup(
+            &state.profiles,
+            &backups,
+            BackupImportRequest {
+                source_name: "fixture.browsbak".to_owned(),
+                password: brows_contracts::SecretInput::new("correct horse battery").unwrap(),
+            },
+        )
+        .unwrap();
         assert_ne!(restored.profile.id, profile.id);
         assert!(!restored.profile.archived);
-        assert_eq!(state.profiles.list(ProfileListRequest::default()).unwrap().len(), 2);
-        drop(state); drop(backups);
+        assert_eq!(
+            state
+                .profiles
+                .list(ProfileListRequest::default())
+                .unwrap()
+                .len(),
+            2
+        );
+        drop(state);
+        drop(backups);
         std::fs::remove_dir_all(root).unwrap();
     }
 

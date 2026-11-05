@@ -136,45 +136,108 @@ fn profile_data_reservation_blocks_only_the_reserved_profile() {
     let first = harness.create_profile("backup source");
     let second = harness.create_profile("independent profile");
     let id: ProfileId = first.id.clone().try_into().unwrap();
-    let lease = harness.session_service.reserve_stopped_profile(id.clone()).unwrap();
+    let lease = harness
+        .session_service
+        .reserve_stopped_profile(id.clone())
+        .unwrap();
     assert!(harness.session_service.has_active_profile(&id).unwrap());
     assert!(harness.session_service.reserve_stopped_profile(id).is_err());
-    let blocked = harness.session_service.launch(SessionLaunchRequest { profile_id: first.id.clone() }).unwrap_err();
+    let blocked = harness
+        .session_service
+        .launch(SessionLaunchRequest {
+            profile_id: first.id.clone(),
+        })
+        .unwrap_err();
     assert_eq!(blocked.code(), &ErrorCode::ProfileLocked);
-    let started = harness.session_service.launch(SessionLaunchRequest { profile_id: second.id }).unwrap();
-    let session = match started { SessionLaunchOutcome::Started { session, .. } => session, _ => panic!("independent profile must start") };
-    harness.session_service.stop(SessionStopRequest { session_id: session.id }).unwrap();
+    let started = harness
+        .session_service
+        .launch(SessionLaunchRequest {
+            profile_id: second.id,
+        })
+        .unwrap();
+    let session = match started {
+        SessionLaunchOutcome::Started { session, .. } => session,
+        _ => panic!("independent profile must start"),
+    };
+    harness
+        .session_service
+        .stop(SessionStopRequest {
+            session_id: session.id,
+        })
+        .unwrap();
     drop(lease);
-    let launched = harness.session_service.launch(SessionLaunchRequest { profile_id: first.id.clone() }).unwrap();
+    let launched = harness
+        .session_service
+        .launch(SessionLaunchRequest {
+            profile_id: first.id.clone(),
+        })
+        .unwrap();
     assert!(matches!(launched, SessionLaunchOutcome::Started { .. }));
-    assert!(harness.session_service.reserve_stopped_profile(first.id.try_into().unwrap()).is_err());
+    assert!(harness
+        .session_service
+        .reserve_stopped_profile(first.id.try_into().unwrap())
+        .is_err());
 }
 
 #[test]
 fn restored_profile_is_published_only_after_data_install_and_cleans_failed_publication() {
     let harness = Harness::new(1);
     let original = harness.create_profile("source");
-    let source = harness.profiles.get(&original.id.clone().try_into().unwrap()).unwrap();
-    let restored = harness.profile_service.create_imported_with_data(source.clone(), |id| {
-        assert!(harness.profiles.get(id).is_err(), "restoring profile must not be visible before userdata is ready");
-        Ok(())
-    }, |_| panic!("successful publish must not roll back data")).unwrap();
+    let source = harness
+        .profiles
+        .get(&original.id.clone().try_into().unwrap())
+        .unwrap();
+    let restored = harness
+        .profile_service
+        .create_imported_with_data(
+            source.clone(),
+            |id| {
+                assert!(
+                    harness.profiles.get(id).is_err(),
+                    "restoring profile must not be visible before userdata is ready"
+                );
+                Ok(())
+            },
+            |_| panic!("successful publish must not roll back data"),
+        )
+        .unwrap();
     assert_ne!(restored.id, original.id);
     let mut collision = source.clone();
     let cleaned = std::cell::Cell::new(false);
-    assert!(harness.profile_service.create_imported_with_data(source.clone(), |id| {
-        collision.id = id.clone();
-        harness.profiles.create(collision)?;
-        Ok(())
-    }, |_| {
-        cleaned.set(true); Ok(())
-    }).is_err());
-    assert!(cleaned.get(), "new userdata must be removed when metadata insertion fails");
-    let failed = harness.profile_service.create_imported_with_data(source, |_| {
-        Err(ApplicationError::new(ErrorCode::Internal, "simulated data install failure"))
-    }, |_| panic!("failed atomic install did not install data"));
+    assert!(harness
+        .profile_service
+        .create_imported_with_data(
+            source.clone(),
+            |id| {
+                collision.id = id.clone();
+                harness.profiles.create(collision)?;
+                Ok(())
+            },
+            |_| {
+                cleaned.set(true);
+                Ok(())
+            }
+        )
+        .is_err());
+    assert!(
+        cleaned.get(),
+        "new userdata must be removed when metadata insertion fails"
+    );
+    let failed = harness.profile_service.create_imported_with_data(
+        source,
+        |_| {
+            Err(ApplicationError::new(
+                ErrorCode::Internal,
+                "simulated data install failure",
+            ))
+        },
+        |_| panic!("failed atomic install did not install data"),
+    );
     assert!(failed.is_err());
-    assert!(harness.profiles.get(&ProfileId::new("profile-4").unwrap()).is_err());
+    assert!(harness
+        .profiles
+        .get(&ProfileId::new("profile-4").unwrap())
+        .is_err());
 }
 
 #[test]

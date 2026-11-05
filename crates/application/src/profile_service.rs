@@ -89,14 +89,22 @@ impl ProfileApplicationService {
         profile.archived = false;
         self.validate_references(&profile)?;
         match self.profiles.get(&profile.id) {
-            Ok(_) => return Err(ApplicationError::new(ErrorCode::AlreadyExists, "new import identity already exists")),
-            Err(error) if error.kind == crate::PortErrorKind::NotFound => {},
+            Ok(_) => {
+                return Err(ApplicationError::new(
+                    ErrorCode::AlreadyExists,
+                    "new import identity already exists",
+                ))
+            }
+            Err(error) if error.kind == crate::PortErrorKind::NotFound => {}
             Err(error) => return Err(error.into()),
         }
         install(&profile.id)?;
         if let Err(error) = self.profiles.create(profile.clone()) {
             if rollback(&profile.id).is_err() {
-                return Err(ApplicationError::new(ErrorCode::Internal, "restored metadata publication and unreferenced data cleanup failed"));
+                return Err(ApplicationError::new(
+                    ErrorCode::Internal,
+                    "restored metadata publication and unreferenced data cleanup failed",
+                ));
             }
             return Err(error.into());
         }
@@ -235,4 +243,3 @@ fn copy_name(original: &str) -> String {
     value.push_str(SUFFIX);
     value
 }
-

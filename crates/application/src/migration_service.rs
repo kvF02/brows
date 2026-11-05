@@ -94,7 +94,9 @@ impl MigrationApplicationService {
                 "only completed migrations can be rolled back",
             ));
         }
-        let _profile_lease = self.sessions.reserve_stopped_profile(record.profile_id.clone())?;
+        let _profile_lease = self
+            .sessions
+            .reserve_stopped_profile(record.profile_id.clone())?;
         let backup_key = record.backup_key.as_deref().ok_or_else(|| {
             ApplicationError::new(ErrorCode::InvalidProfileState, "migration has no backup")
         })?;
@@ -138,4 +140,3 @@ fn public_failure_summary(kind: crate::PortErrorKind) -> &'static str {
         _ => "migration failed",
     }
 }
-

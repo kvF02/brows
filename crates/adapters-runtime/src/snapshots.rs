@@ -215,29 +215,52 @@ fn verify_publisher_and_version(build: &BrowserBuild) -> PortResult<()> {
 fn configure_snapshot_acl(root: &Path) -> PortResult<()> {
     use std::os::windows::process::CommandExt;
     use std::time::{Duration, Instant};
-    let metadata = fs::symlink_metadata(root).map_err(|_| invalid_data("cannot inspect snapshot ACL target"))?;
+    let metadata = fs::symlink_metadata(root)
+        .map_err(|_| invalid_data("cannot inspect snapshot ACL target"))?;
     if !metadata.is_dir() || metadata.file_type().is_symlink() || is_reparse_point(&metadata) {
-        return Err(invalid_data("snapshot ACL target must be an ordinary directory"));
+        return Err(invalid_data(
+            "snapshot ACL target must be an ordinary directory",
+        ));
     }
-    let system = std::env::var_os("SystemRoot").ok_or_else(|| internal("Windows system root unavailable"))?;
+    let system = std::env::var_os("SystemRoot")
+        .ok_or_else(|| internal("Windows system root unavailable"))?;
     let mut child = Command::new(PathBuf::from(system).join("System32/icacls.exe"))
-        .arg(root).args(["/grant", "*S-1-15-2-2:(OI)(CI)(RX)", "/T", "/Q"])
-        .stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null())
-        .creation_flags(0x0800_0000).spawn().map_err(|_| internal("cannot configure snapshot sandbox read permissions"))?;
+        .arg(root)
+        .args(["/grant", "*S-1-15-2-2:(OI)(CI)(RX)", "/T", "/Q"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(0x0800_0000)
+        .spawn()
+        .map_err(|_| internal("cannot configure snapshot sandbox read permissions"))?;
     let deadline = Instant::now() + Duration::from_secs(30);
     loop {
         match child.try_wait() {
             Ok(Some(status)) if status.success() => return Ok(()),
-            Ok(Some(_)) => return Err(invalid_data("snapshot sandbox read permission setup failed")),
-            Err(_) => { let _ = child.kill(); let _ = child.wait(); return Err(internal("cannot inspect snapshot ACL setup")); },
-            Ok(None) if Instant::now() >= deadline => { let _ = child.kill(); let _ = child.wait(); return Err(internal("snapshot ACL setup timed out")); },
+            Ok(Some(_)) => {
+                return Err(invalid_data(
+                    "snapshot sandbox read permission setup failed",
+                ))
+            }
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(internal("cannot inspect snapshot ACL setup"));
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(internal("snapshot ACL setup timed out"));
+            }
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
         }
     }
 }
 
 #[cfg(not(windows))]
-fn configure_snapshot_acl(_root: &Path) -> PortResult<()> { Ok(()) }
+fn configure_snapshot_acl(_root: &Path) -> PortResult<()> {
+    Ok(())
+}
 
 #[derive(Debug)]
 struct Staging(PathBuf);

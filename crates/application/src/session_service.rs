@@ -122,7 +122,10 @@ impl SessionApplicationService {
         let outcome = {
             let mut registry = self.lock_registry()?;
             if registry.maintenance_profiles.contains(&ticket.profile_id) {
-                return Err(ApplicationError::new(ErrorCode::ProfileLocked, "profile data is reserved for backup or migration"));
+                return Err(ApplicationError::new(
+                    ErrorCode::ProfileLocked,
+                    "profile data is reserved for backup or migration",
+                ));
             }
             let outcome = registry.scheduler.enqueue(ticket)?;
             let mut session = Session::new(session_id.clone(), profile.id, now);
@@ -326,20 +329,35 @@ impl SessionApplicationService {
         profile_id: &brows_domain::ProfileId,
     ) -> ApplicationResult<bool> {
         let registry = self.lock_registry()?;
-        Ok(registry.maintenance_profiles.contains(profile_id) || registry
-            .sessions
-            .values()
-            .any(|session| &session.profile_id == profile_id && session.state.is_active()))
+        Ok(registry.maintenance_profiles.contains(profile_id)
+            || registry
+                .sessions
+                .values()
+                .any(|session| &session.profile_id == profile_id && session.state.is_active()))
     }
 
-    pub fn reserve_stopped_profile(&self, profile_id: ProfileId) -> ApplicationResult<StoppedProfileLease<'_>> {
+    pub fn reserve_stopped_profile(
+        &self,
+        profile_id: ProfileId,
+    ) -> ApplicationResult<StoppedProfileLease<'_>> {
         let _operation = self.lock_operations()?;
         let mut registry = self.lock_registry()?;
-        if registry.maintenance_profiles.contains(&profile_id) || registry.sessions.values().any(|session| session.profile_id == profile_id && session.state.is_active()) {
-            return Err(ApplicationError::new(ErrorCode::ProfileLocked, "stop the profile and wait for existing backup or migration work"));
+        if registry.maintenance_profiles.contains(&profile_id)
+            || registry
+                .sessions
+                .values()
+                .any(|session| session.profile_id == profile_id && session.state.is_active())
+        {
+            return Err(ApplicationError::new(
+                ErrorCode::ProfileLocked,
+                "stop the profile and wait for existing backup or migration work",
+            ));
         }
         registry.maintenance_profiles.insert(profile_id.clone());
-        Ok(StoppedProfileLease { service: self, profile_id })
+        Ok(StoppedProfileLease {
+            service: self,
+            profile_id,
+        })
     }
 
     /// Called by a process supervisor when Chromium exits without an explicit
