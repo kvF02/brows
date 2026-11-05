@@ -10,6 +10,17 @@ concurrency:
   group: windows-acceptance-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  format:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install formatter
+        run: rustup toolchain install 1.97.1 --profile minimal --component rustfmt
+      - name: Check all Rust source formatting independently
+        run: |
+          cargo +1.97.1 fmt --all -- --check
+          rustfmt +1.97.1 --edition 2021 --check tools/test_support/controlled_browser.rs
   windows:
     runs-on: windows-latest
     timeout-minutes: 40

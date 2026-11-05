@@ -149,7 +149,7 @@ pub(super) fn run(build: &BrowserBuild, profile_root: &Path) -> PortResult<Obser
             if Instant::now() >= deadline {
                 return Err(PortError::new(
                     PortErrorKind::Unavailable,
-                    "指纹能力检测超时；未保留此前的支持状态，可使用系统原生模式",
+                    format!("指纹能力检测超时；未保留此前的支持状态，可使用系统原生模式（本地页面请求：{}；输出：{} 字节）", server.requested.load(Ordering::Acquire), fs::metadata(&output_path).map(|metadata| metadata.len()).unwrap_or(0)),
                 ));
             }
             thread::sleep(Duration::from_millis(40));
