@@ -108,7 +108,9 @@ impl Targets {
         Ok(())
     }
     pub fn reload(&mut self, session: &str) -> PortResult<Option<TargetJob>> {
-        if !self.attached.contains_key(session) {
+        // WorkerReadyForInspection also emits this notification on initial
+        // startup. Only a previously stopped generation needs a new job.
+        if !self.attached.contains_key(session) || !self.dormant.contains(session) {
             return Ok(None);
         }
         let generation = self.next_generation()?;
@@ -160,7 +162,9 @@ mod tests {
     fn superseded_restarts_and_detached_sessions_are_invalidated() {
         let mut state = Targets::default();
         let first = state.attach("t", "s", "worker", false).unwrap().unwrap();
+        state.suspend("s").unwrap();
         let second = state.reload("s").unwrap().unwrap();
+        state.suspend("s").unwrap();
         let third = state.reload("s").unwrap().unwrap();
         assert!(!state.ready(&first));
         assert!(!state.ready(&second));
@@ -169,6 +173,25 @@ mod tests {
         assert!(!state.is_current(&third));
         assert!(state.snapshot().is_empty());
         assert!(state.reload("s").unwrap().is_none());
+    }
+    #[test]
+    fn initial_and_duplicate_ready_notifications_preserve_the_current_job() {
+        let mut state = Targets::default();
+        let initial = state
+            .attach("t", "s", "service_worker", false)
+            .unwrap()
+            .unwrap();
+        assert!(state.reload("s").unwrap().is_none());
+        assert!(state.is_current(&initial));
+        assert!(state.ready(&initial));
+        assert!(state.reload("s").unwrap().is_none());
+        assert_eq!(state.snapshot().len(), 1);
+        state.suspend("s").unwrap();
+        let restarted = state.reload("s").unwrap().unwrap();
+        assert!(!state.is_current(&initial));
+        assert!(state.reload("s").unwrap().is_none());
+        assert!(state.is_current(&restarted));
+        assert!(state.ready(&restarted));
     }
     #[test]
     fn completed_reads_are_revalidated_after_later_targets_are_read() {

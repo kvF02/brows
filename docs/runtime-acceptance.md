@@ -57,6 +57,11 @@ target 注册表独立跟踪连接、停止和重载的代次。停止的 Worker
 重载重新排队配置，同一个 session 串行安装，旧任务或旧观测不能重新发布结果。
 丢弃的协议请求会释放有界 pending 槽位；单个已失效 target 的超时不直接终止整个浏览器，
 当前 target 的策略安装失败仍会关闭会话。原生停止/重启/更新测试与纯注册表测试分别运行。
+Service Worker 初次就绪和重复就绪通知不会重复排队配置；只有已停止的代次收到就绪
+通知才重新配置。协议对已结束目标返回的精确生命周期错误会使该 Worker 失效并保留
+重启元数据，未知协议错误仍然关闭会话。此处理依据上游
+[Worker 就绪/停止通知](https://chromium.googlesource.com/chromium/src/+/refs/heads/main/content/browser/devtools/service_worker_devtools_agent_host.cc)
+与[待处理命令的结束错误](https://chromium.googlesource.com/chromium/src/+/lkgr/content/browser/devtools/devtools_session.cc)。
 
 诊断页的“读取当前会话设备信号”只允许固定字段，最多读取 32 个 target；IPC 不接受
 脚本、URL、Cookie 或页面正文参数。所有 target 共用 8 秒观测预算，协议等待与每次
@@ -83,6 +88,7 @@ target 注册表独立跟踪连接、停止和重载的代次。停止的 Worker
 
 `.github/workflows/acceptance.yml` 在 Windows 执行 JavaScript 测试、完整 UI 构建、
 Rust workspace 测试和 clippy，并验证 Edge 签名、生产登记/能力探针、两个真实 SeedableNoise 会话的启动/停止及跨上下文观测。
+生产会话验收连续执行三轮，每轮均须通过；任一轮失败即停止，不将重试成功记作本轮通过。
 新增 `private_worker_lifecycle_acceptance` 使用同一个 loopback fixture，验证 Service Worker
 停止后不被诊断读取唤醒、消息唤醒后的首段脚本、版本更新后的首段脚本，以及硬件、
 时区、Canvas 重复读取和 WebGL 声明的一致性。生产会话验收同时比较六种上下文的
