@@ -2,8 +2,8 @@
 #![deny(missing_debug_implementations)]
 
 mod commands;
-mod settings;
 mod runtime_management;
+mod settings;
 mod state;
 
 use brows_contracts::SessionStateDto;
@@ -13,9 +13,9 @@ use commands::{
     legacy_migration_rollback, list_runtimes, morelogin_import, morelogin_preview,
     network_probe_service, probe_runtime_fingerprint, profile_archive, profile_clone,
     profile_create, profile_get, profile_list, profile_restore, profile_update, proxy_list,
-    proxy_remove, proxy_save, proxy_test, session_cancel_queued, session_launch, session_list,
-    session_observe, session_probe_network, session_stop, settings_get, settings_update,
-    runtime_capture, runtime_activate, support_report,
+    proxy_remove, proxy_save, proxy_test, runtime_activate, runtime_capture, session_cancel_queued,
+    session_launch, session_list, session_observe, session_probe_network, session_stop,
+    settings_get, settings_update, support_report,
 };
 use state::AppState;
 use tauri::{Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder};

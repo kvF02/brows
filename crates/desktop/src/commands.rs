@@ -14,7 +14,7 @@ use brows_contracts::{
     PersonaDto, PresetIdDto, ProfileCreateRequest, ProfileDraftDto, ProfileDto, ProfileIdRequest,
     ProfileListRequest, ProfileRevisionRequest, ProfileUpdateRequest, ProxyConnectivityCheckDto,
     ProxyDto, ProxyRemoveRequest, ProxySaveRequest, ProxyTestRequest, SessionCancelQueuedRequest,
-    SessionDto, SessionLaunchRequest, SessionStopRequest, WindowDto,
+    SessionDto, SessionLaunchRequest, SessionStateDto, SessionStopRequest, WindowDto,
 };
 use brows_domain::ProfileId;
 use serde::{Deserialize, Serialize};
@@ -167,46 +167,81 @@ pub(crate) fn list_runtimes(state: State<'_, AppState>) -> IpcResult<Vec<Browser
         .browsers
         .list_builds()
         .map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
-    Ok(builds.iter().map(|build| runtime_dto(state.browsers.as_ref(), build)).collect())
+    Ok(builds
+        .iter()
+        .map(|build| runtime_dto(state.browsers.as_ref(), build))
+        .collect())
 }
 
-fn runtime_dto(browsers: &dyn brows_application::BrowserRuntime, build: &brows_domain::BrowserBuild) -> BrowserRuntimeDto {
+fn runtime_dto(
+    browsers: &dyn brows_application::BrowserRuntime,
+    build: &brows_domain::BrowserBuild,
+) -> BrowserRuntimeDto {
     let mut dto = BrowserRuntimeDto::from(build);
-    dto.active = browsers.resolve_build(&brows_domain::BrowserBuildSelector::Channel(build.channel))
+    dto.active = browsers
+        .resolve_build(&brows_domain::BrowserBuildSelector::Channel(build.channel))
         .is_ok_and(|active| active.id == build.id);
     dto
 }
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct RuntimeManagementRequest { runtime_id: String }
+pub(crate) struct RuntimeManagementRequest {
+    runtime_id: String,
+}
 
 #[tauri::command]
 pub(crate) async fn runtime_capture(
-    state: State<'_, AppState>, request: RuntimeManagementRequest,
+    state: State<'_, AppState>,
+    request: RuntimeManagementRequest,
 ) -> IpcResult<BrowserRuntimeDto> {
-    let management = state.runtime_management.clone().ok_or_else(|| ErrorDto { code: ErrorCode::CapabilityUnsupported, message: "managed runtime storage is unavailable".to_owned(), violations: Vec::new() })?;
-    let id = brows_domain::BrowserBuildId::new(request.runtime_id).map_err(ErrorDto::from_domain)?;
+    let management = state.runtime_management.clone().ok_or_else(|| ErrorDto {
+        code: ErrorCode::CapabilityUnsupported,
+        message: "managed runtime storage is unavailable".to_owned(),
+        violations: Vec::new(),
+    })?;
+    let id =
+        brows_domain::BrowserBuildId::new(request.runtime_id).map_err(ErrorDto::from_domain)?;
     let browsers = state.browsers.clone();
-    let build = tauri::async_runtime::spawn_blocking(move || management.capture(id)).await
-        .map_err(|_| ErrorDto { code: ErrorCode::Internal, message: "runtime capture task failed".to_owned(), violations: Vec::new() })?;
+    let build = tauri::async_runtime::spawn_blocking(move || management.capture(id))
+        .await
+        .map_err(|_| ErrorDto {
+            code: ErrorCode::Internal,
+            message: "runtime capture task failed".to_owned(),
+            violations: Vec::new(),
+        })?;
     Ok(runtime_dto(browsers.as_ref(), &ipc(build)?))
 }
 
 #[tauri::command]
 pub(crate) async fn runtime_activate(
-    state: State<'_, AppState>, request: RuntimeManagementRequest,
+    state: State<'_, AppState>,
+    request: RuntimeManagementRequest,
 ) -> IpcResult<()> {
-    let management = state.runtime_management.clone().ok_or_else(|| ErrorDto { code: ErrorCode::CapabilityUnsupported, message: "runtime management is unavailable".to_owned(), violations: Vec::new() })?;
-    let id = brows_domain::BrowserBuildId::new(request.runtime_id).map_err(ErrorDto::from_domain)?;
-    let result = tauri::async_runtime::spawn_blocking(move || management.activate(id)).await
-        .map_err(|_| ErrorDto { code: ErrorCode::Internal, message: "runtime activation task failed".to_owned(), violations: Vec::new() })?;
+    let management = state.runtime_management.clone().ok_or_else(|| ErrorDto {
+        code: ErrorCode::CapabilityUnsupported,
+        message: "runtime management is unavailable".to_owned(),
+        violations: Vec::new(),
+    })?;
+    let id =
+        brows_domain::BrowserBuildId::new(request.runtime_id).map_err(ErrorDto::from_domain)?;
+    let result = tauri::async_runtime::spawn_blocking(move || management.activate(id))
+        .await
+        .map_err(|_| ErrorDto {
+            code: ErrorCode::Internal,
+            message: "runtime activation task failed".to_owned(),
+            violations: Vec::new(),
+        })?;
     ipc(result)
 }
 
 /// Fixed support export: no raw profile DTOs, paths, endpoints or browser data.
 #[tauri::command]
 pub(crate) fn support_report(state: State<'_, AppState>) -> IpcResult<serde_json::Value> {
+    support_report_value(&state)
+}
+
+fn support_report_value(state: &AppState) -> IpcResult<serde_json::Value> {
     let settings = ipc(state.settings.get())?;
     let sessions = ipc(state.sessions.list())?;
     let builds = state.browsers.list_builds().map_err(|error| brows_application::ApplicationError::from(error).to_contract())?;
@@ -1048,6 +1083,22 @@ mod tests {
         let request: SessionNetworkProbeRequest =
             serde_json::from_value(serde_json::json!({"sessionId":"s"})).unwrap();
         assert!(!request.acknowledge_external);
+    }
+
+    #[test]
+    fn management_rejects_paths_and_support_export_omits_private_fields() {
+        assert!(serde_json::from_value::<RuntimeManagementRequest>(serde_json::json!({
+            "runtimeId": "edge", "path": "C:\\private\\browser.exe"
+        })).is_err());
+        let state = AppState::prototype(std::path::PathBuf::from("PRIVATE_HOST_PATH")).unwrap();
+        let report = support_report_value(&state).unwrap();
+        let encoded = serde_json::to_string(&report).unwrap();
+        assert!(!encoded.contains("PRIVATE_HOST_PATH"));
+        for field in ["executablePath", "profileId", "startupUrls", "proxyId", "password", "cookie"] {
+            assert!(!encoded.contains(field), "unexpected support field {field}");
+        }
+        assert_eq!(report["formatVersion"], 1);
+        assert_eq!(report["settings"]["telemetryEnabled"], false);
     }
 
     fn preview_request() -> FingerprintPreviewRequest {

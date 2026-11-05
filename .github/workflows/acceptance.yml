@@ -88,6 +88,14 @@ jobs:
         if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
         timeout-minutes: 3
         run: cargo +1.97.1 test -p brows-adapters-runtime private_renderer_crash_acceptance -- --ignored --nocapture
+      - name: Managed runtime capture and restart acceptance
+        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
+        timeout-minutes: 7
+        run: cargo +1.97.1 test -p brows-desktop managed_runtime_acceptance -- --ignored --nocapture
+      - name: Ten-profile bounded capacity acceptance
+        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
+        timeout-minutes: 4
+        run: cargo +1.97.1 test -p brows-desktop desktop_capacity_acceptance -- --ignored --nocapture
       - uses: actions/cache/save@v4
         if: always()
         with:
@@ -104,4 +112,6 @@ jobs:
             target/fingerprint-session-acceptance-round-*.json
             target/fingerprint-module-worker-acceptance.json
             target/fingerprint-renderer-crash-acceptance.json
+            target/managed-runtime-acceptance.json
+            target/desktop-capacity-acceptance.json
           if-no-files-found: ignore

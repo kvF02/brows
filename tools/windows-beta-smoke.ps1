@@ -34,6 +34,8 @@ try {
     $removal = Start-Process -FilePath $uninstall -ArgumentList '/S' -PassThru
     if (-not $removal.WaitForExit(60000)) { $removal.Kill(); throw 'Uninstaller timed out' }
     if ($removal.ExitCode -ne 0) { throw 'Uninstaller failed' }
+    for ($attempt = 0; $attempt -lt 120 -and (Test-Path $executable); $attempt++) { Start-Sleep -Milliseconds 250 }
+    if (Test-Path $executable) { throw 'Uninstaller left the installed executable' }
     if ([IO.File]::ReadAllText($sentinel) -ne 'preserve-user-data') { throw 'Uninstall removed application data' }
     @{
         schemaVersion = 1; assertionsPassed = $true; complete = $false

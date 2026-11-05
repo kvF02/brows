@@ -29,10 +29,10 @@ use std::{
 
 mod authenticode;
 mod fingerprint_probe;
-mod snapshots;
 mod profile_floor;
 #[cfg(windows)]
 mod session_control;
+mod snapshots;
 #[cfg(windows)]
 mod target_registry;
 #[cfg(windows)]
@@ -85,8 +85,8 @@ impl ManagedProcess {
     }
 }
 
-pub use authenticode::verify_authenticode_publisher;
 pub use authenticode::read_file_version;
+pub use authenticode::verify_authenticode_publisher;
 
 const MAX_PREFERENCES_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -532,7 +532,8 @@ impl BrowserRuntime for ManagedChromiumRuntime {
                 "所选运行时未通过指纹扩展检测；可使用系统原生模式，不能启动 SeedableNoise",
             ));
         }
-        let admitted_directory = create_confined_directory(&self.profile_root, &plan.user_data_dir)?;
+        let admitted_directory =
+            create_confined_directory(&self.profile_root, &plan.user_data_dir)?;
         profile_floor::admit(&admitted_directory, &build)?;
         let user_data_dir = self.prepare_profile(plan)?;
         let arguments = Self::render_arguments(plan, &user_data_dir)?;

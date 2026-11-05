@@ -57,7 +57,11 @@ impl SqliteSettingsStore {
 
     pub fn set_active_runtime(&self, id: &brows_domain::BrowserBuildId) -> PortResult<()> {
         let connection = self.connection.lock().map_err(|_| unavailable())?;
-        connection.execute("UPDATE app_settings SET active_runtime_id=?1 WHERE singleton=1", [id.as_str()])
+        connection
+            .execute(
+                "UPDATE app_settings SET active_runtime_id=?1 WHERE singleton=1",
+                [id.as_str()],
+            )
             .map_err(|error| sqlite_error("save active runtime", error))?;
         Ok(())
     }

@@ -18,7 +18,8 @@ impl RuntimeManagementService {
 
     pub(crate) fn activate(&self, id: BrowserBuildId) -> ApplicationResult<()> {
         self.sessions.with_idle_runtime_change(|| {
-            self.browsers.activate_persisted(&id, || self.store.set_active_runtime(&id))?;
+            self.browsers
+                .activate_persisted(&id, || self.store.set_active_runtime(&id))?;
             Ok(())
         })
     }

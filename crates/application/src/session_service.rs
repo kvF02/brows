@@ -292,8 +292,10 @@ impl SessionApplicationService {
         let registry = self.lock_registry()?;
         let snapshot = registry.scheduler.snapshot();
         if snapshot.active != 0 || snapshot.queued != 0 {
-            return Err(ApplicationError::new(ErrorCode::RuntimeInUse,
-                "stop all running and queued sessions before changing the default runtime"));
+            return Err(ApplicationError::new(
+                ErrorCode::RuntimeInUse,
+                "stop all running and queued sessions before changing the default runtime",
+            ));
         }
         change()
     }

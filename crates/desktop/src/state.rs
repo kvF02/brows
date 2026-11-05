@@ -104,7 +104,12 @@ impl AppState {
             profile_root.clone(),
         )?);
         let managed_root = data_root.join("runtimes");
-        std::fs::create_dir_all(&managed_root).map_err(|_| PortError::new(PortErrorKind::Unavailable, "cannot create managed runtime directory"))?;
+        std::fs::create_dir_all(&managed_root).map_err(|_| {
+            PortError::new(
+                PortErrorKind::Unavailable,
+                "cannot create managed runtime directory",
+            )
+        })?;
         let mut roots: Vec<_> = system_root
             .iter()
             .chain(edge_root.iter())
@@ -226,9 +231,13 @@ impl AppState {
         ));
 
         Ok(Self {
-            runtime_management: Some(Arc::new(crate::runtime_management::RuntimeManagementService {
-                browsers: browsers.clone(), store: settings_store.clone(), sessions: session_service.clone(),
-            })),
+            runtime_management: Some(Arc::new(
+                crate::runtime_management::RuntimeManagementService {
+                    browsers: browsers.clone(),
+                    store: settings_store.clone(),
+                    sessions: session_service.clone(),
+                },
+            )),
             runtime_issues,
             settings: Arc::new(crate::settings::SettingsService::new(
                 settings_store,
@@ -527,6 +536,133 @@ mod tests {
     fn chrome_versions_are_compared_numerically() {
         assert!(chrome_version_key("150.0.1").unwrap() > chrome_version_key("99.9.9").unwrap());
         assert!(chrome_version_key("150.preview").is_none());
+    }
+
+    #[derive(Debug)]
+    struct NativeAcceptanceRoot(PathBuf);
+
+    impl NativeAcceptanceRoot {
+        fn new(label: &str) -> Self {
+            Self(std::env::temp_dir().join(format!("brows-{label}-{}", uuid::Uuid::new_v4())))
+        }
+    }
+
+    impl Drop for NativeAcceptanceRoot {
+        fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
+    }
+
+    fn started(outcome: SessionLaunchOutcome) -> brows_contracts::SessionDto {
+        match outcome {
+            SessionLaunchOutcome::Started { session, .. } => session,
+            SessionLaunchOutcome::Queued { .. } => panic!("unexpected queued session"),
+        }
+    }
+
+    #[test]
+    #[ignore = "copies an admitted signed Edge into an isolated snapshot and launches it"]
+    fn managed_runtime_acceptance() {
+        let owned = NativeAcceptanceRoot::new("managed-runtime");
+        let state = AppState::production(owned.0.clone()).unwrap();
+        let installed = state.browsers.list_builds().unwrap().into_iter()
+            .find(|build| build.provider == "Microsoft Edge").unwrap();
+        let management = state.runtime_management.as_ref().unwrap();
+        let snapshot = management.capture(installed.id.clone()).unwrap();
+        assert_eq!(snapshot.capabilities.fingerprint_support, brows_domain::FingerprintSupport::Unverified);
+        assert_eq!(management.capture(installed.id.clone()).unwrap().id, snapshot.id);
+        management.activate(snapshot.id.clone()).unwrap();
+        assert_eq!(state.settings.get().unwrap().active_runtime_id.as_deref(), Some(snapshot.id.as_str()));
+        drop(state);
+
+        let state = AppState::production(owned.0.clone()).unwrap();
+        assert_eq!(state.browsers.resolve_build(&brows_domain::BrowserBuildSelector::Channel(BrowserChannel::Stable)).unwrap().id, snapshot.id);
+        let probe = state.browsers.probe_fingerprint_support(&snapshot.id).unwrap();
+        assert_eq!(probe.build.capabilities.fingerprint_support, brows_domain::FingerprintSupport::Supported, "{}", probe.detail);
+        let fixture = ControlFixture::start(true);
+        let mut profile = draft("managed acceptance");
+        profile.browser = BrowserSelectorDto::Pinned { build_id: (&snapshot.id).into() };
+        profile.startup_urls = vec![format!("{}/managed/page", fixture.url)];
+        profile.locale.timezone = Some("Asia/Tokyo".to_owned());
+        profile.persona = PersonaDto::SeedableNoise {
+            seed: "managed-runtime-acceptance".to_owned(), platform: brows_contracts::PlatformDto::Windows,
+            hardware_concurrency: 3, device_memory: brows_contracts::DeviceMemoryDto::Half, touch_points: 0,
+            screen: brows_contracts::ScreenConfigDto { width: 1920, height: 1080, color_depth: 24, device_scale_factor_hundredths: 100 },
+            webgl_vendor: String::new(), webgl_renderer: String::new(), spoof_canvas: true, spoof_audio: false,
+        };
+        let profile = state.profiles.create(ProfileCreateRequest { profile }).unwrap();
+        let session = started(state.sessions.launch(SessionLaunchRequest { profile_id: profile.id.clone() }).unwrap());
+        let proofs = fixture.wait_proofs("/managed/");
+        assert_eq!(proofs.iter().map(|(_, _, value)| value["kind"].as_str().unwrap()).collect::<std::collections::BTreeSet<_>>().len(), 9);
+        for (_, _, first) in &proofs {
+            assert_eq!(first["hardwareConcurrency"], 3);
+            assert_eq!(first["deviceMemory"], 0.5);
+            assert_eq!(first["timezone"], "Asia/Tokyo");
+        }
+        let id: brows_domain::SessionId = session.id.clone().try_into().unwrap();
+        assert!(state.browsers.is_running(&id).unwrap());
+        assert!(state.runtime_management.as_ref().unwrap().activate(installed.id).is_err());
+        let observation = state.sessions.observe(&id).unwrap();
+        assert!(observation.targets.iter().any(|target| target.kind == "page"));
+        state.sessions.stop(SessionStopRequest { session_id: session.id }).unwrap();
+        let snapshot_root = snapshot.executable_path.parent().unwrap();
+        std::fs::write(snapshot_root.join("unexpected.dll"), b"must never execute").unwrap();
+        let rejected = state.sessions.launch(SessionLaunchRequest { profile_id: profile.id }).unwrap_err();
+        assert_eq!(rejected.code(), &ErrorCode::RuntimeUntrusted);
+        drop(state);
+        let excluded = AppState::production(owned.0.clone()).unwrap();
+        assert!(!excluded.browsers.list_builds().unwrap().iter().any(|build| build.id == snapshot.id));
+        assert!(excluded.browsers.resolve_build(&brows_domain::BrowserBuildSelector::Channel(BrowserChannel::Stable)).is_err());
+        assert!(!excluded.runtime_issues.is_empty());
+        let report = serde_json::json!({ "assertionsPassed": true, "complete": false, "runtimeVersion": snapshot.version,
+            "checks": ["signed-installed-capture", "immutable-reuse", "selection-survives-restart", "fresh-capability-probe", "nine-context-launch", "busy-activation-rejected", "extra-resource-launch-rejected", "corrupt-snapshot-excluded-on-restart", "missing-default-does-not-fallback"],
+            "notChecked": ["signed online catalog", "automatic security updates", "multi-hour stability"] });
+        std::fs::write(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/managed-runtime-acceptance.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+    }
+
+    #[test]
+    #[ignore = "launches ten isolated signed Edge profiles for a bounded capacity check"]
+    fn desktop_capacity_acceptance() {
+        let owned = NativeAcceptanceRoot::new("capacity");
+        let fixture = ControlFixture::start(false);
+        let state = AppState::production(owned.0.clone()).unwrap();
+        let edge = state.browsers.list_builds().unwrap().into_iter().find(|build| build.provider == "Microsoft Edge").unwrap();
+        let mut sessions = Vec::new();
+        let mut profiles = Vec::new();
+        for index in 0..11 {
+            let mut profile = draft(&format!("capacity-{index}"));
+            profile.browser = BrowserSelectorDto::Pinned { build_id: (&edge.id).into() };
+            profile.startup_urls = vec![format!("{}/capacity-{index}", fixture.url)];
+            let profile = state.profiles.create(ProfileCreateRequest { profile }).unwrap();
+            profiles.push(profile.id.clone());
+            let outcome = state.sessions.launch(SessionLaunchRequest { profile_id: profile.id }).unwrap();
+            if index < 10 { sessions.push(started(outcome)); }
+            else { match outcome { SessionLaunchOutcome::Queued { position, .. } => assert_eq!(position, 1), _ => panic!("eleventh session must queue") } }
+        }
+        assert!(state.sessions.launch(SessionLaunchRequest { profile_id: profiles[0].clone() }).is_err());
+        for _ in 0..20 {
+            std::thread::sleep(std::time::Duration::from_secs(1));
+            state.sessions.reconcile_exits().unwrap();
+            for session in &sessions {
+                assert!(state.browsers.is_running(&session.id.clone().try_into().unwrap()).unwrap());
+            }
+            assert_eq!(state.sessions.list().unwrap().iter().filter(|session| session.state == SessionStateDto::Running).count(), 10);
+        }
+        let crashed: brows_domain::SessionId = sessions[0].id.clone().try_into().unwrap();
+        state.browsers.stop(&crashed).unwrap();
+        state.sessions.reconcile_exits().unwrap();
+        let current = state.sessions.list().unwrap();
+        assert_eq!(current.iter().find(|s| s.id == sessions[0].id).unwrap().state, SessionStateDto::Failed);
+        assert_eq!(current.iter().find(|s| s.profile_id == profiles[10]).unwrap().state, SessionStateDto::Running);
+        assert_eq!(current.iter().filter(|s| s.state == SessionStateDto::Running).count(), 10);
+        crate::cleanup_sessions(&state);
+        assert!(!state.sessions.list().unwrap().iter().any(|session| matches!(session.state, SessionStateDto::Queued | SessionStateDto::Running | SessionStateDto::Starting | SessionStateDto::Stopping)));
+        for session in current { assert!(!state.browsers.is_running(&session.id.try_into().unwrap()).unwrap()); }
+        drop(state);
+        let reopened = AppState::production(owned.0.clone()).unwrap();
+        assert_eq!(reopened.profiles.list(ProfileListRequest::default()).unwrap().len(), 11);
+        let report = serde_json::json!({ "assertionsPassed": true, "complete": false, "concurrentProfiles": 10, "steadyObservationSeconds": 20,
+            "checks": ["ten-running", "eleventh-queued", "duplicate-blocked", "unexpected-exit-fails-session", "fifo-promotion", "shutdown-cleanup", "metadata-survives-restart"],
+            "notChecked": ["multi-hour soak", "memory and CPU budgets", "real sites", "network outage", "full UI interaction"] });
+        std::fs::write(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/desktop-capacity-acceptance.json"), serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }
 
     #[test]
