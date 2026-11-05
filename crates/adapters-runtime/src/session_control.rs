@@ -682,6 +682,24 @@ impl Controller {
             .call("Target.closeTarget", json!({"targetId":id}), None);
         outcome
     }
+    /// Read only the first-script capture in this fresh probe's sole page.
+    /// This is an internal fixed read, never an application IPC expression.
+    pub(super) fn probe_first_document(&self, deadline: Instant) -> PortResult<String> {
+        self.wire.ensure_open()?;
+        let pages: Vec<_> = self.targets.0.lock().map_err(|_| internal("target lock poisoned"))?
+            .snapshot().into_iter().filter(|target| target.kind == "page").collect();
+        if pages.is_empty() { return Ok(String::new()); }
+        if pages.len() != 1 { return Err(internal("private probe has unexpected pages")); }
+        let target = &pages[0];
+        let result = evaluate_before(&self.wire, &target.session,
+            "document.getElementById('brows-fingerprint-probe')?.textContent || ''", deadline)?;
+        if !self.targets.0.lock().map_err(|_| internal("target lock poisoned"))?.target_current(target) {
+            return Err(PortError::new(PortErrorKind::Unavailable, "private probe page changed during capture"));
+        }
+        result.as_str().filter(|value| value.len() <= 8192).map(str::to_owned)
+            .ok_or_else(|| internal("private first-script proof exceeds its bound"))
+    }
+
     pub(super) fn observe(&self, session_id: &SessionId) -> PortResult<SessionObservation> {
         self.wire.ensure_open()?;
         let deadline = Instant::now() + TIMEOUT;

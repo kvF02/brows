@@ -503,13 +503,13 @@ impl BrowserRuntime for ManagedChromiumRuntime {
     fn launch(&self, plan: &ResolvedLaunchPlan) -> PortResult<BrowserProcess> {
         plan.validate()
             .map_err(|error| invalid_data(error.to_string()))?;
-        let loads_extension = plan
+        let needs_fingerprint = plan
             .arguments
             .iter()
-            .any(|argument| matches!(argument, LaunchArgument::LoadExtension(_)));
+            .any(|argument| matches!(argument, LaunchArgument::LoadExtension(_) | LaunchArgument::SessionFingerprint(_)));
         // Serialize the short admission/spawn step against probe admission,
         // so a Supported snapshot cannot outlive a concurrent re-probe.
-        let fingerprint_gate = if loads_extension {
+        let fingerprint_gate = if needs_fingerprint {
             Some(
                 self.probing
                     .lock()
@@ -521,7 +521,7 @@ impl BrowserRuntime for ManagedChromiumRuntime {
         let build = self.verified_build_for_plan(plan)?;
         // A stale or caller-forged launch-plan capability cannot bypass the
         // registry. Fail before touching the persisted profile's Preferences.
-        if loads_extension
+        if needs_fingerprint
             && (build.capabilities.fingerprint_support != FingerprintSupport::Supported
                 || fingerprint_gate
                     .as_ref()
@@ -529,7 +529,7 @@ impl BrowserRuntime for ManagedChromiumRuntime {
         {
             return Err(PortError::new(
                 PortErrorKind::CapabilityUnsupported,
-                "所选运行时未通过指纹扩展检测；可使用系统原生模式，不能启动 SeedableNoise",
+                "所选运行时未通过指纹首脚本检测；可使用系统原生模式，不能启动 SeedableNoise",
             ));
         }
         let admitted_directory =
