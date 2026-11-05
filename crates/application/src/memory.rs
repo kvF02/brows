@@ -495,13 +495,22 @@ pub fn materialize_fingerprint_probe(
     let policy = fingerprint_probe_policy(runtime_version)?;
     let fp = PersonaFingerprint::derive(&policy.persona, runtime_version)
         .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
-    let locale = LocaleConfig { accept_languages: policy.languages, timezone: policy.timezone };
-    SeedableNoiseFingerprintRuntime::new(extension_root, profile_id.clone())?
-        .materialize_extension(profile_id, &policy.persona, &fp, &locale)
+    let locale = LocaleConfig {
+        accept_languages: policy.languages,
+        timezone: policy.timezone,
+    };
+    SeedableNoiseFingerprintRuntime::new(extension_root, profile_id.clone())?.materialize_extension(
+        profile_id,
+        &policy.persona,
+        &fp,
+        &locale,
+    )
 }
 
 /// Fixed, deliberately non-native sentinels shared by isolated probes only.
-pub fn fingerprint_probe_policy(runtime_version: &str) -> PortResult<brows_domain::SessionFingerprintConfig> {
+pub fn fingerprint_probe_policy(
+    runtime_version: &str,
+) -> PortResult<brows_domain::SessionFingerprintConfig> {
     let persona = SeedableNoisePersona {
         seed: "brows-local-fingerprint-probe-v1".to_owned(),
         platform: brows_domain::PlatformKind::Windows,
@@ -792,10 +801,15 @@ impl SeedableNoiseFingerprintRuntime {
 
         if build.id.as_str().starts_with("managed-") {
             if !build.capabilities.supports_devtools_pipe {
-                return Err(PortError::new(PortErrorKind::CapabilityUnsupported, "managed fingerprint policy requires a private session pipe"));
+                return Err(PortError::new(
+                    PortErrorKind::CapabilityUnsupported,
+                    "managed fingerprint policy requires a private session pipe",
+                ));
             }
         } else {
-            arguments.push(LaunchArgument::LoadExtension(self.materialize_extension(profile_id, p, &fp, locale)?));
+            arguments.push(LaunchArgument::LoadExtension(
+                self.materialize_extension(profile_id, p, &fp, locale)?,
+            ));
         }
 
         // Declared-only fields: be honest about what we did not actually change.
@@ -878,14 +892,25 @@ mod seedable_noise_tests {
 
     #[test]
     fn managed_policy_requires_private_pipe_and_materializes_no_extension() {
-        let root = std::env::temp_dir().join(format!("brows-managed-compile-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
-        let runtime = SeedableNoiseFingerprintRuntime::new(&root, ProfileId::new("managed-profile").unwrap()).unwrap();
+        let root = std::env::temp_dir().join(format!(
+            "brows-managed-compile-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let runtime =
+            SeedableNoiseFingerprintRuntime::new(&root, ProfileId::new("managed-profile").unwrap())
+                .unwrap();
         let persona = FingerprintPersona::SeedableNoise(sample_persona("managed-probe"));
         let mut build = verified_build();
         build.id = BrowserBuildId::new("managed-edge-150").unwrap();
         build.capabilities.supports_devtools_pipe = true;
         let result = runtime.compile(&persona, &build).unwrap();
-        assert!(!result.arguments.iter().any(|argument| matches!(argument, LaunchArgument::LoadExtension(_))));
+        assert!(!result
+            .arguments
+            .iter()
+            .any(|argument| matches!(argument, LaunchArgument::LoadExtension(_))));
         assert!(!root.exists());
         build.capabilities.supports_devtools_pipe = false;
         assert!(runtime.compile(&persona, &build).is_err());

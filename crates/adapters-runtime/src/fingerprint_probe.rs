@@ -217,22 +217,37 @@ fn run_private(build: &BrowserBuild, profile_root: &Path) -> PortResult<Observat
         fs::create_dir(&user_data).map_err(|_| internal("cannot create private probe data"))?;
         let policy = brows_application::memory::fingerprint_probe_policy(&build.version)?;
         let mut args: Vec<std::ffi::OsString> = [
-            "--headless=new", "--no-startup-window", "--no-first-run",
-            "--no-default-browser-check", "--disable-background-networking",
-            "--disable-component-update", "--disable-sync", "--metrics-recording-only",
-            "--disable-domain-reliability", "--no-proxy-server", "--lang=pl-PL",
-        ].into_iter().map(std::ffi::OsString::from).collect();
+            "--headless=new",
+            "--no-startup-window",
+            "--no-first-run",
+            "--no-default-browser-check",
+            "--disable-background-networking",
+            "--disable-component-update",
+            "--disable-sync",
+            "--metrics-recording-only",
+            "--disable-domain-reliability",
+            "--no-proxy-server",
+            "--lang=pl-PL",
+        ]
+        .into_iter()
+        .map(std::ffi::OsString::from)
+        .collect();
         args.push(format!("--user-data-dir={}", user_data.display()).into());
         args.push(format!("--user-agent={}", policy.user_agent).into());
         let url = format!("http://{}/{}", server.address, directory.nonce);
         let browser = PrivateProbe(super::session_control::Controller::start(
-            &build.executable_path, &args, policy, &[url],
+            &build.executable_path,
+            &args,
+            policy,
+            &[url],
         )?);
         while Instant::now() < deadline {
             let encoded = match browser.0.probe_first_document(deadline) {
                 Ok(value) => value,
                 Err(error) if error.kind == PortErrorKind::Unavailable => {
-                    if browser.0.try_wait().ok().flatten().is_some() { return Err(error); }
+                    if browser.0.try_wait().ok().flatten().is_some() {
+                        return Err(error);
+                    }
                     thread::sleep(Duration::from_millis(25));
                     continue;
                 }
@@ -245,15 +260,25 @@ fn run_private(build: &BrowserBuild, profile_root: &Path) -> PortResult<Observat
             let dump = format!("{PRE_START}{encoded}</pre>");
             let missing = inspect_dump(dump.as_bytes(), &directory.nonce)?;
             return Ok(Observation {
-                support: if missing.is_empty() { FingerprintSupport::Supported } else { FingerprintSupport::Unsupported },
+                support: if missing.is_empty() {
+                    FingerprintSupport::Supported
+                } else {
+                    FingerprintSupport::Unsupported
+                },
                 detail: if missing.is_empty() {
                     "隔离的私有管道在页面首段脚本中观测到语言、硬件、屏幕和 WebGL 配置；不依赖 MV3，不代表全部 API 或检测站通过率".to_owned()
                 } else {
-                    format!("私有管道首脚本配置未通过（{}）；SeedableNoise 保持不可用", missing.join("、"))
+                    format!(
+                        "私有管道首脚本配置未通过（{}）；SeedableNoise 保持不可用",
+                        missing.join("、")
+                    )
                 },
             });
         }
-        Err(PortError::new(PortErrorKind::Unavailable, "private first-script probe timed out"))
+        Err(PortError::new(
+            PortErrorKind::Unavailable,
+            "private first-script probe timed out",
+        ))
     })();
     let cleanup = directory.cleanup();
     match (outcome, cleanup) {

@@ -845,7 +845,9 @@ impl ResolvedLaunchPlan {
             ));
         }
         if let Some(policy) = controls.first() {
-            if !self.arguments.iter().any(|arg| matches!(arg, LaunchArgument::LoadExtension(_)))
+            let has_bootstrap = self.capabilities.supports_devtools_pipe
+                || self.arguments.iter().any(|arg| matches!(arg, LaunchArgument::LoadExtension(_)));
+            if !has_bootstrap
                 || !self.arguments.iter().any(|arg| matches!(arg, LaunchArgument::UserAgentOverride(ua) if ua == &policy.user_agent))
                 || policy.languages != self.preferences.accept_languages {
                 return Err(DomainError::InvalidLaunchArgument("inconsistent session policy".to_owned()));

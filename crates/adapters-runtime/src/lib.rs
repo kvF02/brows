@@ -503,10 +503,12 @@ impl BrowserRuntime for ManagedChromiumRuntime {
     fn launch(&self, plan: &ResolvedLaunchPlan) -> PortResult<BrowserProcess> {
         plan.validate()
             .map_err(|error| invalid_data(error.to_string()))?;
-        let needs_fingerprint = plan
-            .arguments
-            .iter()
-            .any(|argument| matches!(argument, LaunchArgument::LoadExtension(_) | LaunchArgument::SessionFingerprint(_)));
+        let needs_fingerprint = plan.arguments.iter().any(|argument| {
+            matches!(
+                argument,
+                LaunchArgument::LoadExtension(_) | LaunchArgument::SessionFingerprint(_)
+            )
+        });
         // Serialize the short admission/spawn step against probe admission,
         // so a Supported snapshot cannot outlive a concurrent re-probe.
         let fingerprint_gate = if needs_fingerprint {
@@ -1246,10 +1248,17 @@ mod tests {
             assert!(runtime.processes.lock().unwrap().is_empty());
         }
         let mut private_plan = plan.clone();
-        private_plan.arguments.retain(|argument| !matches!(argument, LaunchArgument::LoadExtension(_)));
-        private_plan.arguments.push(LaunchArgument::SessionFingerprint(Box::new(
-            brows_application::memory::fingerprint_probe_policy("150.0.0.0").unwrap(),
-        )));
+        private_plan.arguments.retain(|argument| !matches!(argument, LaunchArgument::LoadExtension(_) | LaunchArgument::AcceptLanguages(_)));
+        let policy = brows_application::memory::fingerprint_probe_policy("150.0.0.0").unwrap();
+        private_plan.preferences.accept_languages = policy.languages.clone();
+        private_plan.arguments.push(LaunchArgument::AcceptLanguages(policy.languages.clone()));
+        private_plan.arguments.push(LaunchArgument::UserAgentOverride(policy.user_agent.clone()));
+        private_plan.arguments.push(LaunchArgument::SessionFingerprint(Box::new(policy)));
+        private_plan.capabilities.supports_devtools_pipe = true;
+        private_plan.validate().unwrap();
+        private_plan.capabilities.supports_devtools_pipe = false;
+        assert!(private_plan.validate().is_err());
+        private_plan.capabilities.supports_devtools_pipe = true;
         runtime.set_fingerprint_support(&BrowserBuildId::new("build-1").unwrap(), FingerprintSupport::Unverified).unwrap();
         assert_eq!(runtime.launch(&private_plan).unwrap_err().kind, PortErrorKind::CapabilityUnsupported);
         assert!(!private_plan.user_data_dir.exists());
