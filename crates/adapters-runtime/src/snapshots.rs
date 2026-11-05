@@ -166,13 +166,36 @@ fn inventory(root: &Path) -> PortResult<BTreeMap<String, FileRecord>> {
 fn verify_inventory(root: &Path, manifest: &SnapshotManifest) -> PortResult<()> {
     let actual = inventory(root)?;
     if actual != manifest.files {
-        let changed: Vec<_> = actual.iter().filter(|(path, record)| manifest.files.get(*path) != Some(*record))
-            .take(4).map(|(path, _)| path.chars().filter(|c| !c.is_control()).take(120).collect::<String>()).collect();
-        let missing: Vec<_> = manifest.files.keys().filter(|path| !actual.contains_key(*path))
-            .take(4).map(|path| path.chars().filter(|c| !c.is_control()).take(120).collect::<String>()).collect();
+        let changed: Vec<_> = actual
+            .iter()
+            .filter(|(path, record)| manifest.files.get(*path) != Some(*record))
+            .take(4)
+            .map(|(path, _)| {
+                path.chars()
+                    .filter(|c| !c.is_control())
+                    .take(120)
+                    .collect::<String>()
+            })
+            .collect();
+        let missing: Vec<_> = manifest
+            .files
+            .keys()
+            .filter(|path| !actual.contains_key(*path))
+            .take(4)
+            .map(|path| {
+                path.chars()
+                    .filter(|c| !c.is_control())
+                    .take(120)
+                    .collect::<String>()
+            })
+            .collect();
         return Err(PortError::new(
             PortErrorKind::RuntimeUntrusted,
-            format!("managed runtime files changed; changed/added: {}; missing: {}", changed.join(", "), missing.join(", ")),
+            format!(
+                "managed runtime files changed; changed/added: {}; missing: {}",
+                changed.join(", "),
+                missing.join(", ")
+            ),
         ));
     }
     Ok(())

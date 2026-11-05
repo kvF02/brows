@@ -569,12 +569,15 @@ impl Controller {
         } else {
             urls.to_vec()
         };
-        let headless = args.iter().any(|argument| argument.to_string_lossy().starts_with("--headless"));
+        let headless = args
+            .iter()
+            .any(|argument| argument.to_string_lossy().starts_with("--headless"));
         for (index, url) in startup_urls.into_iter().enumerate() {
-            let target =
-                controller
-                    .wire
-                    .call("Target.createTarget", json!({"url":"about:blank","newWindow":!headless && index == 0}), None)?;
+            let mut params = json!({"url":"about:blank"});
+            if !headless && index == 0 {
+                params["newWindow"] = json!(true);
+            }
+            let target = controller.wire.call("Target.createTarget", params, None)?;
             let id = target["targetId"]
                 .as_str()
                 .ok_or_else(|| internal("browser omitted target identity"))?;
