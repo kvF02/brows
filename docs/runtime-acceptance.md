@@ -111,8 +111,8 @@ target/session ID、共享截止时间已过但回复已入队，以及检测完
 前两类和截止时间用例由 Rust 单元测试验证；前端会话切换用例使用真实 Tauri adapter
 与可控的异步回复。新用例的 Windows 执行结果应以对应提交的 CI 为准。
 
-[生产会话及 Worker 生命周期验收记录](https://github.com/kvF02/brows/actions/runs/41665123143) 已通过。
-样本包括页面、同源 iframe、跨源 OOPIF、Dedicated/Shared/Service Worker 的首段脚本。
+[本批验收记录与 CI 链接](https://github.com/kvF02/brows/pull/7) 汇总实际执行结果。
+样本包括页面、同源 iframe、跨源 OOPIF、经典/模块 Dedicated、Shared、Service Worker 的首段脚本。
 两组会话分别使用 CPU 3 / Memory 0.5GB / Asia/Tokyo 与 CPU 6 / Memory 2GB /
 US/Eastern，核对 UA、低熵 UA-CH、完整语言列表、平台、硬件字段、原生 Intl 时区，
 以及固定冬夏日期的 Date 偏移；别名规范化和无效时区失败关闭也纳入断言。
