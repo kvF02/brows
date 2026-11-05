@@ -299,8 +299,8 @@ fn serve_request(stream: &mut TcpStream, route: &str, page: &str) -> bool {
     // before its first request bytes arrive.
     if stream.set_nonblocking(false).is_err()
         || stream
-        .set_read_timeout(Some(Duration::from_millis(150)))
-        .is_err()
+            .set_read_timeout(Some(Duration::from_millis(150)))
+            .is_err()
         || stream
             .set_write_timeout(Some(Duration::from_millis(150)))
             .is_err()
