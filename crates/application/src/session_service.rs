@@ -8,10 +8,10 @@ use brows_contracts::{
     SessionLaunchRequest, SessionStateChangedEvent, SessionStopRequest,
 };
 use brows_domain::{
-    EnqueueOutcome, LaunchTicket, Session, SessionId, SessionScheduler, SessionState,
+    EnqueueOutcome, LaunchTicket, ProfileId, Session, SessionId, SessionScheduler, SessionState,
 };
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{Arc, Mutex, MutexGuard},
 };
 
@@ -30,6 +30,7 @@ pub enum SessionLaunchOutcome {
 
 #[derive(Debug)]
 struct SessionRegistry {
+    maintenance_profiles: BTreeSet<ProfileId>,
     scheduler: SessionScheduler,
     sessions: BTreeMap<SessionId, Session>,
     processes: BTreeMap<SessionId, BrowserProcess>,
@@ -51,6 +52,22 @@ pub struct SessionApplicationService {
     ids: Arc<dyn IdGenerator>,
     operations: Mutex<()>,
     registry: Mutex<SessionRegistry>,
+}
+
+/// A stopped profile stays reserved while filesystem work runs. Other profiles
+/// can still launch or stop; dropping the lease releases the reservation.
+#[derive(Debug)]
+pub struct StoppedProfileLease<'a> {
+    service: &'a SessionApplicationService,
+    profile_id: ProfileId,
+}
+
+impl Drop for StoppedProfileLease<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut registry) = self.service.registry.lock() {
+            registry.maintenance_profiles.remove(&self.profile_id);
+        }
+    }
 }
 
 impl SessionApplicationService {
@@ -75,6 +92,7 @@ impl SessionApplicationService {
             ids,
             operations: Mutex::new(()),
             registry: Mutex::new(SessionRegistry {
+                maintenance_profiles: BTreeSet::new(),
                 scheduler: SessionScheduler::new(max_concurrent_sessions)?,
                 sessions: BTreeMap::new(),
                 processes: BTreeMap::new(),
@@ -103,6 +121,9 @@ impl SessionApplicationService {
         };
         let outcome = {
             let mut registry = self.lock_registry()?;
+            if registry.maintenance_profiles.contains(&ticket.profile_id) {
+                return Err(ApplicationError::new(ErrorCode::ProfileLocked, "profile data is reserved for backup or migration"));
+            }
             let outcome = registry.scheduler.enqueue(ticket)?;
             let mut session = Session::new(session_id.clone(), profile.id, now);
             match &outcome {
@@ -305,10 +326,20 @@ impl SessionApplicationService {
         profile_id: &brows_domain::ProfileId,
     ) -> ApplicationResult<bool> {
         let registry = self.lock_registry()?;
-        Ok(registry
+        Ok(registry.maintenance_profiles.contains(profile_id) || registry
             .sessions
             .values()
             .any(|session| &session.profile_id == profile_id && session.state.is_active()))
+    }
+
+    pub fn reserve_stopped_profile(&self, profile_id: ProfileId) -> ApplicationResult<StoppedProfileLease<'_>> {
+        let _operation = self.lock_operations()?;
+        let mut registry = self.lock_registry()?;
+        if registry.maintenance_profiles.contains(&profile_id) || registry.sessions.values().any(|session| session.profile_id == profile_id && session.state.is_active()) {
+            return Err(ApplicationError::new(ErrorCode::ProfileLocked, "stop the profile and wait for existing backup or migration work"));
+        }
+        registry.maintenance_profiles.insert(profile_id.clone());
+        Ok(StoppedProfileLease { service: self, profile_id })
     }
 
     /// Called by a process supervisor when Chromium exits without an explicit

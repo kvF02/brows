@@ -154,8 +154,15 @@ impl EncryptedBackupService {
         let parent = target
             .parent()
             .ok_or_else(|| invalid("profile userdata target has no parent"))?;
-        fs::create_dir_all(parent)
+        if !parent.exists() {
+            fs::create_dir(parent)
             .map_err(|error| io_error("create profile data parent", error))?;
+        }
+        let metadata = fs::symlink_metadata(parent).map_err(|error| io_error("inspect profile data parent", error))?;
+        let canonical_parent = parent.canonicalize().map_err(|error| io_error("resolve profile data parent", error))?;
+        if !metadata.is_dir() || is_reparse_or_symlink(&metadata) || canonical_parent.as_path() != parent {
+            return Err(invalid("profile data parent is not a confined ordinary directory"));
+        }
         fs::rename(&staging, &target)
             .map_err(|error| io_error("install restored profile data", error))?;
         let staging_parent = restored_data_dir
@@ -169,6 +176,18 @@ impl EncryptedBackupService {
         if let Some(parent) = restored_data_dir.parent() {
             let _ = fs::remove_dir_all(parent);
         }
+    }
+
+    /// Used only after this restore installed new userdata but failed to publish
+    /// its fresh profile ID. Existing profile data is never a rollback target.
+    pub fn remove_unpublished_data(&self, profile_id: &str) -> PortResult<()> {
+        brows_domain::ProfileId::new(profile_id.to_owned()).map_err(|_| invalid("invalid new profile id"))?;
+        let target = self.profile_data_path(profile_id);
+        if !target.exists() { return Ok(()); }
+        let canonical = target.canonicalize().map_err(|error| io_error("resolve unpublished data", error))?;
+        if canonical != target { return Err(invalid("unpublished data path contains a link")); }
+        inspect_source_tree(&canonical, &self.profile_root)?;
+        fs::remove_dir_all(canonical).map_err(|error| io_error("remove unpublished data", error))
     }
 
     fn archive_path(&self, name: &str) -> PortResult<PathBuf> {
@@ -1120,4 +1139,19 @@ mod tests {
         );
         let _ = fs::remove_dir_all(root);
     }
+
+    #[test]
+    fn restored_data_install_is_confined_and_unpublished_data_can_be_removed() {
+        let (service, root) = service("install-confined");
+        let staging = root.join("backups/restore-staging/test/userdata");
+        fs::create_dir_all(staging.join("Default")).unwrap();
+        fs::write(staging.join("Default/Cookies"), b"fixture data").unwrap();
+        service.install_restored_data("fresh-profile", &staging).unwrap();
+        let installed = service.profile_data_path("fresh-profile");
+        assert_eq!(fs::read(installed.join("Default/Cookies")).unwrap(), b"fixture data");
+        service.remove_unpublished_data("fresh-profile").unwrap();
+        assert!(!installed.exists());
+        fs::remove_dir_all(root).unwrap();
+    }
 }
+
