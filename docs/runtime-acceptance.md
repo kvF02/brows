@@ -77,7 +77,7 @@ Service Worker 初次就绪和重复就绪通知不会重复排队配置；只�
 
 ## 尚未完成的能力
 
-- 更多站点、模块 Worker、强制进程崩溃和并发生命周期场景，以及字体、
+- 更多站点、动态 import、顶层 await、Worker 专属进程强杀、OOM 和并发导航场景，以及字体、
   GPU 像素和网络栈的完整观测。当前验收是固定的隔离样本，不是所有网站与 API 的保证。
 - 自建公网服务部署后的 DNS/HTTP/ICE 关联验收。仓库中的 loopback 协议测试不能将
   HTTP 出口检查或没有收到 STUN 包换算成公网无泄漏。
@@ -88,6 +88,9 @@ Service Worker 初次就绪和重复就绪通知不会重复排队配置；只�
 
 `.github/workflows/acceptance.yml` 在 Windows 执行 JavaScript 测试、完整 UI 构建、
 Rust workspace 测试和 clippy，并验证 Edge 签名、生产登记/能力探针、两个真实 SeedableNoise 会话的启动/停止及跨上下文观测。
+生产样本包括页面、同源 iframe、跨源 OOPIF，以及经典/模块 Dedicated、Shared 和
+Service Worker，共九类上下文。模块样本在导入依赖的顶层读取，早于入口模块正文，
+并与对应经典 Worker 的信号比较。
 生产会话验收连续执行三轮，每轮均须通过；任一轮失败即停止，不将重试成功记作本轮通过。
 能力探针与验收 HTTP 服务均在接受连接后显式恢复阻塞 I/O，再设置有界读写超时。
 延迟首个请求字节的 socket 回归用例防止 Windows 继承非阻塞模式导致预连接被提前关闭。
@@ -95,6 +98,12 @@ Rust workspace 测试和 clippy，并验证 Edge 签名、生产登记/能力探
 停止后不被诊断读取唤醒、消息唤醒后的首段脚本、版本更新后的首段脚本，以及硬件、
 时区、Canvas 重复读取和 WebGL 声明的一致性。生产会话验收同时比较六种上下文的
 Canvas 与页面是否一致，并在基线支持 WebGL 时要求该上下文仍支持且声明一致。
+`private_module_worker_acceptance` 不加载扩展，保留生产 UA/语言启动参数，核对九类
+上下文的 UA、平台、完整语言列表、CPU/Memory、时区/Date 偏移、Canvas 和 WebGL 声明。
+`private_renderer_crash_acceptance` 仅崩溃隔离测试页面的 renderer；要求旧页面离开观测，
+浏览器主进程存活，重载后首段脚本与页面观测恢复策略。它不等于全浏览器或独立 Worker
+进程崩溃恢复。两个独立 JSON 报告分别为 `fingerprint-module-worker-acceptance.json`
+与 `fingerprint-renderer-crash-acceptance.json`，仍标记 `complete: false`。
 JSON 报告作为 Actions artifact 保存；Rust 工具链与仓库的 1.97.1 保持一致。
 
 观测返回竞态的回归用例覆盖：已完成读取的 Worker 在另一读取期间重载、复用旧
@@ -102,8 +111,8 @@ target/session ID、共享截止时间已过但回复已入队，以及检测完
 前两类和截止时间用例由 Rust 单元测试验证；前端会话切换用例使用真实 Tauri adapter
 与可控的异步回复。新用例的 Windows 执行结果应以对应提交的 CI 为准。
 
-[生产会话及 Worker 生命周期验收记录](https://github.com/kvF02/brows/actions/runs/41665123143) 已通过。
-样本包括页面、同源 iframe、跨源 OOPIF、Dedicated/Shared/Service Worker 的首段脚本。
+[本批验收记录与 CI 链接](https://github.com/kvF02/brows/pull/7) 汇总实际执行结果。
+样本包括页面、同源 iframe、跨源 OOPIF、经典/模块 Dedicated、Shared、Service Worker 的首段脚本。
 两组会话分别使用 CPU 3 / Memory 0.5GB / Asia/Tokyo 与 CPU 6 / Memory 2GB /
 US/Eastern，核对 UA、低熵 UA-CH、完整语言列表、平台、硬件字段、原生 Intl 时区，
 以及固定冬夏日期的 Date 偏移；别名规范化和无效时区失败关闭也纳入断言。

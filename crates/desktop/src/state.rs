@@ -697,7 +697,7 @@ mod tests {
             "{}",
             result.detail
         );
-        let fixture = ControlFixture::start();
+        let fixture = ControlFixture::start(true);
         let header = |headers: &str, key: &str| -> Option<String> {
             headers.lines().find_map(|line| {
                 line.split_once(':')
@@ -740,7 +740,7 @@ mod tests {
                 .map(|(_, _, value)| value["kind"].as_str().unwrap())
                 .collect::<std::collections::BTreeSet<_>>()
                 .len(),
-            6,
+            9,
             "all native context samples are required"
         );
         let native_hints: std::collections::BTreeMap<_, _> = baseline
@@ -851,7 +851,7 @@ mod tests {
                     .map(|(_, _, value)| value["kind"].as_str().unwrap())
                     .collect::<std::collections::BTreeSet<_>>()
                     .len(),
-                6,
+                9,
                 "all controlled context samples are required"
             );
             assert!(

@@ -950,9 +950,52 @@ mod tests {
         assert!(pending.lock().unwrap().is_empty());
     }
 
-    #[test]
-    #[ignore = "requires an explicitly supplied signed Edge and uses isolated data"]
-    fn private_worker_lifecycle_acceptance() {
+    #[derive(Debug)]
+    struct AcceptanceBrowser {
+        controller: Controller,
+        root: std::path::PathBuf,
+        webgl: Value,
+        user_agent: String,
+    }
+
+    impl Drop for AcceptanceBrowser {
+        fn drop(&mut self) {
+            let _ = self.controller.kill();
+            let _ = self.controller.wait();
+            let _ = std::fs::remove_dir_all(&self.root);
+        }
+    }
+
+    impl AcceptanceBrowser {
+        fn assert_signals(&self, value: &Value) {
+            assert_eq!(value["userAgent"].as_str(), Some(self.user_agent.as_str()));
+            assert_eq!(value["platform"], "Win32");
+            assert_eq!(value["hardwareConcurrency"], 3);
+            assert_eq!(value["deviceMemory"], 0.5);
+            assert_eq!(value["languages"], json!(["en-US", "en"]));
+            assert_eq!(value["timezone"], "Asia/Tokyo");
+            assert_eq!(value["offsetWinter"], -540);
+            assert_eq!(value["offsetSummer"], -540);
+            assert_eq!(value["canvas"], value["repeat"]);
+            if !value["webgl"].is_null() {
+                assert_eq!(value["webgl"], self.webgl);
+            }
+        }
+        fn write_report(&self, name: &str, observations: Value) {
+            let version = self.controller.wire.version.lock().unwrap().clone();
+            let report = json!({"scope":"isolated signed Edge private controller", "runtimeVersion":version,
+                "assertionsPassed":true,"complete":false,"observations":observations,
+                "uncovered":["public DNS/ICE", "fonts/GPU/network stack", "other lifecycle scenarios"]});
+            let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join(format!("../../target/fingerprint-{name}-acceptance.json"));
+            std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        }
+    }
+
+    fn acceptance_browser(
+        fixture: &browser_fixture::ControlFixture,
+        route: &str,
+    ) -> AcceptanceBrowser {
         use brows_domain::{DeviceMemoryGb, ScreenConfig, SeedableNoisePersona, WebGLProfile};
         let executable = std::path::PathBuf::from(
             std::env::var_os("BROWS_ACCEPTANCE_BROWSER").expect("explicit acceptance browser"),
@@ -962,10 +1005,12 @@ mod tests {
             "Microsoft Corporation"
         );
         let version = std::env::var("BROWS_ACCEPTANCE_VERSION").expect("verified binary version");
+        static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
         let root = std::env::temp_dir().join(format!(
-            "brows-worker-lifecycle-{}-{}",
+            "brows-private-acceptance-{}-{}-{}",
             std::process::id(),
-            now_ms()
+            now_ms(),
+            NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&root).unwrap();
         let persona = SeedableNoisePersona {
@@ -997,20 +1042,37 @@ mod tests {
             languages: vec!["en-US".to_owned(), "en".to_owned()],
             timezone: Some("Asia/Tokyo".to_owned()),
         };
-        let fixture = browser_fixture::ControlFixture::start();
+        let user_agent = policy.user_agent.clone();
         let args = vec![
             OsString::from(format!("--user-data-dir={}", root.display())),
             OsString::from("--no-first-run"),
             OsString::from("--no-default-browser-check"),
             OsString::from("--no-startup-window"),
+            OsString::from(format!("--user-agent={user_agent}")),
+            OsString::from("--lang=en-US"),
         ];
         let controller = Controller::start(
             &executable,
             &args,
             policy,
-            &[format!("{}/life/page", fixture.url)],
+            &[format!("{}/{route}/page", fixture.url)],
         )
         .unwrap();
+        AcceptanceBrowser {
+            controller,
+            root,
+            webgl: expected_webgl,
+            user_agent,
+        }
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly supplied signed Edge and uses isolated data"]
+    fn private_worker_lifecycle_acceptance() {
+        let fixture = browser_fixture::ControlFixture::start(false);
+        let browser = acceptance_browser(&fixture, "life");
+        let controller = &browser.controller;
+        let expected_webgl = browser.webgl.clone();
         let initial = fixture.wait_proofs("/life/");
         assert!(
             controller.try_wait().unwrap().is_none(),
@@ -1117,10 +1179,175 @@ mod tests {
             .targets
             .iter()
             .any(|target| target.kind == "service_worker"));
-        controller.kill().unwrap();
-        controller.wait().unwrap();
-        drop(controller);
-        drop(fixture);
-        let _ = std::fs::remove_dir_all(root);
+    }
+
+    #[test]
+    #[ignore = "requires an explicitly supplied signed Edge and uses isolated data"]
+    fn private_module_worker_acceptance() {
+        let fixture = browser_fixture::ControlFixture::start(true);
+        let browser = acceptance_browser(&fixture, "modules");
+        let proofs = fixture.wait_proofs("/modules/");
+        assert!(browser.controller.try_wait().unwrap().is_none());
+        let kinds: BTreeSet<_> = proofs
+            .iter()
+            .map(|(_, _, value)| value["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds.len(),
+            9,
+            "all classic and module contexts must report"
+        );
+        let page = &proofs
+            .iter()
+            .find(|(_, _, value)| value["kind"] == "page")
+            .unwrap()
+            .2;
+        assert_ne!(page["canvas"], json!("a42367ff".repeat(256)));
+        for (_, _, first) in &proofs {
+            browser.assert_signals(first);
+            assert_eq!(first["canvas"], page["canvas"]);
+            assert_eq!(first["hints"], page["hints"]);
+        }
+        for (module, classic) in [
+            ("module_worker", "worker"),
+            ("module_shared_worker", "shared_worker"),
+            ("module_service_worker", "service_worker"),
+        ] {
+            let sample = &proofs
+                .iter()
+                .find(|(_, _, value)| value["kind"] == module)
+                .unwrap()
+                .2;
+            let baseline = &proofs
+                .iter()
+                .find(|(_, _, value)| value["kind"] == classic)
+                .unwrap()
+                .2;
+            assert_eq!(sample["capturePhase"], "module_dependency");
+            if !baseline["webgl"].is_null() {
+                assert_eq!(sample["webgl"], baseline["webgl"]);
+            }
+        }
+        browser.write_report(
+            "module-worker",
+            json!(proofs.iter().map(|(_, _, value)| value).collect::<Vec<_>>()),
+        );
+    }
+
+    #[test]
+    #[ignore = "crashes only an explicitly launched isolated signed Edge renderer"]
+    fn private_renderer_crash_acceptance() {
+        let fixture = browser_fixture::ControlFixture::start(false);
+        let browser = acceptance_browser(&fixture, "crash");
+        let controller = &browser.controller;
+        let initial = fixture.wait_proofs("/crash/");
+        assert_eq!(
+            initial
+                .iter()
+                .map(|(_, _, value)| value["kind"].as_str().unwrap())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            6
+        );
+        let first = &initial
+            .iter()
+            .find(|(_, _, value)| value["kind"] == "page")
+            .unwrap()
+            .2;
+        browser.assert_signals(first);
+        let page = controller
+            .targets
+            .0
+            .lock()
+            .unwrap()
+            .snapshot()
+            .into_iter()
+            .find(|target| target.kind == "page")
+            .unwrap();
+        let deadline = Instant::now() + TIMEOUT;
+        while evaluate(&controller.wire, &page.session, "document.readyState").unwrap()
+            != "complete"
+        {
+            assert!(
+                Instant::now() < deadline,
+                "owned page must finish navigation before crash"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        if let Err(error) = controller
+            .wire
+            .call("Page.crash", json!({}), Some(&page.session))
+        {
+            assert_eq!(
+                error.kind,
+                PortErrorKind::Unavailable,
+                "unexpected crash command error: {error:?}"
+            );
+        }
+        let deadline = Instant::now() + TIMEOUT;
+        while controller
+            .targets
+            .0
+            .lock()
+            .unwrap()
+            .snapshot()
+            .iter()
+            .any(|target| target.session == page.session)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "crashed page must leave observation"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            controller.try_wait().unwrap().is_none(),
+            "renderer crash must not close browser"
+        );
+        let session_id = SessionId::new("renderer-crash").unwrap();
+        assert!(!controller
+            .observe(&session_id)
+            .unwrap()
+            .targets
+            .iter()
+            .any(|target| target.kind == "page"));
+        controller
+            .wire
+            .call(
+                "Page.reload",
+                json!({"ignoreCache":true}),
+                Some(&page.session),
+            )
+            .unwrap();
+        let reloaded = fixture.wait_kind_count("/crash/", "page", 2);
+        assert!(
+            reloaded.len() >= 2,
+            "reload must execute a new first script"
+        );
+        let recovered = &reloaded.last().unwrap().2;
+        browser.assert_signals(recovered);
+        assert_eq!(recovered["canvas"], first["canvas"]);
+        assert_eq!(recovered["webgl"], first["webgl"]);
+        let deadline = Instant::now() + TIMEOUT;
+        while !controller
+            .targets
+            .0
+            .lock()
+            .unwrap()
+            .snapshot()
+            .iter()
+            .any(|target| target.kind == "page")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "recovered page must be configured again"
+            );
+            thread::sleep(Duration::from_millis(50));
+        }
+        let observed = controller.observe(&session_id).unwrap();
+        assert!(observed.targets.iter().any(|target| target.kind == "page"
+            && target.hardware_concurrency == 3
+            && target.timezone == "Asia/Tokyo"));
+        browser.write_report("renderer-crash", json!({"before":first,"after":recovered,"crashedPageRemoved":true,"browserSurvived":true}));
     }
 }

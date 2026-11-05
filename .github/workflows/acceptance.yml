@@ -77,6 +77,14 @@ jobs:
         if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
         timeout-minutes: 3
         run: cargo +1.97.1 test -p brows-adapters-runtime private_worker_lifecycle_acceptance -- --ignored --nocapture
+      - name: Module Worker first-script acceptance
+        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
+        timeout-minutes: 3
+        run: cargo +1.97.1 test -p brows-adapters-runtime private_module_worker_acceptance -- --ignored --nocapture
+      - name: Renderer crash and reload acceptance
+        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
+        timeout-minutes: 3
+        run: cargo +1.97.1 test -p brows-adapters-runtime private_renderer_crash_acceptance -- --ignored --nocapture
       - uses: actions/cache/save@v4
         if: always()
         with:
@@ -91,4 +99,6 @@ jobs:
             target/fingerprint-observation.json
             target/fingerprint-session-acceptance.json
             target/fingerprint-session-acceptance-round-*.json
+            target/fingerprint-module-worker-acceptance.json
+            target/fingerprint-renderer-crash-acceptance.json
           if-no-files-found: ignore
