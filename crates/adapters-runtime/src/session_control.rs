@@ -25,6 +25,7 @@ use std::{
 const TIMEOUT: Duration = Duration::from_secs(8);
 const MAX_FRAME: usize = 2 * 1024 * 1024;
 const POLICY_WORKERS: usize = 8;
+const TARGET_EXECUTION_ENDED: &str = "browser target execution ended";
 #[derive(Debug)]
 struct Wire {
     process: Arc<win_pipe::Process>,
@@ -137,6 +138,12 @@ impl Wire {
             )
         })?;
         if let Some(error) = value.get("error") {
+            if target_execution_ended(error) {
+                return Err(PortError::new(
+                    PortErrorKind::Unavailable,
+                    TARGET_EXECUTION_ENDED,
+                ));
+            }
             if method == "Emulation.setTimezoneOverride"
                 && error["message"].as_str().is_some_and(|message| {
                     message.trim_end_matches('.') == "Timezone override is already in effect"
@@ -155,8 +162,28 @@ impl Wire {
             {
                 return Err(PortError::not_found("browser target"));
             }
+            let reason = if matches!(
+                method.as_str(),
+                "Runtime.runIfWaitingForDebugger"
+                    | "Debugger.enable"
+                    | "Debugger.pause"
+                    | "Debugger.resume"
+                    | "Debugger.disable"
+            ) {
+                error["message"]
+                    .as_str()
+                    .filter(|message| {
+                        message.len() <= 160
+                            && message
+                                .bytes()
+                                .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+                    })
+                    .unwrap_or("unavailable")
+            } else {
+                "redacted"
+            };
             return Err(internal(format!(
-                "browser cannot apply {method} (code {})",
+                "browser cannot apply {method} (code {}; {reason})",
                 error["code"].as_i64().unwrap_or(0)
             )));
         }
@@ -360,7 +387,9 @@ impl Controller {
                                     .remove(session);
                             }
                         }
-                        w.call("Runtime.runIfWaitingForDebugger", json!({}), Some(session))?;
+                        if job.extension || job.target.kind != "service_worker" {
+                            w.call("Runtime.runIfWaitingForDebugger", json!({}), Some(session))?;
+                        }
                         Ok(())
                     })();
                     if let Err(error) = result {
@@ -369,6 +398,20 @@ impl Controller {
                             break;
                         };
                         if !state.is_current(&job) {
+                            continue;
+                        }
+                        if job.target.kind == "service_worker"
+                            && error.kind == PortErrorKind::Unavailable
+                            && error.message == TARGET_EXECUTION_ENDED
+                        {
+                            if state.suspend(session).is_err() {
+                                w.fail();
+                                break;
+                            }
+                            if let Ok(mut paused) = w.paused.lock() {
+                                paused.remove(session);
+                            }
+                            t.1.notify_all();
                             continue;
                         }
                         if error.kind == PortErrorKind::NotFound {
@@ -425,8 +468,10 @@ impl Controller {
                         w.fail();
                         break;
                     };
-                    if let Ok(mut paused) = w.paused.lock() {
-                        paused.remove(session);
+                    if event["method"] == "Inspector.targetCrashed" {
+                        if let Ok(mut paused) = w.paused.lock() {
+                            paused.remove(session);
+                        }
                     }
                     let outcome = match t.0.lock() {
                         Ok(mut state) => {
@@ -443,6 +488,9 @@ impl Controller {
                     };
                     match outcome {
                         Ok(Some(job)) => {
+                            if let Ok(mut paused) = w.paused.lock() {
+                                paused.remove(session);
+                            }
                             if jobs.try_send(job).is_err() {
                                 w.fail();
                                 break;
@@ -716,6 +764,13 @@ fn string(value: &Value, key: &str) -> PortResult<String> {
         .map(str::to_owned)
         .ok_or_else(|| internal("invalid session observation"))
 }
+fn target_execution_ended(error: &Value) -> bool {
+    error["code"] == -32000
+        && matches!(
+            error["message"].as_str(),
+            Some("Target crashed" | "Inspected target navigated or closed")
+        )
+}
 fn evaluate(wire: &Wire, session: &str, expression: &str) -> PortResult<Value> {
     evaluate_before(wire, session, expression, Instant::now() + TIMEOUT)
 }
@@ -840,6 +895,21 @@ mod tests {
             env!("CARGO_MANIFEST_DIR"),
             "/../../tools/test_support/controlled_browser.rs"
         ));
+    }
+
+    #[test]
+    fn only_explicit_protocol_lifecycle_errors_mark_execution_ended() {
+        for (code, message, expected) in [
+            (-32000, "Target crashed", true),
+            (-32000, "Inspected target navigated or closed", true),
+            (-32602, "Target crashed", false),
+            (-32602, "Inspected target navigated or closed", false),
+            (-32000, "policy rejected", false),
+            (-32000, "Target crashed unexpectedly", false),
+        ] {
+            let error = json!({"code":code,"message":message});
+            assert_eq!(target_execution_ended(&error), expected);
+        }
     }
 
     #[test]

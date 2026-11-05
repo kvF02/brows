@@ -294,9 +294,13 @@ impl Drop for ProbeServer {
 }
 
 fn serve_request(stream: &mut TcpStream, route: &str, page: &str) -> bool {
-    if stream
-        .set_read_timeout(Some(Duration::from_millis(150)))
-        .is_err()
+    // Winsock accept inherits the listener's nonblocking mode. Timeouts do
+    // not change it, so a browser preconnection could otherwise be closed
+    // before its first request bytes arrive.
+    if stream.set_nonblocking(false).is_err()
+        || stream
+            .set_read_timeout(Some(Duration::from_millis(150)))
+            .is_err()
         || stream
             .set_write_timeout(Some(Duration::from_millis(150)))
             .is_err()
@@ -550,6 +554,33 @@ fn validate_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn probe_http_accepts_delayed_headers_on_a_nonblocking_accepted_socket() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let (send, ready) = std::sync::mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            stream.set_nonblocking(true).unwrap();
+            send.send(()).unwrap();
+            serve_request(&mut stream, "/delayed", "probe-ok")
+        });
+        let mut client = TcpStream::connect(address).unwrap();
+        client
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        ready.recv_timeout(Duration::from_secs(2)).unwrap();
+        thread::sleep(Duration::from_millis(50));
+        client
+            .write_all(b"GET /delayed HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).unwrap();
+        assert!(server.join().unwrap());
+        assert!(response.starts_with("HTTP/1.1 200 OK\r\n"));
+        assert!(response.ends_with("probe-ok"));
+    }
 
     fn temp_root(name: &str) -> PathBuf {
         let path = std::env::temp_dir().join(format!(

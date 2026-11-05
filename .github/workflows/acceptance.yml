@@ -65,7 +65,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Production registration and capability probe
         timeout-minutes: 3
-        run: cargo +1.97.1 test -p brows-desktop signed_runtime_acceptance -- --ignored --nocapture
+        shell: pwsh
+        run: |
+          foreach ($round in 1..3) {
+            Write-Output "Production acceptance round $round"
+            cargo +1.97.1 test -p brows-desktop signed_runtime_acceptance -- --ignored --nocapture
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            Copy-Item -LiteralPath target/fingerprint-session-acceptance.json -Destination "target/fingerprint-session-acceptance-round-$round.json" -ErrorAction Stop
+          }
       - name: Worker restart and rendering acceptance
         if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
         timeout-minutes: 3
@@ -83,4 +90,5 @@ jobs:
           path: |
             target/fingerprint-observation.json
             target/fingerprint-session-acceptance.json
+            target/fingerprint-session-acceptance-round-*.json
           if-no-files-found: ignore

@@ -168,6 +168,52 @@ test("stopping uses an active session and never targets terminal history", async
   await assert.rejects(api.stopSession("profile-test"), (error) => error.code === "NOT_FOUND");
 });
 
+test("a profile page finishing after a stop cannot revive its earlier session snapshot", async () => {
+  const delayedProfiles = deferred();
+  let stored = session("running");
+  const api = new TauriApiClient({ invoke: async (handler) => {
+    if (handler === "profile_get") return profile();
+    if (handler === "profile_list") return delayedProfiles.promise;
+    if (handler === "session_list") return [plain(stored)];
+    if (handler === "session_stop") return stored = session("stopped", { updatedAtMs: 300 });
+    throw new Error(`Unexpected handler: ${handler}`);
+  } });
+  await api.getProfile("profile-test");
+  const pending = api.listProfiles();
+  await setImmediate();
+  assert.equal((await api.stopSession("profile-test")).status, "stopped");
+  delayedProfiles.resolve([profile()]);
+  assert.equal((await pending)[0].status, "stopped");
+});
+
+test("an older session-list response cannot replace a newer completed read", async () => {
+  const delayedSessions = deferred();
+  let reads = 0;
+  const api = new TauriApiClient({ invoke: async (handler) => {
+    if (handler === "profile_get") return profile();
+    if (handler === "session_list") return reads++ === 0 ? delayedSessions.promise : [session("stopped")];
+    throw new Error(`Unexpected handler: ${handler}`);
+  } });
+  const older = api.getProfile("profile-test");
+  assert.equal((await api.getProfile("profile-test")).status, "stopped");
+  delayedSessions.resolve([session("running")]);
+  assert.equal((await older).status, "stopped");
+});
+
+test("launch completion invalidates an earlier pending session-list read", async () => {
+  const delayedSessions = deferred();
+  const api = new TauriApiClient({ invoke: async (handler) => {
+    if (handler === "profile_get") return profile();
+    if (handler === "session_list") return delayedSessions.promise;
+    if (handler === "session_launch") return session("running");
+    throw new Error(`Unexpected handler: ${handler}`);
+  } });
+  const pending = api.getProfile("profile-test");
+  assert.equal((await api.launchSession("profile-test")).status, "running");
+  delayedSessions.resolve([]);
+  assert.equal((await pending).status, "running");
+});
+
 test("profile pagination preserves filters and includes session data for every page", async () => {
   const first = Array.from({ length: 200 }, (_, index) => profile({ id: `profile-${index}` }));
   const pages = [];
