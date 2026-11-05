@@ -4,9 +4,13 @@
   "description": "Allow every custom IPC command defined in the Brows desktop app.",
   "local": true,
   "remote": {
-    "urls": ["http://127.0.0.1:4173/*"]
+    "urls": [
+      "http://127.0.0.1:4173/*"
+    ]
   },
-  "windows": ["main"],
+  "windows": [
+    "main"
+  ],
   "permissions": [
     "core:default",
     "allow-profile-list",
@@ -40,6 +44,11 @@
     "allow-session-probe-network",
     "allow-backup-list",
     "allow-backup-export",
-    "allow-backup-import"
+    "allow-backup-import",
+    "allow-settings-get",
+    "allow-settings-update",
+    "allow-runtime-capture",
+    "allow-runtime-activate",
+    "allow-support-report"
   ]
 }

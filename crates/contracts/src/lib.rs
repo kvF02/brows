@@ -1131,14 +1131,54 @@ pub struct LegacyMigrationRecordDto {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SettingsDto {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_runtime_id: Option<String>,
     pub max_concurrent_sessions: u32,
     pub retain_archived_days: u32,
     pub telemetry_enabled: bool,
     pub check_updates: bool,
+    pub stop_sessions_on_exit: bool,
+}
+
+impl Default for SettingsDto {
+    fn default() -> Self {
+        Self {
+            active_runtime_id: None,
+            max_concurrent_sessions: 10,
+            retain_archived_days: 7,
+            telemetry_enabled: false,
+            check_updates: false,
+            stop_sessions_on_exit: true,
+        }
+    }
+}
+
+impl SettingsDto {
+    pub fn validate(&self) -> Result<(), ContractError> {
+        if !(1..=10).contains(&self.max_concurrent_sessions) {
+            return Err(ContractError::invalid_field(
+                "maxConcurrentSessions",
+                "must be between 1 and 10",
+            ));
+        }
+        if !(1..=3650).contains(&self.retain_archived_days) {
+            return Err(ContractError::invalid_field(
+                "retainArchivedDays",
+                "must be between 1 and 3650",
+            ));
+        }
+        if self.telemetry_enabled || self.check_updates || !self.stop_sessions_on_exit {
+            return Err(ContractError::invalid_field(
+                "settings",
+                "telemetry and automatic updates remain disabled; exit must stop owned sessions",
+            ));
+        }
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SettingsPatchDto {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_concurrent_sessions: Option<u32>,
@@ -1148,6 +1188,29 @@ pub struct SettingsPatchDto {
     pub telemetry_enabled: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub check_updates: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_sessions_on_exit: Option<bool>,
+}
+
+impl SettingsPatchDto {
+    pub fn apply(&self, current: &SettingsDto) -> Result<SettingsDto, ContractError> {
+        let next = SettingsDto {
+            active_runtime_id: current.active_runtime_id.clone(),
+            max_concurrent_sessions: self
+                .max_concurrent_sessions
+                .unwrap_or(current.max_concurrent_sessions),
+            retain_archived_days: self
+                .retain_archived_days
+                .unwrap_or(current.retain_archived_days),
+            telemetry_enabled: self.telemetry_enabled.unwrap_or(current.telemetry_enabled),
+            check_updates: self.check_updates.unwrap_or(current.check_updates),
+            stop_sessions_on_exit: self
+                .stop_sessions_on_exit
+                .unwrap_or(current.stop_sessions_on_exit),
+        };
+        next.validate()?;
+        Ok(next)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -1159,6 +1222,8 @@ pub struct SettingsUpdateRequest {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BrowserRuntimeDto {
+    pub managed: bool,
+    pub sha256: String,
     pub id: String,
     pub name: String,
     pub version: String,
@@ -1199,6 +1264,8 @@ pub struct FingerprintProbeResultDto {
 impl From<&domain::BrowserBuild> for BrowserRuntimeDto {
     fn from(value: &domain::BrowserBuild) -> Self {
         Self {
+            managed: value.id.as_str().starts_with("managed-"),
+            sha256: value.sha256.clone(),
             id: value.id.as_str().to_owned(),
             name: format!("{} {}", value.provider, value.version),
             version: value.version.clone(),

@@ -8,4 +8,6 @@ description = "SQLite persistence adapters for Brows"
 [dependencies]
 brows-application = { path = "../application" }
 brows-domain = { path = "../domain" }
+brows-contracts = { path = "../contracts" }
 rusqlite = { version = "0.32.1", features = ["bundled"] }
+

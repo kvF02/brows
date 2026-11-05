@@ -64,9 +64,16 @@ checks that digest again before each launch. This remains local admission, not
 a remotely signed runtime catalog. It has passed the
 repeatable two-profile smoke test documented in
 [`docs/phase-1-acceptance.md`](docs/phase-1-acceptance.md). It is still an MVP:
-DPAPI-backed secret migration, encrypted backup, managed runtime
-installation/update, online revocation freshness and high-strength fingerprint
-resistance remain later milestones.
+encrypted backup and migration adapters are connected, while settings now persist
+and apply concurrency changes at an idle boundary. Local signed-browser snapshots,
+version selection and resource integrity checks are described in
+[`docs/managed-runtimes.md`](docs/managed-runtimes.md). These are local inventories,
+not a signed online release catalog. Trusted downloads/security updates, online
+revocation freshness and high-strength fingerprint resistance remain open.
+
+Windows beta packaging, installation evidence and data rollback limits are covered
+in [`docs/beta-release.md`](docs/beta-release.md). Packaging checks do not replace
+full desktop UI or long-running workload acceptance.
 
 The Windows secret adapter stores only Generic Credentials in the current
 user's Credential Manager namespace. Profile isolation and multi-open behavior

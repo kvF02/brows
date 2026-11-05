@@ -6,7 +6,7 @@ test('desktop capability authorizes the runtime probe exposed by the UI', async 
   const permissions=await readFile(new URL('../crates/desktop/permissions/default.toml',import.meta.url),'utf8');
   assert.ok(capability.permissions.includes('allow-probe-runtime-fingerprint'));
   assert.match(permissions,/identifier = "allow-probe-runtime-fingerprint"\s+description = [^\n]+\s+commands = \{ allow = \["probe_runtime_fingerprint"\] \}/);
-  for (const command of ['session_observe', 'network_probe_service', 'session_probe_network']) {
+  for (const command of ['session_observe', 'network_probe_service', 'session_probe_network', 'settings_get', 'settings_update', 'runtime_capture', 'runtime_activate', 'support_report']) {
     const identifier = 'allow-' + command.replaceAll('_', '-');
     assert.ok(capability.permissions.includes(identifier), identifier);
     assert.ok(permissions.includes(`commands = { allow = ["${command}"] }`), command);

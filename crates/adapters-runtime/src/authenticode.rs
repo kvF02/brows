@@ -1,6 +1,11 @@
 use brows_application::{PortError, PortErrorKind, PortResult};
 use std::path::Path;
 
+/// Read the executable's native file version, independently of directory names.
+pub fn read_file_version(executable: &Path) -> PortResult<String> {
+    platform::file_version(executable)
+}
+
 /// Verifies the executable's Windows Authenticode trust chain and returns the
 /// leaf signing certificate's display name only when it matches the explicit
 /// publisher allowlist.
@@ -32,6 +37,13 @@ pub fn verify_authenticode_publisher(
 mod platform {
     use super::*;
 
+    pub(super) fn file_version(_executable: &Path) -> PortResult<String> {
+        Err(PortError::new(
+            PortErrorKind::Unavailable,
+            "native file versions require Windows",
+        ))
+    }
+
     pub(super) fn verified_publisher(_executable: &Path) -> PortResult<String> {
         Err(PortError::new(
             PortErrorKind::Unavailable,
@@ -45,6 +57,71 @@ mod platform {
 mod platform {
     use super::*;
     use std::{ffi::c_void, mem, os::windows::ffi::OsStrExt, ptr};
+
+    #[link(name = "version")]
+    unsafe extern "system" {
+        fn GetFileVersionInfoSizeW(path: *const u16, handle: *mut u32) -> u32;
+        fn GetFileVersionInfoW(path: *const u16, handle: u32, size: u32, data: *mut c_void) -> i32;
+        fn VerQueryValueW(
+            data: *const c_void,
+            key: *const u16,
+            value: *mut *mut c_void,
+            length: *mut u32,
+        ) -> i32;
+    }
+
+    pub(super) fn file_version(executable: &Path) -> PortResult<String> {
+        let path: Vec<u16> = executable
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        let mut ignored = 0;
+        // SAFETY: path is a live, NUL-terminated UTF-16 buffer.
+        let size = unsafe { GetFileVersionInfoSizeW(path.as_ptr(), &mut ignored) };
+        if size == 0 || size > 1024 * 1024 {
+            return Err(untrusted("executable has no bounded file version"));
+        }
+        // u32 allocation guarantees alignment for VS_FIXEDFILEINFO.
+        let mut data = vec![0_u32; (size as usize).div_ceil(4)];
+        // SAFETY: data is aligned and holds at least size bytes.
+        if unsafe { GetFileVersionInfoW(path.as_ptr(), 0, size, data.as_mut_ptr().cast()) } == 0 {
+            return Err(untrusted("cannot read executable file version"));
+        }
+        let key = [b'\\' as u16, 0];
+        let mut value = ptr::null_mut();
+        let mut length = 0;
+        // SAFETY: data is a successful version-info buffer; output pointers live through this call.
+        if unsafe { VerQueryValueW(data.as_ptr().cast(), key.as_ptr(), &mut value, &mut length) }
+            == 0
+            || value.is_null()
+            || length < 52
+        {
+            return Err(untrusted("executable fixed version is missing"));
+        }
+        let start = data.as_ptr() as usize;
+        let address = value as usize;
+        if address < start
+            || address
+                .checked_add(52)
+                .is_none_or(|end| end > start + size as usize)
+            || !address.is_multiple_of(4)
+        {
+            return Err(untrusted("executable fixed version exceeds its buffer"));
+        }
+        // SAFETY: the root query returns a VS_FIXEDFILEINFO of at least 52 bytes.
+        let fields = unsafe { std::slice::from_raw_parts(value.cast::<u32>(), 13) };
+        if fields[0] != 0xfeef04bd {
+            return Err(untrusted("invalid executable fixed version"));
+        }
+        Ok(format!(
+            "{}.{}.{}.{}",
+            fields[2] >> 16,
+            fields[2] & 0xffff,
+            fields[3] >> 16,
+            fields[3] & 0xffff
+        ))
+    }
 
     const WTD_UI_NONE: u32 = 2;
     const WTD_REVOKE_NONE: u32 = 0;

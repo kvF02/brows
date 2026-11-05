@@ -1,7 +1,17 @@
 use brows_application::{PortError, PortErrorKind, PortResult};
 use rusqlite::{Connection, TransactionBehavior};
 
-pub const CURRENT_SCHEMA_VERSION: u32 = 5;
+pub const CURRENT_SCHEMA_VERSION: u32 = 6;
+
+const MIGRATION_6: &str = r#"
+CREATE TABLE app_settings (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+    max_concurrent_sessions INTEGER NOT NULL CHECK (max_concurrent_sessions BETWEEN 1 AND 10),
+    retain_archived_days INTEGER NOT NULL CHECK (retain_archived_days BETWEEN 1 AND 3650),
+    active_runtime_id TEXT
+) STRICT;
+INSERT INTO app_settings VALUES (1, 10, 7, NULL);
+"#;
 
 const MIGRATION_1: &str = r#"
 CREATE TABLE profiles (
@@ -161,6 +171,9 @@ pub(crate) fn migrate(connection: &mut Connection) -> PortResult<()> {
             .transaction_with_behavior(TransactionBehavior::Immediate)
             .map_err(|error| sqlite_error("start schema migration", error))?;
         match version + 1 {
+            6 => transaction
+                .execute_batch(MIGRATION_6)
+                .map_err(|error| sqlite_error("apply schema migration 6", error))?,
             1 => transaction
                 .execute_batch(MIGRATION_1)
                 .map_err(|error| sqlite_error("apply schema migration 1", error))?,

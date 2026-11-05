@@ -92,7 +92,7 @@ impl LaunchPlanCompiler {
             return Err(ApplicationError::new(
                 ErrorCode::CapabilityUnsupported,
                 match build.capabilities.fingerprint_support {
-                    FingerprintSupport::Unsupported => "所选浏览器未能加载指纹扩展，SeedableNoise 已阻止启动。可切换系统原生，或选择通过指纹能力检测的可信运行时。",
+                    FingerprintSupport::Unsupported => "所选浏览器未通过指纹首脚本配置检测，SeedableNoise 已阻止启动。可切换系统原生，或选择通过指纹能力检测的可信运行时。",
                     _ => "所选浏览器的指纹能力尚未验证。请先在设置中检测指纹能力；系统原生环境不受此限制。",
                 },
             ));

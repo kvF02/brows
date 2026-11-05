@@ -1,7 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import {
   ApiError,
-  EMPTY_SETTINGS,
   type ApiClient,
   type BackupJob,
   type BrowserRuntime,
@@ -170,6 +169,11 @@ const handlers = Object.freeze({
   backupList: "backup_list",
   backupExport: "backup_export",
   backupImport: "backup_import",
+  settingsGet: "settings_get",
+  settingsUpdate: "settings_update",
+  runtimeCapture: "runtime_capture",
+  runtimeActivate: "runtime_activate",
+  supportReport: "support_report",
 });
 
 const prototypeRuntime: BrowserRuntime = {
@@ -243,6 +247,8 @@ export class TauriApiClient implements ApiClient {
       trusted: boolean;
       active: boolean;
       fingerprintSupport?: BrowserRuntime["fingerprintSupport"];
+      managed?: boolean;
+      sha256?: string;
     }>;
     return raw.map((r) => ({
       id: r.id,
@@ -252,6 +258,8 @@ export class TauriApiClient implements ApiClient {
       trusted: r.trusted,
       active: r.active,
       fingerprintSupport: r.fingerprintSupport ?? "unverified",
+      managed: r.managed ?? false,
+      sha256: r.sha256,
     }));
   }
 
@@ -504,10 +512,19 @@ export class TauriApiClient implements ApiClient {
     return this.toProfile(result.profile);
   }
   async getSettings(): Promise<Settings> {
-    return { ...EMPTY_SETTINGS };
+    return this.call<Settings>(handlers.settingsGet);
   }
-  async updateSettings(_changes: Partial<Settings>): Promise<Settings> {
-    return unsupported("设置持久化");
+  async captureRuntime(runtimeId: string): Promise<BrowserRuntime> {
+    return this.call<BrowserRuntime>(handlers.runtimeCapture, { request: { runtimeId } });
+  }
+  async activateRuntime(runtimeId: string): Promise<void> {
+    await this.call<void>(handlers.runtimeActivate, { request: { runtimeId } });
+  }
+  async getSupportReport(): Promise<Record<string, unknown>> {
+    return this.call<Record<string, unknown>>(handlers.supportReport);
+  }
+  async updateSettings(changes: Partial<Settings>): Promise<Settings> {
+    return this.call<Settings>(handlers.settingsUpdate, { request: { changes } });
   }
 
   private cacheProfile(profile: ProfileDto): void {
@@ -791,11 +808,5 @@ function normalizeError(error: unknown): ApiError {
   return new ApiError(
     "INTERNAL",
     error instanceof Error ? error.message : "桌面命令执行失败",
-  );
-}
-
-function unsupported<T>(capability: string): Promise<T> {
-  return Promise.reject(
-    new ApiError("CAPABILITY_UNSUPPORTED", `${capability}尚未接入本地适配器`),
   );
 }

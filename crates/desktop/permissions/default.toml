@@ -199,4 +199,35 @@ permissions = [
   "allow-backup-list",
   "allow-backup-export",
   "allow-backup-import",
+  "allow-settings-get",
+  "allow-settings-update",
+  "allow-runtime-capture",
+  "allow-runtime-activate",
+  "allow-support-report",
 ]
+
+[[permission]]
+identifier = "allow-settings-get"
+description = "Read local non-secret application settings."
+commands = { allow = ["settings_get"] }
+
+[[permission]]
+identifier = "allow-settings-update"
+description = "Update validated local settings at an idle scheduler boundary."
+commands = { allow = ["settings_update"] }
+
+[[permission]]
+identifier = "allow-runtime-capture"
+description = "Enable the fixed runtime_capture operation."
+commands = { allow = ["runtime_capture"] }
+
+[[permission]]
+identifier = "allow-runtime-activate"
+description = "Enable the fixed runtime_activate operation."
+commands = { allow = ["runtime_activate"] }
+
+[[permission]]
+identifier = "allow-support-report"
+description = "Enable the fixed support_report operation."
+commands = { allow = ["support_report"] }
+

@@ -72,12 +72,42 @@ impl ProfileApplicationService {
     /// Creates a profile from an authenticated backup manifest. The imported
     /// profile always receives a fresh identity so restoring can never replace
     /// an existing profile's persisted record or userdata directory.
-    pub fn create_imported(&self, mut profile: ProfileSpec) -> ApplicationResult<ProfileDto> {
+    pub fn create_imported(&self, profile: ProfileSpec) -> ApplicationResult<ProfileDto> {
+        self.create_imported_with_data(profile, |_| Ok(()), |_| Ok(()))
+    }
+
+    /// Install restored data before publishing a launchable profile record.
+    /// Roll back only data installed by this call if metadata publication fails.
+    pub fn create_imported_with_data(
+        &self,
+        mut profile: ProfileSpec,
+        install: impl FnOnce(&ProfileId) -> ApplicationResult<()>,
+        rollback: impl FnOnce(&ProfileId) -> ApplicationResult<()>,
+    ) -> ApplicationResult<ProfileDto> {
         profile.id = self.ids.next_profile_id()?;
         profile.revision = Revision::FIRST;
         profile.archived = false;
         self.validate_references(&profile)?;
-        self.profiles.create(profile.clone())?;
+        match self.profiles.get(&profile.id) {
+            Ok(_) => {
+                return Err(ApplicationError::new(
+                    ErrorCode::AlreadyExists,
+                    "new import identity already exists",
+                ))
+            }
+            Err(error) if error.kind == crate::PortErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+        install(&profile.id)?;
+        if let Err(error) = self.profiles.create(profile.clone()) {
+            if rollback(&profile.id).is_err() {
+                return Err(ApplicationError::new(
+                    ErrorCode::Internal,
+                    "restored metadata publication and unreferenced data cleanup failed",
+                ));
+            }
+            return Err(error.into());
+        }
         self.audit_success("profile.import", profile.id.as_str());
         Ok(ProfileDto::from(&profile))
     }

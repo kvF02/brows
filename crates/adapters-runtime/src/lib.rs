@@ -29,8 +29,10 @@ use std::{
 
 mod authenticode;
 mod fingerprint_probe;
+mod profile_floor;
 #[cfg(windows)]
 mod session_control;
+mod snapshots;
 #[cfg(windows)]
 mod target_registry;
 #[cfg(windows)]
@@ -83,6 +85,7 @@ impl ManagedProcess {
     }
 }
 
+pub use authenticode::read_file_version;
 pub use authenticode::verify_authenticode_publisher;
 
 const MAX_PREFERENCES_BYTES: u64 = 16 * 1024 * 1024;
@@ -102,6 +105,9 @@ pub struct ManagedChromiumRuntime {
     builds: RwLock<BuildRegistry>,
     processes: Mutex<HashMap<SessionId, ManagedProcess>>,
     probing: Mutex<HashSet<BrowserBuildId>>,
+    snapshot_store: RwLock<Option<snapshots::SnapshotStore>>,
+    snapshot_operations: Mutex<()>,
+    snapshot_inventories: RwLock<HashMap<BrowserBuildId, snapshots::SnapshotManifest>>,
 }
 
 impl ManagedChromiumRuntime {
@@ -132,6 +138,9 @@ impl ManagedChromiumRuntime {
             builds: RwLock::new(BuildRegistry::default()),
             processes: Mutex::new(HashMap::new()),
             probing: Mutex::new(HashSet::new()),
+            snapshot_store: RwLock::new(None),
+            snapshot_operations: Mutex::new(()),
+            snapshot_inventories: RwLock::new(HashMap::new()),
         })
     }
 
@@ -317,6 +326,7 @@ impl ManagedChromiumRuntime {
         }
         self.ensure_runtime_path(&executable)?;
         verify_digest(&executable, &build.sha256)?;
+        self.verify_snapshot(&build)?;
         Ok(build)
     }
 
@@ -445,6 +455,7 @@ impl BrowserRuntime for ManagedChromiumRuntime {
                 ));
             }
             verify_digest(&build.executable_path, &build.sha256)?;
+            self.verify_snapshot(&build)?;
             let result = fingerprint_probe::run(&build, &self.profile_root);
             // Recheck even when browser execution failed; a changing binary
             // must never gain a capability result from an older executable.
@@ -492,13 +503,15 @@ impl BrowserRuntime for ManagedChromiumRuntime {
     fn launch(&self, plan: &ResolvedLaunchPlan) -> PortResult<BrowserProcess> {
         plan.validate()
             .map_err(|error| invalid_data(error.to_string()))?;
-        let loads_extension = plan
-            .arguments
-            .iter()
-            .any(|argument| matches!(argument, LaunchArgument::LoadExtension(_)));
+        let needs_fingerprint = plan.arguments.iter().any(|argument| {
+            matches!(
+                argument,
+                LaunchArgument::LoadExtension(_) | LaunchArgument::SessionFingerprint(_)
+            )
+        });
         // Serialize the short admission/spawn step against probe admission,
         // so a Supported snapshot cannot outlive a concurrent re-probe.
-        let fingerprint_gate = if loads_extension {
+        let fingerprint_gate = if needs_fingerprint {
             Some(
                 self.probing
                     .lock()
@@ -510,7 +523,7 @@ impl BrowserRuntime for ManagedChromiumRuntime {
         let build = self.verified_build_for_plan(plan)?;
         // A stale or caller-forged launch-plan capability cannot bypass the
         // registry. Fail before touching the persisted profile's Preferences.
-        if loads_extension
+        if needs_fingerprint
             && (build.capabilities.fingerprint_support != FingerprintSupport::Supported
                 || fingerprint_gate
                     .as_ref()
@@ -518,9 +531,12 @@ impl BrowserRuntime for ManagedChromiumRuntime {
         {
             return Err(PortError::new(
                 PortErrorKind::CapabilityUnsupported,
-                "所选运行时未通过指纹扩展检测；可使用系统原生模式，不能启动 SeedableNoise",
+                "所选运行时未通过指纹首脚本检测；可使用系统原生模式，不能启动 SeedableNoise",
             ));
         }
+        let admitted_directory =
+            create_confined_directory(&self.profile_root, &plan.user_data_dir)?;
+        profile_floor::admit(&admitted_directory, &build)?;
         let user_data_dir = self.prepare_profile(plan)?;
         let arguments = Self::render_arguments(plan, &user_data_dir)?;
 
@@ -863,7 +879,7 @@ fn verify_digest(path: &Path, expected: &str) -> PortResult<()> {
     if !actual.eq_ignore_ascii_case(expected) {
         return Err(PortError::new(
             PortErrorKind::RuntimeUntrusted,
-            "browser executable digest does not match the signed catalog",
+            "browser executable digest does not match its registered digest",
         ));
     }
     Ok(())
@@ -980,7 +996,7 @@ mod tests {
         }
     }
 
-    fn sample_build(
+    pub(super) fn sample_build(
         id: &str,
         executable_path: PathBuf,
         contents: &[u8],
@@ -1231,6 +1247,40 @@ mod tests {
             assert!(!plan.user_data_dir.exists());
             assert!(runtime.processes.lock().unwrap().is_empty());
         }
+        let mut private_plan = plan.clone();
+        private_plan.arguments.retain(|argument| {
+            !matches!(
+                argument,
+                LaunchArgument::LoadExtension(_) | LaunchArgument::AcceptLanguages(_)
+            )
+        });
+        let policy = brows_application::memory::fingerprint_probe_policy("150.0.0.0").unwrap();
+        private_plan.preferences.accept_languages = policy.languages.clone();
+        private_plan
+            .arguments
+            .push(LaunchArgument::AcceptLanguages(policy.languages.clone()));
+        private_plan
+            .arguments
+            .push(LaunchArgument::UserAgentOverride(policy.user_agent.clone()));
+        private_plan
+            .arguments
+            .push(LaunchArgument::SessionFingerprint(Box::new(policy)));
+        private_plan.capabilities.supports_devtools_pipe = true;
+        private_plan.validate().unwrap();
+        private_plan.capabilities.supports_devtools_pipe = false;
+        assert!(private_plan.validate().is_err());
+        private_plan.capabilities.supports_devtools_pipe = true;
+        runtime
+            .set_fingerprint_support(
+                &BrowserBuildId::new("build-1").unwrap(),
+                FingerprintSupport::Unverified,
+            )
+            .unwrap();
+        assert_eq!(
+            runtime.launch(&private_plan).unwrap_err().kind,
+            PortErrorKind::CapabilityUnsupported
+        );
+        assert!(!private_plan.user_data_dir.exists());
         let id = BrowserBuildId::new("build-1").unwrap();
         runtime
             .set_fingerprint_support(&id, FingerprintSupport::Supported)

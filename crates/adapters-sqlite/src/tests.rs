@@ -17,6 +17,31 @@ use std::{
 
 static NEXT_DATABASE: AtomicU64 = AtomicU64::new(1);
 
+#[test]
+fn settings_survive_reopen_and_reject_unsafe_changes() {
+    let database = TemporaryDatabase::new("settings");
+    {
+        let store = SqliteSettingsStore::open(database.path()).unwrap();
+        assert_eq!(
+            store.get().unwrap(),
+            brows_contracts::SettingsDto::default()
+        );
+        let mut settings = store.get().unwrap();
+        settings.max_concurrent_sessions = 3;
+        store.save(&settings).unwrap();
+        settings.telemetry_enabled = true;
+        assert!(store.save(&settings).is_err());
+        settings.telemetry_enabled = false;
+        settings.stop_sessions_on_exit = false;
+        assert!(store.save(&settings).is_err());
+        settings.stop_sessions_on_exit = true;
+        settings.max_concurrent_sessions = 0;
+        assert!(store.save(&settings).is_err());
+    }
+    let reopened = SqliteSettingsStore::open(database.path()).unwrap();
+    assert_eq!(reopened.get().unwrap().max_concurrent_sessions, 3);
+}
+
 #[derive(Debug)]
 struct TemporaryDatabase {
     path: PathBuf,

@@ -9,4 +9,6 @@ description = "Verified Chromium process adapter for Brows"
 brows-application = { path = "../application" }
 brows-domain = { path = "../domain" }
 serde_json.workspace = true
+serde.workspace = true
 sha2 = "0.10"
+

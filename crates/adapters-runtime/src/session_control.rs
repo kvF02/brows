@@ -309,6 +309,7 @@ impl Controller {
                             Some(
                                 "Target.attachedToTarget"
                                     | "Target.detachedFromTarget"
+                                    | "ServiceWorker.workerVersionUpdated"
                                     | "Inspector.targetCrashed"
                                     | "Inspector.targetReloadedAfterCrash"
                             )
@@ -449,6 +450,46 @@ impl Controller {
                     Err(mpsc::RecvTimeoutError::Timeout) => continue,
                     Err(_) => break,
                 };
+                if event["method"] == "ServiceWorker.workerVersionUpdated" {
+                    let outcome: PortResult<Vec<String>> = (|| {
+                        let versions = event["params"]["versions"]
+                            .as_array()
+                            .filter(|versions| versions.len() <= MAX_TARGETS * 4)
+                            .ok_or_else(|| internal("invalid Service Worker version update"))?;
+                        let mut state = t.0.lock().map_err(|_| internal("target lock poisoned"))?;
+                        let mut retired = Vec::new();
+                        for version in versions {
+                            let id = version["versionId"]
+                                .as_str()
+                                .ok_or_else(|| internal("missing Service Worker version"))?;
+                            let status = version["status"]
+                                .as_str()
+                                .ok_or_else(|| internal("missing Service Worker status"))?;
+                            let target = version["targetId"].as_str().filter(|id| !id.is_empty());
+                            retired.extend(state.worker_version(
+                                id,
+                                target,
+                                status == "redundant",
+                            )?);
+                        }
+                        Ok(retired)
+                    })();
+                    match outcome {
+                        Ok(retired) => {
+                            if let Ok(mut paused) = w.paused.lock() {
+                                for session in retired {
+                                    paused.remove(&session);
+                                }
+                            }
+                        }
+                        Err(_) => {
+                            w.fail();
+                            break;
+                        }
+                    }
+                    t.1.notify_all();
+                    continue;
+                }
                 if event["method"] == "Target.detachedFromTarget" {
                     if let Some(session) = event["params"]["sessionId"].as_str() {
                         if let Ok(mut paused) = w.paused.lock() {
@@ -564,15 +605,20 @@ impl Controller {
         controller
             .wire
             .call("Target.setAutoAttach", auto_attach(true), None)?;
-        for url in if urls.is_empty() {
+        let startup_urls = if urls.is_empty() {
             vec!["about:blank".to_owned()]
         } else {
             urls.to_vec()
-        } {
-            let target =
-                controller
-                    .wire
-                    .call("Target.createTarget", json!({"url":"about:blank"}), None)?;
+        };
+        let headless = args
+            .iter()
+            .any(|argument| argument.to_string_lossy().starts_with("--headless"));
+        for (index, url) in startup_urls.into_iter().enumerate() {
+            let mut params = json!({"url":"about:blank"});
+            if !headless && index == 0 {
+                params["newWindow"] = json!(true);
+            }
+            let target = controller.wire.call("Target.createTarget", params, None)?;
             let id = target["targetId"]
                 .as_str()
                 .ok_or_else(|| internal("browser omitted target identity"))?;
@@ -682,6 +728,51 @@ impl Controller {
             .call("Target.closeTarget", json!({"targetId":id}), None);
         outcome
     }
+    /// Read only the first-script capture in this fresh probe's sole page.
+    /// This is an internal fixed read, never an application IPC expression.
+    pub(super) fn probe_first_document(&self, deadline: Instant) -> PortResult<String> {
+        self.wire.ensure_open()?;
+        let pages: Vec<_> = self
+            .targets
+            .0
+            .lock()
+            .map_err(|_| internal("target lock poisoned"))?
+            .snapshot()
+            .into_iter()
+            .filter(|target| target.kind == "page")
+            .collect();
+        if pages.is_empty() {
+            return Ok(String::new());
+        }
+        if pages.len() != 1 {
+            return Err(internal("private probe has unexpected pages"));
+        }
+        let target = &pages[0];
+        let result = evaluate_before(
+            &self.wire,
+            &target.session,
+            "document.getElementById('brows-fingerprint-probe')?.textContent || ''",
+            deadline,
+        )?;
+        if !self
+            .targets
+            .0
+            .lock()
+            .map_err(|_| internal("target lock poisoned"))?
+            .target_current(target)
+        {
+            return Err(PortError::new(
+                PortErrorKind::Unavailable,
+                "private probe page changed during capture",
+            ));
+        }
+        result
+            .as_str()
+            .filter(|value| value.len() <= 8192)
+            .map(str::to_owned)
+            .ok_or_else(|| internal("private first-script proof exceeds its bound"))
+    }
+
     pub(super) fn observe(&self, session_id: &SessionId) -> PortResult<SessionObservation> {
         self.wire.ensure_open()?;
         let deadline = Instant::now() + TIMEOUT;
@@ -795,7 +886,8 @@ fn evaluate_before(
         json!({"expression":expression,"returnByValue":true,"silent":true,"timeout":timeout_ms}),
         Some(session),
     )?;
-    let result = wire.finish_until(reply, deadline)?;
+    let read_deadline = deadline.min(Instant::now() + Duration::from_millis(1500));
+    let result = wire.finish_until(reply, read_deadline)?;
     if result.get("exceptionDetails").is_some() {
         return Err(internal(
             "session observation could not read the requested APIs",
@@ -873,6 +965,9 @@ fn configure(
         let script = format!("{hardware_script};\n{rendering_script}");
         if is_page {
             wire.call("Page.enable", json!({}), Some(session))?;
+            if kind == "page" {
+                wire.call("ServiceWorker.enable", json!({}), Some(session))?;
+            }
             wire.call(
                 "Page.addScriptToEvaluateOnNewDocument",
                 json!({"source":script,"runImmediately":true}),

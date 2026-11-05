@@ -1,0 +1,66 @@
+name: Windows beta package
+on:
+  workflow_dispatch:
+  pull_request:
+  push:
+    branches: [master]
+permissions:
+  contents: read
+concurrency:
+  group: beta-package-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  package:
+    runs-on: windows-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - uses: actions/cache/restore@v4
+        id: release_cache
+        with:
+          path: target/release
+          key: windows-beta-v2-1.97.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          restore-keys: |
+            windows-beta-v2-1.97.1-
+            windows-beta-1.97.1-${{ hashFiles('Cargo.lock') }}-
+            windows-beta-1.97.1-
+      - name: Install UI dependencies
+        run: npm ci --prefix ui
+      - name: Build packaged application and NSIS installer
+        run: npm run desktop:package
+      - name: Install, open, upgrade and uninstall the actual package
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
+          if (-not $installer) { throw 'No NSIS installer produced' }
+          ./tools/windows-beta-smoke.ps1 -Installer $installer.FullName -Report target/beta-package-acceptance.json
+      - name: Record hashes and unsigned beta status
+        shell: pwsh
+        run: |
+          $files = @(Get-Item target/release/brows-desktop.exe) + @(Get-ChildItem target/release/bundle/nsis/*-setup.exe)
+          $files | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Set-Content target/SHA256SUMS.txt
+          $signature = Get-AuthenticodeSignature target/release/brows-desktop.exe
+          @{ commit = '${{ github.sha }}'; channel = 'internal-beta'; authenticode = "$($signature.Status)"; autoUpdate = $false } | ConvertTo-Json | Set-Content target/beta-build.json
+      - uses: actions/cache/save@v4
+        if: ${{ success() && steps.release_cache.outputs.cache-hit != 'true' }}
+        with:
+          path: target/release
+          key: windows-beta-v2-1.97.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: brows-windows-beta-${{ github.sha }}
+          path: |
+            target/release/brows-desktop.exe
+            target/release/bundle/nsis/*-setup.exe
+            target/SHA256SUMS.txt
+            target/beta-build.json
+            target/beta-package-acceptance.json
+          if-no-files-found: warn

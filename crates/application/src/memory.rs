@@ -492,6 +492,25 @@ pub fn materialize_fingerprint_probe(
     profile_id: &ProfileId,
     runtime_version: &str,
 ) -> PortResult<PathBuf> {
+    let policy = fingerprint_probe_policy(runtime_version)?;
+    let fp = PersonaFingerprint::derive(&policy.persona, runtime_version)
+        .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
+    let locale = LocaleConfig {
+        accept_languages: policy.languages,
+        timezone: policy.timezone,
+    };
+    SeedableNoiseFingerprintRuntime::new(extension_root, profile_id.clone())?.materialize_extension(
+        profile_id,
+        &policy.persona,
+        &fp,
+        &locale,
+    )
+}
+
+/// Fixed, deliberately non-native sentinels shared by isolated probes only.
+pub fn fingerprint_probe_policy(
+    runtime_version: &str,
+) -> PortResult<brows_domain::SessionFingerprintConfig> {
     let persona = SeedableNoisePersona {
         seed: "brows-local-fingerprint-probe-v1".to_owned(),
         platform: brows_domain::PlatformKind::Windows,
@@ -515,12 +534,12 @@ pub fn materialize_fingerprint_probe(
     };
     let fp = PersonaFingerprint::derive(&persona, runtime_version)
         .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
-    let locale = LocaleConfig {
-        accept_languages: vec!["pl-PL".to_owned(), "pl".to_owned()],
+    Ok(brows_domain::SessionFingerprintConfig {
+        user_agent: fp.user_agent,
+        persona,
+        languages: vec!["pl-PL".to_owned(), "pl".to_owned()],
         timezone: None,
-    };
-    SeedableNoiseFingerprintRuntime::new(extension_root, profile_id.clone())?
-        .materialize_extension(profile_id, &persona, &fp, &locale)
+    })
 }
 
 impl SeedableNoiseFingerprintRuntime {
@@ -754,7 +773,7 @@ impl SeedableNoiseFingerprintRuntime {
         if build.capabilities.fingerprint_support != FingerprintSupport::Supported {
             return Err(PortError::new(
                 PortErrorKind::CapabilityUnsupported,
-                "所选运行时尚未通过指纹扩展能力检测，不能启动 SeedableNoise",
+                "所选运行时尚未通过指纹首脚本能力检测，不能启动 SeedableNoise",
             ));
         }
         locale
@@ -768,19 +787,30 @@ impl SeedableNoiseFingerprintRuntime {
         // Keep the UA major aligned with the concrete Chromium binary. A
         // random major from a global pool would be trivially inconsistent with
         // the runtime selected by the profile.
-        let ext_dir = self.materialize_extension(profile_id, p, &fp, locale)?;
 
         let mut warnings = Vec::new();
-        let arguments = vec![
-            LaunchArgument::UserAgentOverride(fp.user_agent),
+        let mut arguments = vec![
+            LaunchArgument::UserAgentOverride(fp.user_agent.clone()),
             LaunchArgument::ForceDeviceScaleFactor(p.screen.device_scale_factor_hundredths),
             LaunchArgument::WindowSize {
                 width: window.width,
                 height: window.height,
             },
             LaunchArgument::DisableBlinkFeatures(vec!["AutomationControlled".to_owned()]),
-            LaunchArgument::LoadExtension(ext_dir),
         ];
+
+        if build.id.as_str().starts_with("managed-") {
+            if !build.capabilities.supports_devtools_pipe {
+                return Err(PortError::new(
+                    PortErrorKind::CapabilityUnsupported,
+                    "managed fingerprint policy requires a private session pipe",
+                ));
+            }
+        } else {
+            arguments.push(LaunchArgument::LoadExtension(
+                self.materialize_extension(profile_id, p, &fp, locale)?,
+            ));
+        }
 
         // Declared-only fields: be honest about what we did not actually change.
         if p.spoof_canvas {
@@ -858,6 +888,35 @@ mod seedable_noise_tests {
             spoof_canvas: true,
             spoof_audio: true,
         }
+    }
+
+    #[test]
+    fn managed_policy_requires_private_pipe_and_materializes_no_extension() {
+        let root = std::env::temp_dir().join(format!(
+            "brows-managed-compile-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let runtime =
+            SeedableNoiseFingerprintRuntime::new(&root, ProfileId::new("managed-profile").unwrap())
+                .unwrap();
+        let persona = FingerprintPersona::SeedableNoise(sample_persona("managed-probe"));
+        let mut build = verified_build();
+        build.id = BrowserBuildId::new("managed-edge-150").unwrap();
+        build.capabilities.supports_devtools_pipe = true;
+        let result = runtime.compile(&persona, &build).unwrap();
+        assert!(!result
+            .arguments
+            .iter()
+            .any(|argument| matches!(argument, LaunchArgument::LoadExtension(_))));
+        assert!(!root.exists());
+        build.capabilities.supports_devtools_pipe = false;
+        assert!(runtime.compile(&persona, &build).is_err());
+        build.capabilities.supports_devtools_pipe = true;
+        build.capabilities.fingerprint_support = FingerprintSupport::Unverified;
+        assert!(runtime.compile(&persona, &build).is_err());
     }
 
     #[test]

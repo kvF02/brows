@@ -14,6 +14,7 @@
     "desktop:build": "cargo build -p brows-desktop --release --features custom-protocol",
     "desktop:check": "cargo check -p brows-desktop --tests",
     "check:ui": "npm run ui:typecheck && npm run ui:build && npm run ui:audit",
-    "observe:fingerprint": "node tools/fingerprint-observation.mjs"
+    "observe:fingerprint": "node tools/fingerprint-observation.mjs",
+    "desktop:package": "node tools/prepare-icons.mjs && npm run ui:build && cd crates/desktop && npx --yes @tauri-apps/cli@2.12.4 build --ci --config tauri.bundle.conf.json"
   }
 }
