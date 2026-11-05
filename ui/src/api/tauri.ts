@@ -207,6 +207,8 @@ export class TauriApiClient implements ApiClient {
   private readonly dtoCache = new Map<string, ProfileDto>();
   private readonly firstSeen = new Map<string, string>();
   private sessions: SessionDto[] = [];
+  private sessionSequence = 0;
+  private appliedSessionSequence = 0;
   private readonly proxyHealth = new Map<string, Pick<ProxySummary, "health" | "lastCheckedAt" | "lastExitIp" | "exitIpChecked">>();
 
   constructor(private readonly bridge: TypedCommandBridge) {}
@@ -285,11 +287,10 @@ export class TauriApiClient implements ApiClient {
 
   async listProfiles(includeArchived = false): Promise<Profile[]> {
     // Observe both failures immediately, even while the profile pages are loading.
-    const [profiles, sessions] = await Promise.all([
+    const [profiles] = await Promise.all([
       this.listProfileDtos(includeArchived),
-      this.call<SessionDto[]>(handlers.sessionList),
+      this.refreshSessions(),
     ]);
-    this.sessions = sessions;
     profiles.forEach((profile) => this.cacheProfile(profile));
     return profiles.map((profile) => this.toProfile(profile));
   }
@@ -307,11 +308,10 @@ export class TauriApiClient implements ApiClient {
   }
 
   async getProfile(id: string): Promise<Profile> {
-    const [profile, sessions] = await Promise.all([
+    const [profile] = await Promise.all([
       this.call<ProfileDto>(handlers.profileGet, { request: { profileId: id } }),
-      this.call<SessionDto[]>(handlers.sessionList),
+      this.refreshSessions(),
     ]);
-    this.sessions = sessions;
     this.cacheProfile(profile);
     return this.toProfile(profile);
   }
@@ -535,10 +535,17 @@ export class TauriApiClient implements ApiClient {
   }
 
   private async refreshSessions(): Promise<void> {
-    this.sessions = await this.call<SessionDto[]>(handlers.sessionList);
+    const sequence = ++this.sessionSequence;
+    const sessions = await this.call<SessionDto[]>(handlers.sessionList);
+    // A late read must not replace a newer read or a completed session action.
+    if (sequence > this.appliedSessionSequence) {
+      this.sessions = sessions;
+      this.appliedSessionSequence = sequence;
+    }
   }
 
   private upsertSession(session: SessionDto): void {
+    this.appliedSessionSequence = ++this.sessionSequence;
     this.sessions = [session, ...this.sessions.filter((item) => item.id !== session.id)];
   }
 
