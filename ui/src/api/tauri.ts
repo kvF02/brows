@@ -1,7 +1,6 @@
 import { invoke as tauriInvoke } from "@tauri-apps/api/core";
 import {
   ApiError,
-  EMPTY_SETTINGS,
   type ApiClient,
   type BackupJob,
   type BrowserRuntime,
@@ -170,6 +169,8 @@ const handlers = Object.freeze({
   backupList: "backup_list",
   backupExport: "backup_export",
   backupImport: "backup_import",
+  settingsGet: "settings_get",
+  settingsUpdate: "settings_update",
 });
 
 const prototypeRuntime: BrowserRuntime = {
@@ -504,10 +505,10 @@ export class TauriApiClient implements ApiClient {
     return this.toProfile(result.profile);
   }
   async getSettings(): Promise<Settings> {
-    return { ...EMPTY_SETTINGS };
+    return this.call<Settings>(handlers.settingsGet);
   }
-  async updateSettings(_changes: Partial<Settings>): Promise<Settings> {
-    return unsupported("设置持久化");
+  async updateSettings(changes: Partial<Settings>): Promise<Settings> {
+    return this.call<Settings>(handlers.settingsUpdate, { request: { changes } });
   }
 
   private cacheProfile(profile: ProfileDto): void {
@@ -794,8 +795,3 @@ function normalizeError(error: unknown): ApiError {
   );
 }
 
-function unsupported<T>(capability: string): Promise<T> {
-  return Promise.reject(
-    new ApiError("CAPABILITY_UNSUPPORTED", `${capability}尚未接入本地适配器`),
-  );
-}

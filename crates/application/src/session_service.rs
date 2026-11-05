@@ -262,6 +262,28 @@ impl SessionApplicationService {
         Ok(registry.sessions.values().map(SessionDto::from).collect())
     }
 
+    /// Change capacity only at an idle boundary. Persistence runs while launch
+    /// operations are excluded; a failed write leaves the live scheduler intact.
+    pub fn configure_idle_limit(
+        &self,
+        limit: usize,
+        persist: impl FnOnce() -> ApplicationResult<()>,
+    ) -> ApplicationResult<()> {
+        let _operation = self.lock_operations()?;
+        let mut registry = self.lock_registry()?;
+        let snapshot = registry.scheduler.snapshot();
+        if snapshot.active != 0 || snapshot.queued != 0 {
+            return Err(ApplicationError::new(
+                ErrorCode::InvalidProfileState,
+                "stop all running and queued sessions before changing concurrency",
+            ));
+        }
+        let scheduler = SessionScheduler::new(limit)?;
+        persist()?;
+        registry.scheduler = scheduler;
+        Ok(())
+    }
+
     pub fn has_active_profile(
         &self,
         profile_id: &brows_domain::ProfileId,

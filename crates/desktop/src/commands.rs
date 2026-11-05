@@ -170,6 +170,22 @@ pub(crate) fn list_runtimes(state: State<'_, AppState>) -> IpcResult<Vec<Browser
     Ok(builds.iter().map(Into::into).collect())
 }
 
+#[tauri::command]
+pub(crate) fn settings_get(state: State<'_, AppState>) -> IpcResult<brows_contracts::SettingsDto> {
+    ipc(state.settings.get())
+}
+
+#[tauri::command]
+pub(crate) async fn settings_update(
+    state: State<'_, AppState>,
+    request: brows_contracts::SettingsUpdateRequest,
+) -> IpcResult<brows_contracts::SettingsDto> {
+    let settings = state.settings.clone();
+    let result = tauri::async_runtime::spawn_blocking(move || settings.update(request.changes))
+        .await.map_err(|_| ErrorDto { code: ErrorCode::Internal, message: "settings task failed".to_owned(), violations: Vec::new() })?;
+    ipc(result)
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct FingerprintProbeRequest {

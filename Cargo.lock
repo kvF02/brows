@@ -299,6 +299,7 @@ name = "brows-adapters-sqlite"
 version = "0.1.0"
 dependencies = [
  "brows-application",
+ "brows-contracts",
  "brows-domain",
  "rusqlite",
 ]
@@ -4912,3 +4913,4 @@ dependencies = [
  "log",
  "simd-adler32",
 ]
+

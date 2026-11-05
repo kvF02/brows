@@ -263,7 +263,6 @@ export interface Settings {
   telemetryEnabled: false;
   stopSessionsOnExit: boolean;
   retainArchivedDays: number;
-  activeRuntimeId?: string;
 }
 
 export interface CommandMap {

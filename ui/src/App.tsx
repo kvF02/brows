@@ -1776,10 +1776,10 @@ function SettingsView({
       <div className="page-heading"><div><div className="eyebrow">LOCAL CONTROL PLANE</div><h1>设置</h1><p>管理本地运行时、并发资源和安全默认值。</p></div></div>
       <div className="settings-grid">
         <article className="settings-card">
-          <div className="settings-card-head"><div><h2>会话调度</h2><p>同一环境只允许一个活动会话。</p></div><span className="settings-icon">↯</span></div>
+          <div className="settings-card-head"><div><h2>会话调度</h2><p>同一环境只允许一个活动会话。调整并发前请停止运行和排队中的会话。</p></div><span className="settings-icon">↯</span></div>
           <label className="field-label" htmlFor="max-concurrent">最大并发环境</label>
           <div className="number-control"><input id="max-concurrent" className="text-input" type="number" min="1" max="10" value={settings.maxConcurrentSessions} disabled={saving} onChange={(e) => void save({ maxConcurrentSessions: Number(e.target.value) })} /><span>个</span></div>
-          <label className="switch-row"><input type="checkbox" checked={settings.stopSessionsOnExit} disabled={saving} onChange={(e) => void save({ stopSessionsOnExit: e.target.checked })} /><span className="switch-ui" /><span><strong>退出管理器时停止会话</strong><small>避免遗留浏览器和代理进程。</small></span></label>
+          <label className="switch-row"><input type="checkbox" checked={settings.stopSessionsOnExit} disabled /><span className="switch-ui" /><span><strong>退出管理器时停止会话</strong><small>当前版本锁定开启，退出会回收所拥有的浏览器和代理进程。</small></span></label>
         </article>
         <article className="settings-card">
           <div className="settings-card-head"><div><h2>浏览器运行时</h2><p>签名可信 ≠ 指纹支持；指纹加载检测通过 ≠ 完整 anti-detect。</p></div><span className="settings-icon">◉</span></div>

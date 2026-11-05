@@ -7,6 +7,7 @@ use brows_adapters_secret_windows::WindowsCredentialStore;
 use brows_adapters_sqlite::{
     SqliteAuditSink, SqliteMigrationRecordRepository, SqliteProfileRepository,
     SqliteProxyRepository,
+    SqliteSettingsStore,
 };
 #[cfg(test)]
 use brows_application::memory::InMemoryAuditSink;
@@ -26,7 +27,7 @@ use brows_application::{
 };
 use brows_domain::{
     BrowserBuild, BrowserBuildId, BrowserCapabilities, BrowserChannel, ProfileId, RuntimeTrust,
-    SecretRef, SessionId, DEFAULT_MAX_CONCURRENT_SESSIONS,
+    SecretRef, SessionId,
 };
 use std::{
     io::Read,
@@ -39,6 +40,7 @@ use std::{
 /// assembled once and remain hidden behind the application's ports.
 #[derive(Debug)]
 pub(crate) struct AppState {
+    pub(crate) settings: Arc<crate::settings::SettingsService>,
     pub(crate) browsers: Arc<dyn BrowserRuntime>,
     pub(crate) profiles: Arc<ProfileApplicationService>,
     pub(crate) sessions: Arc<SessionApplicationService>,
@@ -60,6 +62,8 @@ impl AppState {
 
         let clock = Arc::new(SystemClock);
         let database_path = data_root.join("profiles.sqlite3");
+        let settings_store = Arc::new(SqliteSettingsStore::open(&database_path)?);
+        let settings = settings_store.get()?;
         let profiles = Arc::new(SqliteProfileRepository::open(&database_path)?);
         let migration_records = Arc::new(SqliteMigrationRecordRepository::open(&database_path)?);
         let proxy_records = Arc::new(SqliteProxyRepository::open(&database_path)?);
@@ -187,7 +191,7 @@ impl AppState {
             audit,
             clock.clone(),
             ids.clone(),
-            DEFAULT_MAX_CONCURRENT_SESSIONS,
+            settings.max_concurrent_sessions as usize,
         )?);
         let migration_service = Arc::new(MigrationApplicationService::new(
             profiles.clone(),
@@ -207,6 +211,7 @@ impl AppState {
         ));
 
         Ok(Self {
+            settings: Arc::new(crate::settings::SettingsService::new(settings_store, session_service.clone())),
             browsers: browsers.clone(),
             profiles: profile_service,
             sessions: session_service,
@@ -219,7 +224,7 @@ impl AppState {
 
     #[cfg(test)]
     pub(crate) fn prototype(data_root: PathBuf) -> ApplicationResult<Self> {
-        Self::prototype_with_capacity(data_root, DEFAULT_MAX_CONCURRENT_SESSIONS)
+        Self::prototype_with_capacity(data_root, brows_domain::DEFAULT_MAX_CONCURRENT_SESSIONS)
     }
 
     #[cfg(test)]
@@ -267,6 +272,7 @@ impl AppState {
         )?);
 
         Ok(Self {
+            settings: Arc::new(crate::settings::SettingsService::new(Arc::new(SqliteSettingsStore::open(":memory:")?), session_service.clone())),
             browsers: browsers.clone(),
             profiles: profile_service,
             sessions: session_service,
@@ -494,6 +500,25 @@ mod tests {
     fn chrome_versions_are_compared_numerically() {
         assert!(chrome_version_key("150.0.1").unwrap() > chrome_version_key("99.9.9").unwrap());
         assert!(chrome_version_key("150.preview").is_none());
+    }
+
+    #[test]
+    fn saved_concurrency_changes_the_live_queue_and_busy_changes_fail() {
+        let root = std::env::temp_dir().join(format!("brows-settings-{}", uuid::Uuid::new_v4()));
+        let state = AppState::prototype(root).unwrap();
+        let patch = serde_json::from_value(serde_json::json!({"maxConcurrentSessions": 1})).unwrap();
+        assert_eq!(state.settings.update(patch).unwrap().max_concurrent_sessions, 1);
+        for name in ["first", "second"] {
+            let profile = state.profiles.create(ProfileCreateRequest { profile: draft(name) }).unwrap();
+            let result = state.sessions.launch(SessionLaunchRequest { profile_id: profile.id }).unwrap();
+            match result {
+                SessionLaunchOutcome::Started { .. } => assert_eq!(name, "first"),
+                SessionLaunchOutcome::Queued { position, .. } => { assert_eq!(name, "second"); assert_eq!(position, 1); }
+            }
+        }
+        let patch = serde_json::from_value(serde_json::json!({"maxConcurrentSessions": 2})).unwrap();
+        assert!(state.settings.update(patch).is_err());
+        assert_eq!(state.settings.get().unwrap().max_concurrent_sessions, 1);
     }
 
     #[test]
