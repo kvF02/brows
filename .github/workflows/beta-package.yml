@@ -23,10 +23,12 @@ jobs:
       - name: Install pinned Rust toolchain
         run: rustup toolchain install 1.97.1 --profile minimal
       - uses: actions/cache/restore@v4
+        id: release_cache
         with:
           path: target/release
-          key: windows-beta-1.97.1-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          key: windows-beta-v2-1.97.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
+            windows-beta-v2-1.97.1-
             windows-beta-1.97.1-${{ hashFiles('Cargo.lock') }}-
             windows-beta-1.97.1-
       - name: Install UI dependencies
@@ -47,10 +49,10 @@ jobs:
           $signature = Get-AuthenticodeSignature target/release/brows-desktop.exe
           @{ commit = '${{ github.sha }}'; channel = 'internal-beta'; authenticode = "$($signature.Status)"; autoUpdate = $false } | ConvertTo-Json | Set-Content target/beta-build.json
       - uses: actions/cache/save@v4
-        if: always()
+        if: ${{ success() && steps.release_cache.outputs.cache-hit != 'true' }}
         with:
           path: target/release
-          key: windows-beta-1.97.1-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}
+          key: windows-beta-v2-1.97.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:

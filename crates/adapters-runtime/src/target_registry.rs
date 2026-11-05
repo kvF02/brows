@@ -136,15 +136,25 @@ impl Targets {
         redundant: bool,
     ) -> PortResult<Vec<String>> {
         const LIMIT: usize = MAX_TARGETS * 4;
-        if version.is_empty() || version.len() > 128
+        if version.is_empty()
+            || version.len() > 128
             || target.is_some_and(|id| id.is_empty() || id.len() > 128)
         {
             return Err(internal("invalid Service Worker version identity"));
         }
         if let Some(id) = target {
-            self.worker_versions.entry(version.to_owned()).or_default().insert(id.to_owned());
+            self.worker_versions
+                .entry(version.to_owned())
+                .or_default()
+                .insert(id.to_owned());
         }
-        if self.worker_versions.values().map(BTreeSet::len).sum::<usize>() > LIMIT {
+        if self
+            .worker_versions
+            .values()
+            .map(BTreeSet::len)
+            .sum::<usize>()
+            > LIMIT
+        {
             return Err(internal("Service Worker version capacity exceeded"));
         }
         if !redundant {
@@ -157,9 +167,12 @@ impl Targets {
             if self.retired_workers.len() > LIMIT {
                 return Err(internal("retired Service Worker capacity exceeded"));
             }
-            sessions.extend(self.attached.values()
-                .filter(|job| job.id == id && job.target.kind == "service_worker")
-                .map(|job| job.target.session.clone()));
+            sessions.extend(
+                self.attached
+                    .values()
+                    .filter(|job| job.id == id && job.target.kind == "service_worker")
+                    .map(|job| job.target.session.clone()),
+            );
         }
         for session in &sessions {
             self.detach(session);
@@ -276,23 +289,41 @@ mod tests {
     #[test]
     fn redundant_versions_invalidate_only_their_workers_even_without_a_target_id() {
         let mut state = Targets::default();
-        let old = state.attach("old", "old-session", "service_worker", false).unwrap().unwrap();
-        let new = state.attach("new", "new-session", "service_worker", false).unwrap().unwrap();
-        let page = state.attach("page", "page-session", "page", false).unwrap().unwrap();
+        let old = state
+            .attach("old", "old-session", "service_worker", false)
+            .unwrap()
+            .unwrap();
+        let new = state
+            .attach("new", "new-session", "service_worker", false)
+            .unwrap()
+            .unwrap();
+        let page = state
+            .attach("page", "page-session", "page", false)
+            .unwrap()
+            .unwrap();
         assert!(state.ready(&old));
         assert!(state.ready(&new));
         assert!(state.ready(&page));
         state.worker_version("v1", Some("old"), false).unwrap();
         state.worker_version("v2", Some("new"), false).unwrap();
         assert!(state.target_current(&old.target));
-        assert_eq!(state.worker_version("v1", None, true).unwrap(), vec!["old-session"]);
+        assert_eq!(
+            state.worker_version("v1", None, true).unwrap(),
+            vec!["old-session"]
+        );
         assert!(!state.ready(&old));
         assert!(state.reload("old-session").unwrap().is_none());
-        assert!(state.attach("old", "late-session", "service_worker", false).unwrap().is_none());
+        assert!(state
+            .attach("old", "late-session", "service_worker", false)
+            .unwrap()
+            .is_none());
         assert!(state.target_current(&new.target));
         assert!(state.target_current(&page.target));
         assert_eq!(state.snapshot().len(), 2);
-        assert!(state.worker_version("v1", Some("old"), true).unwrap().is_empty());
+        assert!(state
+            .worker_version("v1", Some("old"), true)
+            .unwrap()
+            .is_empty());
     }
     #[test]
     fn version_tracking_is_bounded_and_never_retires_a_page() {
@@ -303,9 +334,13 @@ mod tests {
         assert!(state.target_current(&page.target));
         assert!(state.worker_version("", Some("t"), false).is_err());
         for index in 0..MAX_TARGETS * 4 {
-            state.worker_version(&index.to_string(), Some(&index.to_string()), false).unwrap();
+            state
+                .worker_version(&index.to_string(), Some(&index.to_string()), false)
+                .unwrap();
         }
-        assert!(state.worker_version("overflow", Some("overflow"), false).is_err());
+        assert!(state
+            .worker_version("overflow", Some("overflow"), false)
+            .is_err());
     }
     #[test]
     fn capacity_duplicate_session_and_duplicate_owner_are_distinct() {

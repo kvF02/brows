@@ -452,18 +452,25 @@ impl Controller {
                 };
                 if event["method"] == "ServiceWorker.workerVersionUpdated" {
                     let outcome: PortResult<Vec<String>> = (|| {
-                        let versions = event["params"]["versions"].as_array()
+                        let versions = event["params"]["versions"]
+                            .as_array()
                             .filter(|versions| versions.len() <= MAX_TARGETS * 4)
                             .ok_or_else(|| internal("invalid Service Worker version update"))?;
                         let mut state = t.0.lock().map_err(|_| internal("target lock poisoned"))?;
                         let mut retired = Vec::new();
                         for version in versions {
-                            let id = version["versionId"].as_str()
+                            let id = version["versionId"]
+                                .as_str()
                                 .ok_or_else(|| internal("missing Service Worker version"))?;
-                            let status = version["status"].as_str()
+                            let status = version["status"]
+                                .as_str()
                                 .ok_or_else(|| internal("missing Service Worker status"))?;
                             let target = version["targetId"].as_str().filter(|id| !id.is_empty());
-                            retired.extend(state.worker_version(id, target, status == "redundant")?);
+                            retired.extend(state.worker_version(
+                                id,
+                                target,
+                                status == "redundant",
+                            )?);
                         }
                         Ok(retired)
                     })();

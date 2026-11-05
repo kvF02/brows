@@ -1782,10 +1782,16 @@ function SettingsView({
 }) {
   const [saving, setSaving] = useState(false);
   const [exporting, setExporting] = useState(false);
+  const [concurrentDraft, setConcurrentDraft] = useState("");
+  useEffect(() => {
+    setConcurrentDraft(settings ? String(settings.maxConcurrentSessions) : "");
+  }, [settings?.maxConcurrentSessions]);
   if (!settings) return <LoadingState />;
   const save = async (changes: Partial<Settings>) => {
     setSaving(true);
-    try { await api.updateSettings(changes); await onRefresh(); onNotice("设置已保存。"); } catch (cause) { onError(getErrorMessage(cause)); } finally { setSaving(false); }
+    try { await api.updateSettings(changes); await onRefresh(); onNotice("设置已保存。"); }
+    catch (cause) { setConcurrentDraft(String(settings.maxConcurrentSessions)); onError(getErrorMessage(cause)); }
+    finally { setSaving(false); }
   };
   const exportSupport = async () => {
     if (exporting) return;
@@ -1808,7 +1814,18 @@ function SettingsView({
         <article className="settings-card">
           <div className="settings-card-head"><div><h2>会话调度</h2><p>同一环境只允许一个活动会话。调整并发前请停止运行和排队中的会话。</p></div><span className="settings-icon">↯</span></div>
           <label className="field-label" htmlFor="max-concurrent">最大并发环境</label>
-          <div className="number-control"><input id="max-concurrent" className="text-input" type="number" min="1" max="10" value={settings.maxConcurrentSessions} disabled={saving} onChange={(e) => void save({ maxConcurrentSessions: Number(e.target.value) })} /><span>个</span></div>
+          <form onSubmit={(event) => {
+            event.preventDefault();
+            const value = Number(concurrentDraft);
+            if (!/^\d+$/.test(concurrentDraft) || !Number.isInteger(value) || value < 1 || value > 10) {
+              onError("最大并发环境必须是 1 到 10 之间的整数。");
+              return;
+            }
+            if (!saving && value !== settings.maxConcurrentSessions) void save({ maxConcurrentSessions: value });
+          }}>
+            <div className="number-control"><input id="max-concurrent" className="text-input" type="number" min="1" max="10" required value={concurrentDraft} disabled={saving} onChange={(e) => setConcurrentDraft(e.target.value)} /><span>个</span></div>
+            <button className="secondary-button" type="submit" disabled={saving || concurrentDraft === String(settings.maxConcurrentSessions)}>{saving ? "正在保存…" : "保存并发设置"}</button>
+          </form>
           <label className="switch-row"><input type="checkbox" checked={settings.stopSessionsOnExit} disabled /><span className="switch-ui" /><span><strong>退出管理器时停止会话</strong><small>当前版本锁定开启，退出会回收所拥有的浏览器和代理进程。</small></span></label>
         </article>
         <article className="settings-card">
