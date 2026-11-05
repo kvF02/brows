@@ -122,7 +122,7 @@ jobs:
         timeout-minutes: 4
         run: cargo +1.97.1 test -p brows-desktop desktop_capacity_acceptance -- --ignored --nocapture
       - uses: actions/cache/save@v4
-        if: ${{ success() && steps.rust_cache.outputs.cache-hit != 'true' }}
+        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' && steps.rust_cache.outputs.cache-hit != 'true' }}
         with:
           path: target/debug
           key: windows-rust-v2-1.97.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}

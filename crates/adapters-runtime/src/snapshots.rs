@@ -412,6 +412,11 @@ impl ManagedChromiumRuntime {
         {
             let entry = entry.map_err(|_| invalid_data("cannot inspect installed browser"))?;
             let name = entry.file_name().to_string_lossy().into_owned();
+            // Installer histogram spools are consumed/deleted by the browser.
+            // They are not distribution resources and must never enter a snapshot.
+            if name.eq_ignore_ascii_case("SetupMetrics") {
+                continue;
+            }
             if profile_floor::version_key(&name).is_ok() && name != source.version {
                 continue;
             }
@@ -579,6 +584,10 @@ mod tests {
         fs::write(root.join("unexpected.dll"), b"extra").unwrap();
         assert!(verify_inventory(&root, &manifest).is_err());
         fs::remove_file(root.join("unexpected.dll")).unwrap();
+        fs::create_dir(root.join("SetupMetrics")).unwrap();
+        fs::write(root.join("SetupMetrics").join("unexpected.pma"), b"extra").unwrap();
+        assert!(verify_inventory(&root, &manifest).is_err());
+        fs::remove_dir_all(root.join("SetupMetrics")).unwrap();
         fs::remove_file(root.join("resource.pak")).unwrap();
         assert!(verify_inventory(&root, &manifest).is_err());
         manifest.executable = "../outside.exe".to_owned();

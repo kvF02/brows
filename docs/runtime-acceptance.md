@@ -53,7 +53,7 @@ OffscreenCanvas 2D 读取/导出和 WebGL vendor/renderer 声明。字体、真�
 实时 Audio 和网络栈仍依赖主机。浏览器 API 在不安全上下文中本来缺失时，
 不会凭空添加 Device Memory。
 
-控制器为每个受控目标显式启用 Inspector 生命周期通知。
+控制器为受控页面和 iframe 显式启用 Inspector 生命周期通知（Worker 不支持该 enable 命令）。
 target 注册表独立跟踪连接、停止和重载的代次。停止的 Worker 从观测中移除；
 重载重新排队配置，同一个 session 串行安装，旧任务或旧观测不能重新发布结果。
 丢弃的协议请求会释放有界 pending 槽位；单个已失效 target 的超时不直接终止整个浏览器，
