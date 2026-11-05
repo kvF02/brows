@@ -1245,6 +1245,14 @@ mod tests {
             assert!(!plan.user_data_dir.exists());
             assert!(runtime.processes.lock().unwrap().is_empty());
         }
+        let mut private_plan = plan.clone();
+        private_plan.arguments.retain(|argument| !matches!(argument, LaunchArgument::LoadExtension(_)));
+        private_plan.arguments.push(LaunchArgument::SessionFingerprint(Box::new(
+            brows_application::memory::fingerprint_probe_policy("150.0.0.0").unwrap(),
+        )));
+        runtime.set_fingerprint_support(&BrowserBuildId::new("build-1").unwrap(), FingerprintSupport::Unverified).unwrap();
+        assert_eq!(runtime.launch(&private_plan).unwrap_err().kind, PortErrorKind::CapabilityUnsupported);
+        assert!(!private_plan.user_data_dir.exists());
         let id = BrowserBuildId::new("build-1").unwrap();
         runtime
             .set_fingerprint_support(&id, FingerprintSupport::Supported)

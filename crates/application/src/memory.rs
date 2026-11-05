@@ -781,7 +781,7 @@ impl SeedableNoiseFingerprintRuntime {
 
         let mut warnings = Vec::new();
         let mut arguments = vec![
-            LaunchArgument::UserAgentOverride(fp.user_agent),
+            LaunchArgument::UserAgentOverride(fp.user_agent.clone()),
             LaunchArgument::ForceDeviceScaleFactor(p.screen.device_scale_factor_hundredths),
             LaunchArgument::WindowSize {
                 width: window.width,
@@ -874,6 +874,24 @@ mod seedable_noise_tests {
             spoof_canvas: true,
             spoof_audio: true,
         }
+    }
+
+    #[test]
+    fn managed_policy_requires_private_pipe_and_materializes_no_extension() {
+        let root = std::env::temp_dir().join(format!("brows-managed-compile-{}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        let runtime = SeedableNoiseFingerprintRuntime::new(&root, ProfileId::new("managed-profile").unwrap()).unwrap();
+        let persona = FingerprintPersona::SeedableNoise(sample_persona("managed-probe"));
+        let mut build = verified_build();
+        build.id = BrowserBuildId::new("managed-edge-150").unwrap();
+        build.capabilities.supports_devtools_pipe = true;
+        let result = runtime.compile(&persona, &build).unwrap();
+        assert!(!result.arguments.iter().any(|argument| matches!(argument, LaunchArgument::LoadExtension(_))));
+        assert!(!root.exists());
+        build.capabilities.supports_devtools_pipe = false;
+        assert!(runtime.compile(&persona, &build).is_err());
+        build.capabilities.supports_devtools_pipe = true;
+        build.capabilities.fingerprint_support = FingerprintSupport::Unverified;
+        assert!(runtime.compile(&persona, &build).is_err());
     }
 
     #[test]

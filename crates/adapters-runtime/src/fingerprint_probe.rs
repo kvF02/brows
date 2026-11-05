@@ -221,7 +221,7 @@ fn run_private(build: &BrowserBuild, profile_root: &Path) -> PortResult<Observat
             "--no-default-browser-check", "--disable-background-networking",
             "--disable-component-update", "--disable-sync", "--metrics-recording-only",
             "--disable-domain-reliability", "--no-proxy-server", "--lang=pl-PL",
-        ].iter().map(std::ffi::OsString::from).collect();
+        ].into_iter().map(std::ffi::OsString::from).collect();
         args.push(format!("--user-data-dir={}", user_data.display()).into());
         args.push(format!("--user-agent={}", policy.user_agent).into());
         let url = format!("http://{}/{}", server.address, directory.nonce);
