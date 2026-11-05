@@ -27,12 +27,12 @@ CI 不自动发布 GitHub Release，不自动升级用户机器上的应用。
 
 CI 在独立 Windows runner 上执行真实静默安装、打开打包后的主窗口、初始化数据库、
 正常关闭、覆盖安装以及卸载，并检查应用数据标记保留。
-随后使用 Microsoft Edge WebDriver 驱动实际打包的 WebView2，确认内嵌资源和真实 Tauri
+随后在 Windows Server 2022 runner 使用 Microsoft Edge WebDriver 驱动**同一构建产物**的 WebView2，确认内嵌资源和真实 Tauri
 适配器，再操作并发保存、环境新建/编辑/归档恢复、SystemNative 浏览器启动/停止、
 加密备份和恢复到新环境，并核对 UI 重载后的持久数据。测试通过 DOM 输入/点击，
 不直接调用应用 IPC 或写数据库；单独生成 `packaged-ui-acceptance.json` 与截图。
 WebDriver 只用于 Windows CI，匹配实际 WebView2 的构建版本并验证 Microsoft 签名；
-没有向产品增加调试端口或自动化管理接口。方法依据
+没有向产品增加调试端口或自动化管理接口。当前 Windows 2025 镜像的 WebDriver 会话创建失败（DevToolsActivePort），因此 UI 自动操作独立执行；安装与生产浏览器验收仍在 windows-latest。报告记录 Windows 和实际 WebView2 版本，不能据此声称较新 WebView2 的自动操作已覆盖。方法依据
 [Microsoft WebView2 WebDriver 文档](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/webdriver)。
 
 这仍不等于代理、SeedableNoise 设置、所有错误分支和完整桌面流程已经验收。

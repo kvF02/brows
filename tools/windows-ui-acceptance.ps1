@@ -51,6 +51,7 @@ try {
     }
     Assert-Microsoft $driver
     if (-not (Read-Version $driver).StartsWith("$branch.")) { throw 'WebView2 and WebDriver build mismatch' }
+    $env:BROWS_UI_WEBVIEW_VERSION = $version
     Write-Output "Testing packaged UI with WebView2 $version and driver $(Read-Version $driver)"
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
     if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -80,7 +81,9 @@ finally { [IO.File]::WriteAllText($(Quote-Literal $done), [string]`$code) }
         $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($child))
         $hostExe = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
         $runas = Join-Path $env:SystemRoot 'System32/runas.exe'
-        & $runas /machine:amd64 /trustlevel:0x20000 "$hostExe -NoProfile -EncodedCommand $encoded"
+        $runasArgs = @('/trustlevel:0x20000', "$hostExe -NoProfile -EncodedCommand $encoded")
+        if ([Environment]::OSVersion.Version.Build -ge 22621) { $runasArgs = @('/machine:amd64') + $runasArgs }
+        & $runas @runasArgs
         if ($LASTEXITCODE -ne 0) { throw 'Unable to launch the non-elevated UI fixture' }
         $deadline = [DateTime]::UtcNow.AddMinutes(4)
         while (-not (Test-Path -LiteralPath $done) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 250 }

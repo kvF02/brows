@@ -5,6 +5,7 @@ import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { mkdir, writeFile } from "node:fs/promises";
 import net from "node:net";
+import os from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 
@@ -174,7 +175,8 @@ try {
   driver.kill();
   await writeFile(reportPath, JSON.stringify({
     schemaVersion: 1, assertionsPassed: !failure, complete: false, checks,
-    notChecked: ["proxy workflows and SeedableNoise UI", "hours-long load", "power-loss recovery", "cross-machine login portability"],
+    commit: process.env.GITHUB_SHA, windowsRelease: os.release(), webView2Version: process.env.BROWS_UI_WEBVIEW_VERSION,
+    notChecked: ["current windows-latest WebView2 driver compatibility", "proxy workflows and SeedableNoise UI", "hours-long load", "power-loss recovery", "cross-machine login portability"],
     ...(failure ? { failure } : {}),
   }, null, 2) + "\n");
 }

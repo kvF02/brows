@@ -8,7 +8,7 @@ permissions:
   contents: read
 concurrency:
   group: beta-package-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: false
 jobs:
   package:
     runs-on: windows-latest
@@ -42,10 +42,6 @@ jobs:
           $installer = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           if (-not $installer) { throw 'No NSIS installer produced' }
           ./tools/windows-beta-smoke.ps1 -Installer $installer.FullName -Report target/beta-package-acceptance.json
-      - name: Operate the packaged WebView2 interface
-        timeout-minutes: 6
-        shell: pwsh
-        run: ./tools/windows-ui-acceptance.ps1 -Application target/release/brows-desktop.exe -Report target/packaged-ui-acceptance.json
       - name: Record hashes and unsigned beta status
         shell: pwsh
         run: |
@@ -68,6 +64,40 @@ jobs:
             target/SHA256SUMS.txt
             target/beta-build.json
             target/beta-package-acceptance.json
+          if-no-files-found: warn
+  ui:
+    needs: package
+    # The current Windows 2025 image cannot create a WebView2 WebDriver
+    # session (DevToolsActivePort). Drive the same packaged binary here;
+    # installer and production browser acceptance remain on windows-latest.
+    runs-on: windows-2022
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - uses: actions/download-artifact@v4
+        with:
+          name: brows-windows-beta-${{ github.sha }}
+          path: target
+      - name: Check the downloaded build hash
+        shell: pwsh
+        run: |
+          $line = Get-Content target/SHA256SUMS.txt | Where-Object { $_ -match '  brows-desktop.exe$' }
+          if (@($line).Count -ne 1) { throw 'Missing application hash' }
+          $expected = ($line -split '  ')[0]
+          if ((Get-FileHash target/release/brows-desktop.exe -Algorithm SHA256).Hash -ine $expected) { throw 'Application artifact hash mismatch' }
+      - name: Operate the packaged WebView2 interface
+        timeout-minutes: 6
+        shell: pwsh
+        run: ./tools/windows-ui-acceptance.ps1 -Application target/release/brows-desktop.exe -Report target/packaged-ui-acceptance.json
+      - name: Preserve actual UI evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: brows-packaged-ui-${{ github.sha }}
+          path: |
             target/packaged-ui-acceptance.json
             target/packaged-ui-acceptance.png
           if-no-files-found: warn
