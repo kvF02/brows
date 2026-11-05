@@ -992,7 +992,10 @@ mod tests {
         }
     }
 
-    fn acceptance_browser(fixture: &browser_fixture::ControlFixture, route: &str) -> AcceptanceBrowser {
+    fn acceptance_browser(
+        fixture: &browser_fixture::ControlFixture,
+        route: &str,
+    ) -> AcceptanceBrowser {
         use brows_domain::{DeviceMemoryGb, ScreenConfig, SeedableNoisePersona, WebGLProfile};
         let executable = std::path::PathBuf::from(
             std::env::var_os("BROWS_ACCEPTANCE_BROWSER").expect("explicit acceptance browser"),
@@ -1045,6 +1048,8 @@ mod tests {
             OsString::from("--no-first-run"),
             OsString::from("--no-default-browser-check"),
             OsString::from("--no-startup-window"),
+            OsString::from(format!("--user-agent={user_agent}")),
+            OsString::from("--lang=en-US"),
         ];
         let controller = Controller::start(
             &executable,
@@ -1053,7 +1058,12 @@ mod tests {
             &[format!("{}/{route}/page", fixture.url)],
         )
         .unwrap();
-        AcceptanceBrowser { controller, root, webgl: expected_webgl, user_agent }
+        AcceptanceBrowser {
+            controller,
+            root,
+            webgl: expected_webgl,
+            user_agent,
+        }
     }
 
     #[test]
@@ -1178,22 +1188,50 @@ mod tests {
         let browser = acceptance_browser(&fixture, "modules");
         let proofs = fixture.wait_proofs("/modules/");
         assert!(browser.controller.try_wait().unwrap().is_none());
-        let kinds: BTreeSet<_> = proofs.iter().map(|(_, _, value)| value["kind"].as_str().unwrap()).collect();
-        assert_eq!(kinds.len(), 9, "all classic and module contexts must report");
-        let page = &proofs.iter().find(|(_, _, value)| value["kind"] == "page").unwrap().2;
+        let kinds: BTreeSet<_> = proofs
+            .iter()
+            .map(|(_, _, value)| value["kind"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds.len(),
+            9,
+            "all classic and module contexts must report"
+        );
+        let page = &proofs
+            .iter()
+            .find(|(_, _, value)| value["kind"] == "page")
+            .unwrap()
+            .2;
         assert_ne!(page["canvas"], json!("a42367ff".repeat(256)));
         for (_, _, first) in &proofs {
             browser.assert_signals(first);
             assert_eq!(first["canvas"], page["canvas"]);
             assert_eq!(first["hints"], page["hints"]);
         }
-        for (module, classic) in [("module_worker", "worker"), ("module_shared_worker", "shared_worker"), ("module_service_worker", "service_worker")] {
-            let sample = &proofs.iter().find(|(_, _, value)| value["kind"] == module).unwrap().2;
-            let baseline = &proofs.iter().find(|(_, _, value)| value["kind"] == classic).unwrap().2;
+        for (module, classic) in [
+            ("module_worker", "worker"),
+            ("module_shared_worker", "shared_worker"),
+            ("module_service_worker", "service_worker"),
+        ] {
+            let sample = &proofs
+                .iter()
+                .find(|(_, _, value)| value["kind"] == module)
+                .unwrap()
+                .2;
+            let baseline = &proofs
+                .iter()
+                .find(|(_, _, value)| value["kind"] == classic)
+                .unwrap()
+                .2;
             assert_eq!(sample["capturePhase"], "module_dependency");
-            if !baseline["webgl"].is_null() { assert_eq!(sample["webgl"], baseline["webgl"]); }
+            if !baseline["webgl"].is_null() {
+                assert_eq!(sample["webgl"], baseline["webgl"]);
+            }
         }
-        browser.write_report("module-worker", json!(proofs.iter().map(|(_, _, value)| value).collect::<Vec<_>>()));
+        browser.write_report(
+            "module-worker",
+            json!(proofs.iter().map(|(_, _, value)| value).collect::<Vec<_>>()),
+        );
     }
 
     #[test]
@@ -1203,40 +1241,113 @@ mod tests {
         let browser = acceptance_browser(&fixture, "crash");
         let controller = &browser.controller;
         let initial = fixture.wait_proofs("/crash/");
-        assert_eq!(initial.iter().map(|(_, _, value)| value["kind"].as_str().unwrap()).collect::<BTreeSet<_>>().len(), 6);
-        let first = &initial.iter().find(|(_, _, value)| value["kind"] == "page").unwrap().2;
+        assert_eq!(
+            initial
+                .iter()
+                .map(|(_, _, value)| value["kind"].as_str().unwrap())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            6
+        );
+        let first = &initial
+            .iter()
+            .find(|(_, _, value)| value["kind"] == "page")
+            .unwrap()
+            .2;
         browser.assert_signals(first);
-        let page = controller.targets.0.lock().unwrap().snapshot().into_iter().find(|target| target.kind == "page").unwrap();
+        let page = controller
+            .targets
+            .0
+            .lock()
+            .unwrap()
+            .snapshot()
+            .into_iter()
+            .find(|target| target.kind == "page")
+            .unwrap();
         let deadline = Instant::now() + TIMEOUT;
-        while evaluate(&controller.wire, &page.session, "document.readyState").unwrap() != "complete" {
-            assert!(Instant::now() < deadline, "owned page must finish navigation before crash");
+        while evaluate(&controller.wire, &page.session, "document.readyState").unwrap()
+            != "complete"
+        {
+            assert!(
+                Instant::now() < deadline,
+                "owned page must finish navigation before crash"
+            );
             thread::sleep(Duration::from_millis(50));
         }
-        if let Err(error) = controller.wire.call("Page.crash", json!({}), Some(&page.session)) {
-            assert_eq!(error.kind, PortErrorKind::Unavailable, "unexpected crash command error: {error:?}");
+        if let Err(error) = controller
+            .wire
+            .call("Page.crash", json!({}), Some(&page.session))
+        {
+            assert_eq!(
+                error.kind,
+                PortErrorKind::Unavailable,
+                "unexpected crash command error: {error:?}"
+            );
         }
         let deadline = Instant::now() + TIMEOUT;
-        while controller.targets.0.lock().unwrap().snapshot().iter().any(|target| target.session == page.session) {
-            assert!(Instant::now() < deadline, "crashed page must leave observation");
+        while controller
+            .targets
+            .0
+            .lock()
+            .unwrap()
+            .snapshot()
+            .iter()
+            .any(|target| target.session == page.session)
+        {
+            assert!(
+                Instant::now() < deadline,
+                "crashed page must leave observation"
+            );
             thread::sleep(Duration::from_millis(50));
         }
-        assert!(controller.try_wait().unwrap().is_none(), "renderer crash must not close browser");
+        assert!(
+            controller.try_wait().unwrap().is_none(),
+            "renderer crash must not close browser"
+        );
         let session_id = SessionId::new("renderer-crash").unwrap();
-        assert!(!controller.observe(&session_id).unwrap().targets.iter().any(|target| target.kind == "page"));
-        controller.wire.call("Page.reload", json!({"ignoreCache":true}), Some(&page.session)).unwrap();
+        assert!(!controller
+            .observe(&session_id)
+            .unwrap()
+            .targets
+            .iter()
+            .any(|target| target.kind == "page"));
+        controller
+            .wire
+            .call(
+                "Page.reload",
+                json!({"ignoreCache":true}),
+                Some(&page.session),
+            )
+            .unwrap();
         let reloaded = fixture.wait_kind_count("/crash/", "page", 2);
-        assert!(reloaded.len() >= 2, "reload must execute a new first script");
+        assert!(
+            reloaded.len() >= 2,
+            "reload must execute a new first script"
+        );
         let recovered = &reloaded.last().unwrap().2;
         browser.assert_signals(recovered);
         assert_eq!(recovered["canvas"], first["canvas"]);
         assert_eq!(recovered["webgl"], first["webgl"]);
         let deadline = Instant::now() + TIMEOUT;
-        while !controller.targets.0.lock().unwrap().snapshot().iter().any(|target| target.kind == "page") {
-            assert!(Instant::now() < deadline, "recovered page must be configured again");
+        while !controller
+            .targets
+            .0
+            .lock()
+            .unwrap()
+            .snapshot()
+            .iter()
+            .any(|target| target.kind == "page")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "recovered page must be configured again"
+            );
             thread::sleep(Duration::from_millis(50));
         }
         let observed = controller.observe(&session_id).unwrap();
-        assert!(observed.targets.iter().any(|target| target.kind == "page" && target.hardware_concurrency == 3 && target.timezone == "Asia/Tokyo"));
+        assert!(observed.targets.iter().any(|target| target.kind == "page"
+            && target.hardware_concurrency == 3
+            && target.timezone == "Asia/Tokyo"));
         browser.write_report("renderer-crash", json!({"before":first,"after":recovered,"crashedPageRemoved":true,"browserSurvived":true}));
     }
 }

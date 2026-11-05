@@ -59,10 +59,15 @@ impl ControlFixture {
                 "service_worker",
             ];
             if self.modules {
-                expected.extend(["module_worker", "module_shared_worker", "module_service_worker"]);
+                expected.extend([
+                    "module_worker",
+                    "module_shared_worker",
+                    "module_service_worker",
+                ]);
             }
-            if expected.iter()
-            .all(|kind| proofs.iter().any(|(_, _, value)| value["kind"] == *kind))
+            if expected
+                .iter()
+                .all(|kind| proofs.iter().any(|(_, _, value)| value["kind"] == *kind))
             {
                 return proofs;
             }
@@ -121,17 +126,36 @@ impl ControlFixture {
         let path = headers.split_whitespace().nth(1).unwrap_or("/").to_owned();
         println!("local acceptance request: {path}");
         let revision = service_version.load(std::sync::atomic::Ordering::Acquire);
-        let script = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/test_support/first_observation.js"))
-            .replace("__BROWS_FIXTURE_VERSION__", &revision.to_string())
-            .replace("__BROWS_FIXTURE_PHASE__", if path.ends_with("dependency.mjs") { "module_dependency" } else { "first_script" });
+        let script = include_str!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/test_support/first_observation.js"
+        ))
+        .replace("__BROWS_FIXTURE_VERSION__", &revision.to_string())
+        .replace(
+            "__BROWS_FIXTURE_PHASE__",
+            if path.ends_with("dependency.mjs") {
+                "module_dependency"
+            } else {
+                "first_script"
+            },
+        );
         let (content, kind) = if path.ends_with("dependency.mjs") {
-            (format!("{script}\nexport {{first,proof}};"), "text/javascript")
+            (
+                format!("{script}\nexport {{first,proof}};"),
+                "text/javascript",
+            )
         } else if path.ends_with("shared.mjs") {
-            ("import './dependency.mjs';onconnect=event=>event.ports[0].start();".to_owned(), "text/javascript")
+            (
+                "import './dependency.mjs';onconnect=event=>event.ports[0].start();".to_owned(),
+                "text/javascript",
+            )
         } else if path.ends_with("service.mjs") {
             ("import {proof} from './dependency.mjs';addEventListener('install',event=>event.waitUntil(Promise.all([proof,skipWaiting()])));addEventListener('activate',event=>event.waitUntil(clients.claim()));addEventListener('message',event=>event.waitUntil(proof));".to_owned(), "text/javascript")
         } else if path.ends_with("worker.mjs") {
-            ("import './dependency.mjs';setInterval(()=>{},1000);".to_owned(), "text/javascript")
+            (
+                "import './dependency.mjs';setInterval(()=>{},1000);".to_owned(),
+                "text/javascript",
+            )
         } else if path.ends_with("shared.js") {
             (
                 format!("{script}onconnect=event=>event.ports[0].start();"),
@@ -166,8 +190,14 @@ impl ControlFixture {
             ("ok".to_owned(), "text/plain")
         } else {
             let worker = if path.ends_with("page") {
-                include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../tools/test_support/fixture_page.js"))
-                    .replace("__BROWS_FIXTURE_MODULES__", if modules { "true" } else { "false" })
+                include_str!(concat!(
+                    env!("CARGO_MANIFEST_DIR"),
+                    "/../../tools/test_support/fixture_page.js"
+                ))
+                .replace(
+                    "__BROWS_FIXTURE_MODULES__",
+                    if modules { "true" } else { "false" },
+                )
             } else {
                 String::new()
             };
@@ -223,7 +253,9 @@ impl ControlFixture {
                                 .unwrap()
                                 .recv_timeout(std::time::Duration::from_millis(100));
                             match next {
-                                Ok(stream) => Self::serve(stream, &output, cross_origin, &version, modules),
+                                Ok(stream) => {
+                                    Self::serve(stream, &output, cross_origin, &version, modules)
+                                }
                                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                                 Err(_) => break,
                             }
