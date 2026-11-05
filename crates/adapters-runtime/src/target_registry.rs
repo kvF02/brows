@@ -126,6 +126,13 @@ impl Targets {
     pub fn snapshot(&self) -> Vec<Target> {
         self.configured.values().cloned().collect()
     }
+    pub fn current_values<T>(&self, values: Vec<(Target, T)>) -> Vec<T> {
+        values
+            .into_iter()
+            .filter(|(target, _)| self.target_current(target))
+            .map(|(_, value)| value)
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -162,6 +169,42 @@ mod tests {
         assert!(!state.is_current(&third));
         assert!(state.snapshot().is_empty());
         assert!(state.reload("s").unwrap().is_none());
+    }
+    #[test]
+    fn completed_reads_are_revalidated_after_later_targets_are_read() {
+        let mut state = Targets::default();
+        let first = state.attach("a", "sa", "worker", false).unwrap().unwrap();
+        let second = state.attach("b", "sb", "page", false).unwrap().unwrap();
+        assert!(state.ready(&first));
+        assert!(state.ready(&second));
+        let reads = vec![
+            (first.target.clone(), "old a"),
+            (second.target.clone(), "b"),
+        ];
+        // The first read succeeded before a later read blocked. Its Worker
+        // then restarted before the whole observation was ready to return.
+        state.suspend("sa").unwrap();
+        let restarted = state.reload("sa").unwrap().unwrap();
+        assert!(state.ready(&restarted));
+        assert_eq!(state.current_values(reads), vec!["b"]);
+        assert_eq!(
+            state.current_values(vec![(restarted.target, "new a")]),
+            vec!["new a"]
+        );
+    }
+    #[test]
+    fn reused_target_and_session_ids_do_not_restore_detached_readings() {
+        let mut state = Targets::default();
+        let old = state.attach("t", "s", "worker", false).unwrap().unwrap();
+        assert!(state.ready(&old));
+        state.detach("s");
+        let new = state.attach("t", "s", "worker", false).unwrap().unwrap();
+        assert!(state.ready(&new));
+        assert!(state.current_values(vec![(old.target, "stale")]).is_empty());
+        assert_eq!(
+            state.current_values(vec![(new.target, "current")]),
+            vec!["current"]
+        );
     }
     #[test]
     fn capacity_duplicate_session_and_duplicate_owner_are_distinct() {
