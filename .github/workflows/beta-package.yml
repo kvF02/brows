@@ -41,6 +41,10 @@ jobs:
           $installer = Get-ChildItem target/release/bundle/nsis/*-setup.exe | Select-Object -First 1
           if (-not $installer) { throw 'No NSIS installer produced' }
           ./tools/windows-beta-smoke.ps1 -Installer $installer.FullName -Report target/beta-package-acceptance.json
+      - name: Operate the packaged WebView2 interface
+        timeout-minutes: 6
+        shell: pwsh
+        run: ./tools/windows-ui-acceptance.ps1 -Application target/release/brows-desktop.exe -Report target/packaged-ui-acceptance.json
       - name: Record hashes and unsigned beta status
         shell: pwsh
         run: |
@@ -63,4 +67,6 @@ jobs:
             target/SHA256SUMS.txt
             target/beta-build.json
             target/beta-package-acceptance.json
+            target/packaged-ui-acceptance.json
+            target/packaged-ui-acceptance.png
           if-no-files-found: warn
