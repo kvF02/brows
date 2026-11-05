@@ -53,10 +53,13 @@ OffscreenCanvas 2D 读取/导出和 WebGL vendor/renderer 声明。字体、真�
 实时 Audio 和网络栈仍依赖主机。浏览器 API 在不安全上下文中本来缺失时，
 不会凭空添加 Device Memory。
 
+控制器为受控页面和 iframe 显式启用 Inspector 生命周期通知（Worker 不支持该 enable 命令）。
 target 注册表独立跟踪连接、停止和重载的代次。停止的 Worker 从观测中移除；
 重载重新排队配置，同一个 session 串行安装，旧任务或旧观测不能重新发布结果。
 丢弃的协议请求会释放有界 pending 槽位；单个已失效 target 的超时不直接终止整个浏览器，
 当前 target 的策略安装失败仍会关闭会话。原生停止/重启/更新测试与纯注册表测试分别运行。
+Service Worker 版本进入 redundant 时按版本/目标映射移除旧连接和观测，并阻止迟到的
+旧任务重新发布；停止状态保留重启入口，版本跟踪与退役记录均有上限。
 Service Worker 初次就绪和重复就绪通知不会重复排队配置；只有已停止的代次收到就绪
 通知才重新配置。协议对已结束目标返回的精确生命周期错误会使该 Worker 失效并保留
 重启元数据，未知协议错误仍然关闭会话。此处理依据上游
@@ -64,7 +67,7 @@ Service Worker 初次就绪和重复就绪通知不会重复排队配置；只�
 与[待处理命令的结束错误](https://chromium.googlesource.com/chromium/src/+/lkgr/content/browser/devtools/devtools_session.cc)。
 
 诊断页的“读取当前会话设备信号”只允许固定字段，最多读取 32 个 target；IPC 不接受
-脚本、URL、Cookie 或页面正文参数。所有 target 共用 8 秒观测预算，协议等待与每次
+脚本、URL、Cookie 或页面正文参数。所有 target 共用 8 秒观测预算，单次固定读取最多等待 1.5 秒，协议等待与每次
 求值都受剩余预算约束，预算耗尽明确报错。返回前在同一次注册表核对中移除已停止、
 重载或断开的 target，避免早先读完的信号在后续读取期间失效后仍被返回。
 前端在设备观测和公网检查完成后重新核对活动会话；如果会话已停止或已换成新 ID，
@@ -91,7 +94,7 @@ Rust workspace 测试和 clippy，并验证 Edge 签名、生产登记/能力探
 生产样本包括页面、同源 iframe、跨源 OOPIF，以及经典/模块 Dedicated、Shared 和
 Service Worker，共九类上下文。模块样本在导入依赖的顶层读取，早于入口模块正文，
 并与对应经典 Worker 的信号比较。
-生产会话验收连续执行三轮，每轮均须通过；任一轮失败即停止，不将重试成功记作本轮通过。
+生产会话验收连续执行六轮，每轮均须通过；任一轮失败即停止，不将重试成功记作本轮通过。
 能力探针与验收 HTTP 服务均在接受连接后显式恢复阻塞 I/O，再设置有界读写超时。
 延迟首个请求字节的 socket 回归用例防止 Windows 继承非阻塞模式导致预连接被提前关闭。
 新增 `private_worker_lifecycle_acceptance` 使用同一个 loopback fixture，验证 Service Worker
