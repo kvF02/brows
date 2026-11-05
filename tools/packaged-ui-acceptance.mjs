@@ -75,7 +75,7 @@ async function fill(selector, value) {
   await command("POST", "/element/" + id + "/value", { text: value });
 }
 async function nav(label) {
-  await click(await waitFor("navigation " + label, () => xpath("//button[contains(@class,'nav-item')][strong[normalize-space(.)='" + label + "']]")));
+  await click(await waitFor("navigation " + label, () => xpath("//button[contains(@class,'nav-item')][.//strong[normalize-space(.)='" + label + "']]")));
 }
 const text = selector => css(selector).then(id => command("GET", "/element/" + id + "/text"));
 const value = selector => css(selector).then(id => command("GET", "/element/" + id + "/property/value"));
@@ -167,6 +167,9 @@ try {
   await writeFile(reportPath.replace(/\.json$/, ".png"), Buffer.from(screenshot, "base64"));
 } catch (error) {
   failure = { stage, message: error.message.slice(0, 250) };
+  if (session) {
+    try { await writeFile(reportPath.replace(/\.json$/, ".png"), Buffer.from(await command("GET", "/screenshot"), "base64")); } catch {}
+  }
   if (stage === "packaged-launch") console.log("WebDriver startup diagnostics: " + driverLog);
 } finally {
   if (session) {
