@@ -48,6 +48,7 @@ pub fn run() {
                 .initialization_script(TAURI_RUNTIME_MARKER_SCRIPT);
             #[cfg(all(windows, feature = "webview-diagnostics"))]
             let window = window.additional_browser_args("--remote-debugging-port=9223");
+            trace_lifecycle(trace, "webview-building");
             let window = window.build()?;
             trace_lifecycle(trace, "webview-built");
             window.show()?;

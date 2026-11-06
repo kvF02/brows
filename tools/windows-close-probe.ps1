@@ -22,13 +22,26 @@ function Start-BrowsProbe([string]$Executable, [string]$TracePath) {
     }
 }
 
+function Wait-BrowsWindow([Diagnostics.Process]$Process) {
+    $startup = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        $Process.Refresh()
+        if ($Process.HasExited) { throw "Brows exited before opening its window (code $($Process.ExitCode))" }
+        if ($Process.MainWindowTitle -eq 'Brows') { return }
+        Start-Sleep -Milliseconds 250
+    } while ($startup.ElapsedMilliseconds -lt 30000)
+    throw 'Brows did not open its main window within 30 seconds'
+}
+
 function Request-BrowsClose([Diagnostics.Process]$Process) {
     $Process.Refresh()
     $window = $Process.MainWindowHandle
     $owner = [uint32]0
-    if ($window -eq [IntPtr]::Zero -or $Process.MainWindowTitle -ne 'Brows' -or
-        [BrowsCloseProbe]::GetWindowThreadProcessId($window, [ref]$owner) -eq 0 -or $owner -ne $Process.Id) {
-        throw 'The Brows main window is no longer owned by the test process'
+    if ($window -eq [IntPtr]::Zero -or $Process.MainWindowTitle -ne 'Brows') {
+        throw 'The Brows main window is no longer visible'
+    }
+    if ([BrowsCloseProbe]::GetWindowThreadProcessId($window, [ref]$owner) -eq 0 -or $owner -ne $Process.Id) {
+        throw 'The close target is no longer owned by the Brows test process'
     }
     # Process.CloseMainWindow ignores the native PostMessage result on Windows.
     if (-not [BrowsCloseProbe]::PostMessageW($window, 0x0010, [IntPtr]::Zero, [IntPtr]::Zero)) {

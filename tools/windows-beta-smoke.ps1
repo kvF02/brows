@@ -39,19 +39,8 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
     $startup = [Diagnostics.Stopwatch]::StartNew()
     try {
         $process = Start-BrowsProbe -Executable $Executable -TracePath $tracePath
-        for ($attempt = 0; $attempt -lt 120; $attempt++) {
-            $process.Refresh()
-            if ($process.HasExited) {
-                $launch.exitCode = $process.ExitCode
-                throw 'Packaged application exited before opening its window'
-            }
-            if ($process.MainWindowTitle -eq 'Brows') {
-                $launch.windowReadyMs = $startup.ElapsedMilliseconds
-                break
-            }
-            Start-Sleep -Milliseconds 250
-        }
-        if ($null -eq $launch.windowReadyMs) { throw 'Packaged application did not open its main window' }
+        Wait-BrowsWindow -Process $process
+        $launch.windowReadyMs = $startup.ElapsedMilliseconds
         if (-not (Test-Path (Join-Path $appRoot 'profiles.sqlite3'))) { throw 'Application did not initialize its database' }
 
         $shutdown = [Diagnostics.Stopwatch]::StartNew()
@@ -68,7 +57,13 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
         Write-Output "Launch ${Round}: window ready in $($launch.windowReadyMs) ms, normal exit in $($launch.exitMs) ms"
     } finally {
         $launch.lifecycle = @(Read-BrowsLifecycleTrace -TracePath $tracePath)
-        if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
+        if ($process) {
+            if ($process.HasExited) {
+                $launch.exitCode = $process.ExitCode
+            } else {
+                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            }
+        }
     }
 }
 
