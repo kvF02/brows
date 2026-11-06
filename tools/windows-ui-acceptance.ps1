@@ -7,7 +7,7 @@ $releaseRoot = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE 'target/r
 if ([IO.Path]::GetDirectoryName($app) -ine $releaseRoot -or [IO.Path]::GetFileName($app) -ine 'brows-desktop.exe') { throw 'Application must be the CI release build' }
 $probe = $null
 $probeTrace = Join-Path $env:RUNNER_TEMP 'brows-ui-runtime-discovery.stderr.txt'
-$stage = 'runtime-discovery'
+$stage = 'runtime-window-startup'
 function Read-Version([string]$File) {
     $v = [Diagnostics.FileVersionInfo]::GetVersionInfo($File)
     return "$($v.FileMajorPart).$($v.FileMinorPart).$($v.FileBuildPart).$($v.FilePrivatePart)"
@@ -18,30 +18,22 @@ function Assert-Microsoft([string]$File) {
 }
 try {
     $probe = Start-BrowsProbe -Executable $app -TracePath $probeTrace
-    $webview = $null
-    for ($attempt = 0; $attempt -lt 120; $attempt++) {
-        $probe.Refresh()
-        if ($probe.HasExited) { throw 'Application exited during WebView2 discovery' }
-        $webview = Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe' AND ParentProcessId=$($probe.Id)" | Select-Object -First 1
-        if ($webview -and $webview.ExecutablePath) { break }
-        Start-Sleep -Milliseconds 250
-    }
+    Wait-BrowsWindow -Process $probe
+    $stage = 'runtime-discovery'
+    $webview = Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe' AND ParentProcessId=$($probe.Id)" | Select-Object -First 1
     if (-not $webview -or -not $webview.ExecutablePath) { throw 'Actual application WebView2 runtime not found' }
     Assert-Microsoft $webview.ExecutablePath
     $version = Read-Version $webview.ExecutablePath
     if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw 'Invalid WebView2 file version' }
-    for ($attempt = 0; $attempt -lt 40; $attempt++) {
-        $probe.Refresh()
-        if ($probe.MainWindowTitle -eq 'Brows') { break }
-        Start-Sleep -Milliseconds 250
-    }
     $stage = 'runtime-discovery-close'
+    $shutdown = [Diagnostics.Stopwatch]::StartNew()
     Request-BrowsClose -Process $probe
     if (-not $probe.WaitForExit(30000)) {
         $probe.Refresh()
         throw "Application did not exit after runtime discovery (visible window: $($probe.MainWindowHandle -ne 0))"
     }
     if ($probe.ExitCode -ne 0) { throw "Application exited after runtime discovery with code $($probe.ExitCode)" }
+    Write-Output "WebView2 discovery app closed normally in $($shutdown.ElapsedMilliseconds) ms"
     $stage = 'driver-setup'
     $driver = if ($env:EDGEWEBDRIVER) { Join-Path $env:EDGEWEBDRIVER 'msedgedriver.exe' } else { Join-Path $env:RUNNER_TEMP 'brows-ui-webdriver/msedgedriver.exe' }
     $branch = ($version.Split('.')[0..2] -join '.')
