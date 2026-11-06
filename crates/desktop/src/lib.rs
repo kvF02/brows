@@ -101,10 +101,12 @@ pub fn run() {
             RunEvent::WindowEvent {
                 label,
                 event: WindowEvent::CloseRequested { .. },
+                ..
             } if label == "main" => trace_lifecycle(trace, "close-requested"),
             RunEvent::WindowEvent {
                 label,
                 event: WindowEvent::Destroyed,
+                ..
             } if label == "main" => trace_lifecycle(trace, "window-destroyed"),
             RunEvent::ExitRequested { .. } => {
                 trace_lifecycle(trace, "exit-requested");
