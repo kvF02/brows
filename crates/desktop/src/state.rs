@@ -508,6 +508,9 @@ mod tests {
     }
     use browser_fixture::ControlFixture;
 
+    #[cfg(windows)]
+    mod soak;
+
     fn draft(name: &str) -> ProfileDraftDto {
         ProfileDraftDto {
             name: name.to_owned(),
@@ -719,12 +722,13 @@ mod tests {
         .unwrap();
     }
 
-    #[test]
-    #[ignore = "launches ten isolated signed Edge profiles for a bounded capacity check"]
-    fn desktop_capacity_acceptance() {
-        let owned = NativeAcceptanceRoot::new("capacity");
-        let fixture = ControlFixture::start(false);
-        let state = AppState::production(owned.0.clone()).unwrap();
+    fn start_capacity_profiles(
+        state: &AppState,
+        page: impl Fn(usize) -> String,
+    ) -> (
+        Vec<brows_contracts::SessionDto>,
+        Vec<brows_contracts::ProfileIdDto>,
+    ) {
         let edge = state
             .browsers
             .list_builds()
@@ -739,7 +743,7 @@ mod tests {
             profile.browser = BrowserSelectorDto::Pinned {
                 build_id: (&edge.id).into(),
             };
-            profile.startup_urls = vec![format!("{}/capacity-{index}", fixture.url)];
+            profile.startup_urls = vec![page(index)];
             let profile = state
                 .profiles
                 .create(ProfileCreateRequest { profile })
@@ -766,6 +770,17 @@ mod tests {
                 profile_id: profiles[0].clone()
             })
             .is_err());
+        (sessions, profiles)
+    }
+
+    #[test]
+    #[ignore = "launches ten isolated signed Edge profiles for a bounded capacity check"]
+    fn desktop_capacity_acceptance() {
+        let owned = NativeAcceptanceRoot::new("capacity");
+        let fixture = ControlFixture::start(false);
+        let state = AppState::production(owned.0.clone()).unwrap();
+        let (sessions, profiles) =
+            start_capacity_profiles(&state, |index| format!("{}/capacity-{index}", fixture.url));
         for _ in 0..20 {
             std::thread::sleep(std::time::Duration::from_secs(1));
             state.sessions.reconcile_exits().unwrap();

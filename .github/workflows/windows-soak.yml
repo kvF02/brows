@@ -1,0 +1,77 @@
+name: Windows soak and recovery
+on:
+  workflow_dispatch:
+    inputs:
+      minutes:
+        description: Steady ten-profile load in minutes
+        type: choice
+        options: ['1', '30', '120', '240']
+        default: '120'
+  pull_request:
+    types: [opened, reopened, synchronize, edited]
+    paths:
+      - '.github/workflows/windows-soak.yml'
+      - 'crates/adapters-runtime/src/**'
+      - 'crates/desktop/src/state.rs'
+      - 'crates/desktop/src/state/tests/soak.rs'
+      - 'tools/windows-soak.ps1'
+      - 'tools/test_support/controlled_browser.rs'
+      - 'tools/test_support/soak_page.html'
+permissions:
+  contents: read
+concurrency:
+  group: windows-soak-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  soak:
+    if: >-
+      github.event_name == 'workflow_dispatch' ||
+      (github.event.pull_request.head.repo.full_name == github.repository &&
+      (github.event.action != 'edited' ||
+      (github.event.changes.title != null && startsWith(github.event.pull_request.title, '[soak-2h] '))))
+    runs-on: windows-latest
+    timeout-minutes: 270
+    env:
+      BROWS_SOAK_MINUTES: ${{ inputs.minutes || (startsWith(github.event.pull_request.title, '[soak-2h] ') && '120') || '1' }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: ui/package-lock.json
+      - name: Build the embedded UI
+        run: |
+          npm ci --prefix ui
+          npm run ui:build
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - uses: actions/cache/restore@v4
+        with:
+          path: target/debug
+          key: windows-rust-v2-1.97.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          restore-keys: |
+            windows-rust-v2-1.97.1-
+      - name: Build the isolated test host
+        shell: pwsh
+        run: |
+          $messages = @(cargo +1.97.1 test -p brows-desktop --lib --locked --no-run --message-format=json | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0) {
+            $messages | Where-Object reason -eq 'compiler-message' | ForEach-Object { $_.message.rendered }
+            throw 'Soak test build failed'
+          }
+          $testBinaries = @($messages | Where-Object {
+            $_.reason -eq 'compiler-artifact' -and $_.target.name -eq 'brows_desktop' -and $_.executable
+          } | ForEach-Object executable)
+          if ($testBinaries.Count -ne 1) { throw 'Expected one desktop test executable' }
+          "BROWS_SOAK_TEST_EXE=$($testBinaries[0])" >> $env:GITHUB_ENV
+      - name: Run ten profiles and inject browser and host failures
+        shell: pwsh
+        run: ./tools/windows-soak.ps1 -TestExecutable $env:BROWS_SOAK_TEST_EXE -Seconds (60 * [int]$env:BROWS_SOAK_MINUTES) -Report target/windows-soak-report.json
+      - name: Preserve stability and recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-soak-${{ github.sha }}-${{ env.BROWS_SOAK_MINUTES }}min
+          path: target/windows-soak-report.json
+          if-no-files-found: warn
