@@ -18,14 +18,16 @@ use commands::{
     settings_get, settings_update, support_report,
 };
 use state::AppState;
-use tauri::{Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder};
+use std::io::Write;
+use tauri::{Manager, RunEvent, Url, WebviewUrl, WebviewWindowBuilder, WindowEvent};
 
 const TAURI_RUNTIME_MARKER_SCRIPT: &str = "window.__BROWS_IS_TAURI__ = true;";
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
+    let trace = std::env::var_os("BROWS_LIFECYCLE_TRACE").is_some_and(|value| value == "1");
     tauri::Builder::default()
-        .setup(|app| {
+        .setup(move |app| {
             let data_root = app.path().app_local_data_dir()?;
             let state = AppState::production(data_root)
                 .map_err(|error| -> Box<dyn std::error::Error> { Box::new(error) })?;
@@ -33,6 +35,8 @@ pub fn run() {
 
             let window = WebviewWindowBuilder::new(app, "main", main_window_url())
                 .title("Brows")
+                // Expose the close button only after WebView initialization.
+                .visible(false)
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(1040.0, 680.0)
                 .on_navigation(is_allowed_navigation)
@@ -45,6 +49,7 @@ pub fn run() {
             #[cfg(all(windows, feature = "webview-diagnostics"))]
             let window = window.additional_browser_args("--remote-debugging-port=9223");
             let window = window.build()?;
+            trace_lifecycle(trace, "webview-built");
             window.show()?;
             window.set_focus()?;
 
@@ -91,11 +96,32 @@ pub fn run() {
         ])
         .build(tauri::generate_context!())
         .expect("Brows desktop runtime failed to build")
-        .run(|app, event| {
-            if let RunEvent::ExitRequested { .. } = event {
+        .run(move |app, event| match event {
+            RunEvent::Ready => trace_lifecycle(trace, "ready"),
+            RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::CloseRequested { .. },
+                ..
+            } if label == "main" => trace_lifecycle(trace, "close-requested"),
+            RunEvent::WindowEvent {
+                label,
+                event: WindowEvent::Destroyed,
+                ..
+            } if label == "main" => trace_lifecycle(trace, "window-destroyed"),
+            RunEvent::ExitRequested { .. } => {
+                trace_lifecycle(trace, "exit-requested");
                 cleanup_sessions(app.state::<AppState>().inner());
+                trace_lifecycle(trace, "sessions-cleaned");
             }
+            RunEvent::Exit => trace_lifecycle(trace, "exit"),
+            _ => {}
         })
+}
+
+fn trace_lifecycle(enabled: bool, phase: &str) {
+    if enabled {
+        let _ = writeln!(std::io::stderr(), "brows-lifecycle {phase}");
+    }
 }
 
 fn cleanup_sessions(state: &AppState) {
