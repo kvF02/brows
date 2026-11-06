@@ -144,10 +144,7 @@ fn reopen(root: &Path) {
     let ready: serde_json::Value =
         serde_json::from_slice(&fs::read(root.join("steady-ready.json")).unwrap()).unwrap();
     let profile_id = serde_json::from_value(ready["profileId"].clone()).unwrap();
-    let saved = state
-        .profiles
-        .get(ProfileIdRequest { profile_id })
-        .unwrap();
+    let saved = state.profiles.get(ProfileIdRequest { profile_id }).unwrap();
     assert_eq!(saved.name, "capacity-1");
     let mut profile = draft(&saved.name);
     profile.browser = saved.browser;

@@ -242,6 +242,7 @@ fn verify_publisher_and_version(build: &BrowserBuild) -> PortResult<()> {
 #[cfg(windows)]
 fn configure_snapshot_acl(root: &Path) -> PortResult<()> {
     use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
     let metadata = fs::symlink_metadata(root)
         .map_err(|_| invalid_data("cannot inspect snapshot ACL target"))?;

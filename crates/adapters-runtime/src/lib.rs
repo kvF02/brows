@@ -17,14 +17,13 @@ use brows_domain::{
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
 #[cfg(not(windows))]
-use std::process::Stdio;
+use std::process::{Child, Command, Stdio};
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::OsString,
     fs::{self, File},
     io::{BufReader, Read},
     path::{Component, Path, PathBuf},
-    process::{Child, Command},
     sync::{Mutex, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -41,6 +40,7 @@ mod target_registry;
 mod win_pipe;
 
 static LAUNCH_LOCK: Mutex<()> = Mutex::new(());
+#[cfg(not(windows))]
 fn spawn_browser(command: &mut Command) -> std::io::Result<Child> {
     let _guard = LAUNCH_LOCK
         .lock()
@@ -597,9 +597,11 @@ impl BrowserRuntime for ManagedChromiumRuntime {
             #[cfg(windows)]
             {
                 ManagedProcess::Native(
-                    win_pipe::spawn_native(&build.executable_path, &arguments).map_err(|error| {
-                        internal(format!("failed to launch browser in Windows job: {error}"))
-                    })?,
+                    win_pipe::spawn_native(&build.executable_path, &arguments).map_err(
+                        |error| {
+                            internal(format!("failed to launch browser in Windows job: {error}"))
+                        },
+                    )?,
                 )
             }
             #[cfg(not(windows))]
