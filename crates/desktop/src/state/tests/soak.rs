@@ -35,7 +35,7 @@ fn exercise(root: &Path, duration: Duration) {
     let data = root.join("data");
     fs::create_dir(&data).expect("soak profile directory must be fresh");
     let fixture = ControlFixture::start(false);
-    let state = AppState::production(data).unwrap();
+    let state = AppState::production(data.clone()).unwrap();
     let (sessions, profiles) =
         start_capacity_profiles(&state, |index| format!("{}/soak/{index}", fixture.url));
     let edge = state
@@ -58,6 +58,7 @@ fn exercise(root: &Path, duration: Duration) {
     let ready = serde_json::json!({
         "runtimeVersion": edge.version,
         "edgeExecutable": edge.executable_path,
+        "profileRoot": data.join("profiles").canonicalize().unwrap(),
         "victimPage": format!("{}/soak/0", fixture.url),
         "profileId": profiles[1],
     });

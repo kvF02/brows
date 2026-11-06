@@ -57,17 +57,23 @@ function Wait-SoakMarker([Diagnostics.Process]$Process, [string]$Name, [int]$Lim
 }
 
 function Read-ProcessSnapshot {
-    $properties = 'ProcessId', 'ParentProcessId', 'ExecutablePath', 'CommandLine', 'CreationDate',
-        'WorkingSetSize', 'UserModeTime', 'KernelModeTime'
-    Get-CimInstance Win32_Process -OperationTimeoutSec 10 -Property $properties
+    Get-CimInstance Win32_Process -OperationTimeoutSec 10
 }
 
-function Find-BrowserRoots($Snapshot, [int]$OwnerId, [string]$EdgePath) {
-    $profilePrefix = Join-Path $root 'data\profiles'
-    $Snapshot | Where-Object {
-        $_.ParentProcessId -eq $OwnerId -and $_.ExecutablePath -ieq $EdgePath -and
-        $_.CommandLine -and $_.CommandLine.Contains($profilePrefix, [StringComparison]::OrdinalIgnoreCase)
+function Find-BrowserRoots($Snapshot, [int]$OwnerId, $Ready) {
+    $edge = $Ready.edgeExecutable.Replace('\\?\', '')
+    $profilePrefix = $Ready.profileRoot.Replace('\\?\', '') + '\'
+    $children = @($Snapshot | Where-Object ParentProcessId -eq $OwnerId)
+    $edgeChildren = @($children | Where-Object {
+        $_.ExecutablePath -and $_.ExecutablePath.Replace('\\?\', '') -ieq $edge
+    })
+    $roots = @($edgeChildren | Where-Object {
+        $_.CommandLine -and $_.CommandLine.Replace('\\?\', '').Contains($profilePrefix, [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($roots.Count -ne 10) {
+        throw "Expected ten owned Edge roots, found $($roots.Count) ($($children.Count) direct children, $($edgeChildren.Count) matching Edge paths)"
     }
+    $roots
 }
 
 function Find-ProcessTree($Snapshot, $Roots) {
@@ -123,8 +129,6 @@ try {
     $soakProcess = Start-SoakHost 'exercise'
     Wait-SoakMarker $soakProcess 'steady-ready.json' 180
     $ready = Get-Content -LiteralPath (Join-Path $root 'steady-ready.json') -Raw | ConvertFrom-Json
-    $edge = $ready.edgeExecutable
-    if ($edge.StartsWith('\\?\')) { $edge = $edge.Substring(4) }
     $result.runtimeVersion = $ready.runtimeVersion
     $checks.Add('ten-pages-sending-heartbeats')
 
@@ -137,8 +141,7 @@ try {
         if ($elapsed -gt ($Seconds + 60)) { throw 'The steady phase did not finish in time' }
         if ($elapsed -ge $nextSample) {
             $snapshot = @(Read-ProcessSnapshot)
-            $roots = @(Find-BrowserRoots $snapshot $soakProcess.Id $edge)
-            if ($roots.Count -ne 10) { throw "Expected ten browser roots, found $($roots.Count)" }
+            $roots = @(Find-BrowserRoots $snapshot $soakProcess.Id $ready)
             $tracked = @(Find-ProcessTree $snapshot $roots)
             $bytes = ($tracked | Measure-Object -Property WorkingSetSize -Sum).Sum
             $userTime = ($tracked | Measure-Object -Property UserModeTime -Sum).Sum
@@ -162,8 +165,7 @@ try {
 
     $stage = 'browser-crash'
     $snapshot = @(Read-ProcessSnapshot)
-    $roots = @(Find-BrowserRoots $snapshot $soakProcess.Id $edge)
-    if ($roots.Count -ne 10) { throw 'The browser crash requires ten live roots' }
+    $roots = @(Find-BrowserRoots $snapshot $soakProcess.Id $ready)
     $victims = @($roots | Where-Object { $_.CommandLine.Contains($ready.victimPage) })
     if ($victims.Count -ne 1) { throw 'Could not identify the owned fault target' }
     $victimTree = @(Find-ProcessTree $snapshot $victims)
@@ -178,8 +180,7 @@ try {
 
     $stage = 'host-crash'
     $snapshot = @(Read-ProcessSnapshot)
-    $roots = @(Find-BrowserRoots $snapshot $soakProcess.Id $edge)
-    if ($roots.Count -ne 10) { throw 'The host crash requires ten live roots after queue promotion' }
+    $roots = @(Find-BrowserRoots $snapshot $soakProcess.Id $ready)
     $hostTree = @(Find-ProcessTree $snapshot $roots)
     $tracked += $hostTree
     if ($hostTree.Count -le 10) { throw 'The host has no observed browser descendants' }

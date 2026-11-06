@@ -19,9 +19,6 @@ on:
       - 'tools/test_support/soak_page.html'
 permissions:
   contents: read
-concurrency:
-  group: windows-soak-${{ github.ref }}
-  cancel-in-progress: true
 jobs:
   soak:
     if: >-
@@ -29,6 +26,9 @@ jobs:
       (github.event.pull_request.head.repo.full_name == github.repository &&
       (github.event.action != 'edited' ||
       (github.event.changes.title != null && startsWith(github.event.pull_request.title, '[soak-2h] '))))
+    concurrency:
+      group: windows-soak-${{ github.ref }}
+      cancel-in-progress: true
     runs-on: windows-latest
     timeout-minutes: 270
     env:
