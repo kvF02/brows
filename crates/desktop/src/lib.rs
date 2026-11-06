@@ -33,6 +33,8 @@ pub fn run() {
 
             let window = WebviewWindowBuilder::new(app, "main", main_window_url())
                 .title("Brows")
+                // Expose the close button only after WebView initialization.
+                .visible(false)
                 .inner_size(1280.0, 820.0)
                 .min_inner_size(1040.0, 680.0)
                 .on_navigation(is_allowed_navigation)
