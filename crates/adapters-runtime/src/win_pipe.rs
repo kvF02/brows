@@ -1,5 +1,5 @@
-//! Windows-only private CDP transport. Only two explicit pipe handles are
-//! inherited. The job closes the entire process tree on controller failure.
+//! Windows browser process ownership and private CDP transport. The native
+//! path inherits no handles. The controlled path inherits exactly two pipes.
 #![allow(unsafe_code)]
 use std::{
     ffi::{c_void, OsString},
@@ -147,10 +147,13 @@ impl Process {
         }
     }
     pub(super) fn wait(&self) -> io::Result<()> {
-        if unsafe { WaitForSingleObject(self.process.as_raw_handle(), 10000) } == 0 {
-            Ok(())
-        } else {
-            Err(io::Error::last_os_error())
+        match unsafe { WaitForSingleObject(self.process.as_raw_handle(), 10000) } {
+            0 => Ok(()),
+            258 => Err(io::Error::new(
+                io::ErrorKind::TimedOut,
+                "browser did not exit",
+            )),
+            _ => Err(io::Error::last_os_error()),
         }
     }
 }
@@ -247,11 +250,25 @@ pub(super) fn spawn(
         "--remote-debugging-io-pipes={},{}",
         handles[0] as usize, handles[1] as usize
     ));
+    let mut args = arguments.to_vec();
+    args.extend([OsString::from("--remote-debugging-pipe"), extra]);
+    let process = spawn_in_job(executable, &args, Some(attributes.0))?;
+    drop(child_read);
+    drop(child_write);
+    Ok((process, File::from(parent_write), File::from(parent_read)))
+}
+
+pub(super) fn spawn_native(executable: &Path, arguments: &[OsString]) -> io::Result<Process> {
+    spawn_in_job(executable, arguments, None)
+}
+
+fn spawn_in_job(
+    executable: &Path,
+    arguments: &[OsString],
+    attributes: Option<Handle>,
+) -> io::Result<Process> {
     let mut command = quote(executable.as_os_str());
-    for arg in arguments
-        .iter()
-        .chain([OsString::from("--remote-debugging-pipe"), extra].iter())
-    {
+    for arg in arguments {
         command.push(32);
         command.extend(quote(arg));
     }
@@ -261,8 +278,13 @@ pub(super) fn spawn(
     command.push(0);
     let application: Vec<u16> = executable.as_os_str().encode_wide().chain([0]).collect();
     let mut startup: StartupEx = unsafe { mem::zeroed() };
-    startup.base.cb = mem::size_of::<StartupEx>() as u32;
-    startup.attributes = attributes.0;
+    let mut flags = 0x00004; // CREATE_SUSPENDED
+    startup.base.cb = mem::size_of::<Startup>() as u32;
+    if let Some(attributes) = attributes {
+        flags |= 0x80000; // EXTENDED_STARTUPINFO_PRESENT
+        startup.base.cb = mem::size_of::<StartupEx>() as u32;
+        startup.attributes = attributes;
+    }
     let mut info: ProcessInfo = unsafe { mem::zeroed() };
     let job = unsafe { CreateJobObjectW(ptr::null_mut(), ptr::null()) };
     if job.is_null() {
@@ -288,8 +310,8 @@ pub(super) fn spawn(
             command.as_mut_ptr(),
             ptr::null_mut(),
             ptr::null_mut(),
-            1,
-            0x80004,
+            i32::from(attributes.is_some()),
+            flags,
             ptr::null_mut(),
             ptr::null(),
             &mut startup.base,
@@ -302,11 +324,12 @@ pub(super) fn spawn(
     let process = unsafe { OwnedHandle::from_raw_handle(info.process) };
     let thread = unsafe { OwnedHandle::from_raw_handle(info.thread) };
     if unsafe { AssignProcessToJobObject(job.as_raw_handle(), process.as_raw_handle()) } == 0 {
+        let error = io::Error::last_os_error();
         unsafe {
             TerminateProcess(process.as_raw_handle(), 1);
             WaitForSingleObject(process.as_raw_handle(), 10000);
         }
-        return Err(io::Error::last_os_error());
+        return Err(error);
     }
     let process = Process {
         process,
@@ -316,7 +339,5 @@ pub(super) fn spawn(
     if unsafe { ResumeThread(thread.as_raw_handle()) } == u32::MAX {
         return Err(io::Error::last_os_error());
     }
-    drop(child_read);
-    drop(child_write);
-    Ok((process, File::from(parent_write), File::from(parent_read)))
+    Ok(process)
 }

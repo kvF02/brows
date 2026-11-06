@@ -16,13 +16,15 @@ use brows_domain::{
 };
 use serde_json::{Map, Value};
 use sha2::{Digest, Sha256};
+#[cfg(not(windows))]
+use std::process::Stdio;
 use std::{
     collections::{BTreeMap, HashMap, HashSet},
     ffi::OsString,
     fs::{self, File},
     io::{BufReader, Read},
     path::{Component, Path, PathBuf},
-    process::{Child, Command, Stdio},
+    process::{Child, Command},
     sync::{Mutex, RwLock},
     time::{SystemTime, UNIX_EPOCH},
 };
@@ -48,37 +50,52 @@ fn spawn_browser(command: &mut Command) -> std::io::Result<Child> {
 
 #[derive(Debug)]
 enum ManagedProcess {
+    #[cfg(not(windows))]
     Plain(Child),
+    #[cfg(windows)]
+    Native(win_pipe::Process),
     #[cfg(windows)]
     Controlled(std::sync::Arc<session_control::Controller>),
 }
 impl ManagedProcess {
     fn id(&self) -> u32 {
         match self {
+            #[cfg(not(windows))]
             Self::Plain(child) => child.id(),
+            #[cfg(windows)]
+            Self::Native(child) => child.id(),
             #[cfg(windows)]
             Self::Controlled(child) => child.id(),
         }
     }
     fn kill(&mut self) -> std::io::Result<()> {
         match self {
+            #[cfg(not(windows))]
             Self::Plain(child) => child.kill(),
+            #[cfg(windows)]
+            Self::Native(child) => child.kill(),
             #[cfg(windows)]
             Self::Controlled(child) => child.kill(),
         }
     }
     fn wait(&mut self) -> std::io::Result<()> {
         match self {
+            #[cfg(not(windows))]
             Self::Plain(child) => child.wait().map(|_| ()),
+            #[cfg(windows)]
+            Self::Native(child) => child.wait(),
             #[cfg(windows)]
             Self::Controlled(child) => child.wait(),
         }
     }
     fn try_wait(&mut self) -> std::io::Result<Option<u32>> {
         match self {
+            #[cfg(not(windows))]
             Self::Plain(child) => child
                 .try_wait()
                 .map(|v| v.map(|s| s.code().unwrap_or(1) as u32)),
+            #[cfg(windows)]
+            Self::Native(child) => child.try_wait(),
             #[cfg(windows)]
             Self::Controlled(child) => child.try_wait(),
         }
@@ -577,16 +594,27 @@ impl BrowserRuntime for ManagedChromiumRuntime {
                 ));
             }
         } else {
-            ManagedProcess::Plain(
-                spawn_browser(
-                    Command::new(&build.executable_path)
-                        .args(arguments)
-                        .stdin(Stdio::null())
-                        .stdout(Stdio::null())
-                        .stderr(Stdio::null()),
+            #[cfg(windows)]
+            {
+                ManagedProcess::Native(
+                    win_pipe::spawn_native(&build.executable_path, &arguments).map_err(|error| {
+                        internal(format!("failed to launch browser in Windows job: {error}"))
+                    })?,
                 )
-                .map_err(|_| internal("failed to launch browser process"))?,
-            )
+            }
+            #[cfg(not(windows))]
+            {
+                ManagedProcess::Plain(
+                    spawn_browser(
+                        Command::new(&build.executable_path)
+                            .args(arguments)
+                            .stdin(Stdio::null())
+                            .stdout(Stdio::null())
+                            .stderr(Stdio::null()),
+                    )
+                    .map_err(|_| internal("failed to launch browser process"))?,
+                )
+            }
         };
         let process_id = child.id();
         processes.insert(plan.session_id.clone(), child);
