@@ -1,10 +1,13 @@
 param([Parameter(Mandatory)][string]$Application, [Parameter(Mandatory)][string]$Report)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or -not $IsWindows) { throw 'Windows GitHub Actions fixture only' }
+. "$PSScriptRoot/windows-close-probe.ps1"
 $app = (Resolve-Path -LiteralPath $Application).Path
 $releaseRoot = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE 'target/release'))
 if ([IO.Path]::GetDirectoryName($app) -ine $releaseRoot -or [IO.Path]::GetFileName($app) -ine 'brows-desktop.exe') { throw 'Application must be the CI release build' }
 $probe = $null
+$probeTrace = Join-Path $env:RUNNER_TEMP 'brows-ui-runtime-discovery.stderr.txt'
+$stage = 'runtime-discovery'
 function Read-Version([string]$File) {
     $v = [Diagnostics.FileVersionInfo]::GetVersionInfo($File)
     return "$($v.FileMajorPart).$($v.FileMinorPart).$($v.FileBuildPart).$($v.FilePrivatePart)"
@@ -14,7 +17,7 @@ function Assert-Microsoft([string]$File) {
     if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) -ne 'Microsoft Corporation') { throw 'Microsoft executable signature admission failed' }
 }
 try {
-    $probe = Start-Process -FilePath $app -PassThru
+    $probe = Start-BrowsProbe -Executable $app -TracePath $probeTrace
     $webview = $null
     for ($attempt = 0; $attempt -lt 120; $attempt++) {
         $probe.Refresh()
@@ -29,10 +32,17 @@ try {
     if ($version -notmatch '^\d+\.\d+\.\d+\.\d+$') { throw 'Invalid WebView2 file version' }
     for ($attempt = 0; $attempt -lt 40; $attempt++) {
         $probe.Refresh()
-        if ($probe.MainWindowHandle -ne 0) { break }
+        if ($probe.MainWindowTitle -eq 'Brows') { break }
         Start-Sleep -Milliseconds 250
     }
-    if (-not $probe.CloseMainWindow() -or -not $probe.WaitForExit(30000) -or $probe.ExitCode -ne 0) { throw 'Application did not close normally after runtime discovery' }
+    $stage = 'runtime-discovery-close'
+    Request-BrowsClose -Process $probe
+    if (-not $probe.WaitForExit(30000)) {
+        $probe.Refresh()
+        throw "Application did not exit after runtime discovery (visible window: $($probe.MainWindowHandle -ne 0))"
+    }
+    if ($probe.ExitCode -ne 0) { throw "Application exited after runtime discovery with code $($probe.ExitCode)" }
+    $stage = 'driver-setup'
     $driver = if ($env:EDGEWEBDRIVER) { Join-Path $env:EDGEWEBDRIVER 'msedgedriver.exe' } else { Join-Path $env:RUNNER_TEMP 'brows-ui-webdriver/msedgedriver.exe' }
     $branch = ($version.Split('.')[0..2] -join '.')
     $matches = (Test-Path -LiteralPath $driver) -and ((Read-Version $driver).StartsWith("$branch."))
@@ -53,6 +63,7 @@ try {
     if (-not (Read-Version $driver).StartsWith("$branch.")) { throw 'WebView2 and WebDriver build mismatch' }
     $env:BROWS_UI_WEBVIEW_VERSION = $version
     Write-Output "Testing packaged UI with WebView2 $version and driver $(Read-Version $driver)"
+    $stage = 'webdriver'
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
     if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
         # Modern WebView2 ignores WebDriver environment overrides in elevated
@@ -96,6 +107,18 @@ finally { [IO.File]::WriteAllText($(Quote-Literal $done), [string]`$code) }
         node tools/packaged-ui-acceptance.mjs $app $driver $Report
         if ($LASTEXITCODE -ne 0) { throw 'Packaged UI acceptance failed' }
     }
+} catch {
+    if (-not (Test-Path -LiteralPath $Report)) {
+        $failure = @{
+            schemaVersion = 1; assertionsPassed = $false; complete = $false
+            checks = @()
+            failure = @{ stage = $stage; message = $_.Exception.Message }
+            lifecycle = @(Read-BrowsLifecycleTrace -TracePath $probeTrace)
+        } | ConvertTo-Json -Depth 5
+        $failure | Set-Content -LiteralPath $Report -Encoding utf8
+        Write-Output $failure
+    }
+    throw
 } finally {
     if ($probe -and -not $probe.HasExited) { Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue }
     # Only this CI build is owned. Never stop browsers by process image name.

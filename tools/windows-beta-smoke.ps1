@@ -1,5 +1,6 @@
 param([Parameter(Mandatory)][string]$Installer, [Parameter(Mandatory)][string]$Report)
 $ErrorActionPreference = 'Stop'
+. "$PSScriptRoot/windows-close-probe.ps1"
 $installRoot = Join-Path $env:RUNNER_TEMP 'BrowsBetaInstall'
 $appRoot = Join-Path $env:LOCALAPPDATA 'local-brows-desktop'
 $sentinel = Join-Path $appRoot 'beta-upgrade-sentinel.txt'
@@ -30,12 +31,14 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
         exitMs = $null
         exitCode = $null
         windowVisibleAtTimeout = $null
+        lifecycle = @()
     }
     $launches.Add($launch)
     $process = $null
+    $tracePath = Join-Path $env:RUNNER_TEMP "brows-package-launch-$Round.stderr.txt"
     $startup = [Diagnostics.Stopwatch]::StartNew()
     try {
-        $process = Start-Process -FilePath $Executable -PassThru
+        $process = Start-BrowsProbe -Executable $Executable -TracePath $tracePath
         for ($attempt = 0; $attempt -lt 120; $attempt++) {
             $process.Refresh()
             if ($process.HasExited) {
@@ -52,8 +55,8 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
         if (-not (Test-Path (Join-Path $appRoot 'profiles.sqlite3'))) { throw 'Application did not initialize its database' }
 
         $shutdown = [Diagnostics.Stopwatch]::StartNew()
-        $launch.closeRequested = $process.CloseMainWindow()
-        if (-not $launch.closeRequested) { throw 'Unable to send close request to the packaged application' }
+        Request-BrowsClose -Process $process
+        $launch.closeRequested = $true
         if (-not $process.WaitForExit(30000)) {
             $process.Refresh()
             $launch.windowVisibleAtTimeout = $process.MainWindowHandle -ne [IntPtr]::Zero
@@ -64,6 +67,7 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
         if ($launch.exitCode -ne 0) { throw 'Packaged application reported a failed exit' }
         Write-Output "Launch ${Round}: window ready in $($launch.windowReadyMs) ms, normal exit in $($launch.exitMs) ms"
     } finally {
+        $launch.lifecycle = @(Read-BrowsLifecycleTrace -TracePath $tracePath)
         if ($process -and -not $process.HasExited) { Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue }
     }
 }
