@@ -24,6 +24,7 @@ $result = [ordered]@{
     schemaVersion = 1
     assertionsPassed = $false
     platform = [Environment]::OSVersion.VersionString
+    loopbackSleepException = $env:BROWS_SOAK_LOOPBACK_POLICY
     commit = $env:GITHUB_SHA
     persona = 'SystemNative'
     concurrentProfiles = 10
@@ -152,6 +153,7 @@ try {
                 workingSetMiB = [Math]::Round($bytes / 1MB, 1)
                 liveProcessCpuSeconds = [Math]::Round(($userTime + $kernelTime) / 10000000, 2)
             }
+            $result.observedSeconds = $elapsed
             $samples.Add($sample)
             Write-Output ($sample | ConvertTo-Json -Compress)
             $nextSample = $elapsed + 60

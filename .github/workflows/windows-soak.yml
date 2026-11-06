@@ -67,7 +67,20 @@ jobs:
           "BROWS_SOAK_TEST_EXE=$($testBinaries[0])" >> $env:GITHUB_ENV
       - name: Run ten profiles and inject browser and host failures
         shell: pwsh
-        run: ./tools/windows-soak.ps1 -TestExecutable $env:BROWS_SOAK_TEST_EXE -Seconds (60 * [int]$env:BROWS_SOAK_MINUTES) -Report target/windows-soak-report.json
+        run: |
+          if ($env:RUNNER_ENVIRONMENT -ne 'github-hosted') { throw 'The soak policy requires a disposable runner' }
+          # Edge sleeps idle background tabs after 15 minutes. Keep only the
+          # loopback workload eligible for continuous page heartbeats.
+          $policy = 'HKCU:\Software\Policies\Microsoft\Edge\SleepingTabsBlockedForUrls'
+          if (Test-Path -LiteralPath $policy) { throw 'Unexpected pre-existing Edge sleep exception policy' }
+          New-Item -Path $policy -Force | Out-Null
+          try {
+            $env:BROWS_SOAK_LOOPBACK_POLICY = 'http://127.0.0.1'
+            New-ItemProperty -LiteralPath $policy -Name '1' -Value $env:BROWS_SOAK_LOOPBACK_POLICY -PropertyType String | Out-Null
+            ./tools/windows-soak.ps1 -TestExecutable $env:BROWS_SOAK_TEST_EXE -Seconds (60 * [int]$env:BROWS_SOAK_MINUTES) -Report target/windows-soak-report.json
+          } finally {
+            Remove-Item -LiteralPath $policy
+          }
       - name: Preserve stability and recovery evidence
         if: always()
         uses: actions/upload-artifact@v4

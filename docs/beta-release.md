@@ -49,6 +49,9 @@ WebDriver 只用于 Windows CI，匹配实际 WebView2 的构建版本并验证 
 检查该会话进入失败状态、进程树退出、排队环境启动。再强制终止持有剩余会话的测试宿主，
 检查已观察到的浏览器进程全部退出，随后重开原 SQLite 数据库并重新启动一个已有环境。
 测试宿主使用生产应用状态和运行时适配器。
+为避免 Edge 的后台标签休眠中止持续负载，CI 仅在一次性 runner 上对 `http://127.0.0.1`
+设置临时[休眠例外](https://learn.microsoft.com/en-us/deployedge/microsoft-edge-policies/sleepingtabsblockedforurls)，
+并将该条件写入报告。
 
 `windows-soak-report.json` 记录实际持续时间、Edge 和系统版本、故障恢复结果与每分钟
 进程数、工作集和存活进程累计 CPU 时间。资源数据用于比较运行情况，当前没有资源预算门槛。
