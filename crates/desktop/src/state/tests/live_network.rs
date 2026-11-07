@@ -148,18 +148,37 @@ fn resolvers(sample: &Value) -> BTreeSet<std::net::IpAddr> {
         .collect()
 }
 fn positive_stun(sample: &Value) -> bool {
-    sample["webrtc"]["srflx"]
-        .as_array()
-        .is_some_and(|ips| !ips.is_empty())
-        && matches!(
-            sample["webrtc"]["status"].as_str(),
-            Some("complete" | "timeout")
-        )
+    sample["webrtc"]["srflx"].as_array().is_some_and(|ips| {
+        ips.iter().any(|ip| {
+            ip.as_str()
+                .and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
+                .is_some()
+        })
+    }) && matches!(
+        sample["webrtc"]["status"].as_str(),
+        Some("complete" | "timeout")
+    )
 }
 fn udp_candidate(sample: &Value) -> bool {
     sample["webrtc"]["protocols"]
         .as_array()
         .is_some_and(|values| values.iter().any(|v| v == "udp"))
+}
+
+#[test]
+fn missing_or_malformed_control_addresses_are_not_positive_evidence() {
+    assert!(exit(&json!({"https": {"status": "observed", "ip": "invalid"}})).is_none());
+    assert!(!positive_stun(
+        &json!({"webrtc": {"status": "complete", "srflx": ["invalid"]}})
+    ));
+    assert!(!positive_stun(
+        &json!({"webrtc": {"status": "error", "srflx": ["198.51.100.1"]}})
+    ));
+    assert!(positive_stun(
+        &json!({"webrtc": {"status": "complete", "srflx": ["198.51.100.1"]}})
+    ));
+    assert!(udp_candidate(&json!({"webrtc": {"protocols": ["udp"]}})));
+    assert!(!udp_candidate(&json!({"webrtc": {"protocols": []}})));
 }
 
 #[test]
@@ -204,16 +223,25 @@ fn live_browser_network_acceptance() {
         .into_iter()
         .find(|b| b.provider == "Microsoft Edge")
         .expect("signed Edge");
-    let edge = harness
+    let support = harness
         .state()
         .browsers
         .probe_fingerprint_support(&edge.id)
-        .unwrap()
-        .build;
+        .unwrap();
+    write_report(&json!({
+        "schemaVersion": 1, "complete": false, "phase": "capability_probe",
+        "productCommit": env::var("BROWS_PRODUCT_COMMIT").ok(),
+        "browserVersion": support.build.version,
+        "fingerprintSupport": format!("{:?}", support.build.capabilities.fingerprint_support),
+        "detail": support.detail,
+    }));
+    let edge = support.build;
     assert_eq!(edge.trust, brows_domain::RuntimeTrust::Verified);
     assert_eq!(
         edge.capabilities.fingerprint_support,
-        brows_domain::FingerprintSupport::Supported
+        brows_domain::FingerprintSupport::Supported,
+        "{}",
+        support.detail
     );
     let mut native = draft("Live network direct control");
     native.browser = BrowserSelectorDto::Pinned {
@@ -408,14 +436,19 @@ fn live_browser_network_acceptance() {
         "not_checked"
     };
     report["webrtcUdpPolicy"] = json!({"status": rtc_status, "directStunPositiveControl": control, "udpCandidateObservedThroughProxy": leaked_udp});
-    report["allBrowserChecksPassed"] = json!(browser_passed && reopened_stable && distinct_passed);
+    let direct_https = report["direct"]
+        .as_array()
+        .is_some_and(|samples| samples.len() == 2 && samples.iter().all(|s| exit(s).is_some()));
+    report["directHttpsControlPassed"] = json!(direct_https);
+    report["allBrowserChecksPassed"] =
+        json!(browser_passed && direct_https && reopened_stable && distinct_passed);
     report["reopenFingerprintStable"] = json!(reopened_stable);
     report["distinctSeededCanvases"] = json!(distinct_passed);
     report["ownedCredentialsRemoved"] = json!(harness.cleanup());
     report["complete"] = json!(true);
     write_report(&report);
     assert!(
-        browser_passed,
+        browser_passed && direct_https,
         "actual HTTPS browser exits or persona signals failed; see sanitized report"
     );
     assert!(
