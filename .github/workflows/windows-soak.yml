@@ -95,16 +95,8 @@ jobs:
           try {
             $env:BROWS_SOAK_LOOPBACK_POLICY = 'http://127.0.0.1'
             New-ItemProperty -LiteralPath $policy -Name '1' -Value $env:BROWS_SOAK_LOOPBACK_POLICY -PropertyType String | Out-Null
-            if ($env:BROWS_SOAK_PERSONA -eq 'SeedableNoise') {
-              & $env:BROWS_SOAK_TEST_EXE --ignored --exact state::tests::soak::seeded::seedable_noise_soak --nocapture
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-              $report = Get-Content -LiteralPath target/windows-seeded-soak-report.json -Raw | ConvertFrom-Json
-              if (-not $report.assertionsPassed -or $report.observedSeconds -lt (60 * [int]$env:BROWS_SOAK_MINUTES)) {
-                throw 'SeedableNoise soak report is missing passing evidence'
-              }
-            } else {
-              ./tools/windows-soak.ps1 -TestExecutable $env:BROWS_SOAK_TEST_EXE -Seconds (60 * [int]$env:BROWS_SOAK_MINUTES) -Report target/windows-soak-report.json
-            }
+            $report = if ($env:BROWS_SOAK_PERSONA -eq 'SeedableNoise') { 'target/windows-seeded-soak-report.json' } else { 'target/windows-soak-report.json' }
+            ./tools/windows-soak.ps1 -TestExecutable $env:BROWS_SOAK_TEST_EXE -Seconds (60 * [int]$env:BROWS_SOAK_MINUTES) -Persona $env:BROWS_SOAK_PERSONA -Report $report
           } finally {
             Remove-Item -LiteralPath $policy
           }
