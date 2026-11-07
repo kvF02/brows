@@ -17,7 +17,8 @@ WebView2 未安装时，安装器需要联网取得 Microsoft WebView2 引导程
 设计依据：[Tauri 官方 Windows 安装包文档](https://v2.tauri.app/distribute/windows-installer/)。
 
 每次 PR 和 master 更新会运行 `Windows beta package`，产物包含安装器、单文件应用、
-SHA256SUMS、构建提交号、实际 Authenticode 状态以及安装验收报告。
+SHA256SUMS、构建提交号、实际 Authenticode 状态以及安装验收报告。SHA256SUMS 中的
+`installed/brows-desktop.exe` 是安装器实际落盘的程序摘要，单文件应用有独立记录。
 CI 不自动发布 GitHub Release，不自动升级用户机器上的应用。
 
 仓库没有配置产品代码签名证书或更新签名密钥。当前包应作为**未签名内测包**处理；

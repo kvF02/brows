@@ -46,7 +46,11 @@ jobs:
         shell: pwsh
         run: |
           $files = @(Get-Item target/release/brows-desktop.exe) + @(Get-ChildItem target/release/bundle/nsis/*-setup.exe)
-          $files | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" } | Set-Content target/SHA256SUMS.txt
+          $hashes = @($files | ForEach-Object { "$((Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower())  $($_.Name)" })
+          $acceptance = Get-Content target/beta-package-acceptance.json -Raw | ConvertFrom-Json
+          if (-not $acceptance.assertionsPassed -or $acceptance.installedApplicationSha256 -notmatch '^[a-f0-9]{64}$') { throw 'Missing installed application hash' }
+          $hashes += "$($acceptance.installedApplicationSha256)  installed/brows-desktop.exe"
+          $hashes | Set-Content target/SHA256SUMS.txt
           $signature = Get-AuthenticodeSignature target/release/brows-desktop.exe
           @{ commit = '${{ github.sha }}'; channel = 'internal-beta'; authenticode = "$($signature.Status)"; autoUpdate = $false } | ConvertTo-Json | Set-Content target/beta-build.json
       - uses: actions/cache/save@v4
@@ -84,12 +88,17 @@ jobs:
       - name: Install the exact packaged build on the UI runner
         shell: pwsh
         run: |
-          $line = Get-Content target/SHA256SUMS.txt | Where-Object { $_ -match '  brows-desktop.exe$' }
-          if (@($line).Count -ne 1) { throw 'Missing application hash' }
-          $expected = ($line -split '  ')[0]
+          $hashes = Get-Content target/SHA256SUMS.txt
+          $line = @($hashes | Where-Object { $_.EndsWith('  installed/brows-desktop.exe', [StringComparison]::Ordinal) })
+          if ($line.Count -ne 1) { throw 'Missing installed application hash' }
+          $expected = ($line[0] -split ' ')[0]
           $installers = @(Get-ChildItem target/release/bundle/nsis/*-setup.exe)
           if ($installers.Count -ne 1) { throw 'Expected one NSIS installer' }
           $installer = $installers[0]
+          $installerLine = @($hashes | Where-Object { $_.EndsWith("  $($installer.Name)", [StringComparison]::Ordinal) })
+          if ($installerLine.Count -ne 1 -or (Get-FileHash -LiteralPath $installer.FullName -Algorithm SHA256).Hash -ine ($installerLine[0] -split ' ')[0]) {
+            throw 'Installer artifact hash mismatch'
+          }
           $installRoot = Join-Path $env:GITHUB_WORKSPACE 'target/installed'
           $setup = Start-Process -FilePath $installer.FullName -ArgumentList @('/S', "/D=$installRoot") -PassThru
           if (-not $setup.WaitForExit(120000)) { $setup.Kill(); throw 'UI fixture installation timed out' }
