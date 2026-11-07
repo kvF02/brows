@@ -269,10 +269,15 @@ try {
   checks.push("installed-ui-ten-running-and-one-queued");
 
   stage = "installed-ui-host-crash";
-  const { stdout } = await promisify(execFile)("pwsh.exe", [
-    "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
-    path.join(import.meta.dirname, "windows-installed-ui-crash.ps1"), "-Application", app,
-  ], { timeout: 55000, windowsHide: true });
+  let stdout;
+  try {
+    ({ stdout } = await promisify(execFile)("pwsh.exe", [
+      "-NoLogo", "-NoProfile", "-NonInteractive", "-File",
+      path.join(import.meta.dirname, "windows-installed-ui-crash.ps1"), "-Application", app,
+    ], { timeout: 55000, windowsHide: true }));
+  } catch (error) {
+    throw new Error("Installed app process audit: " + String(error.stderr || error.code).trim().slice(-220));
+  }
   crashRecovery = JSON.parse(stdout);
   assert.equal(crashRecovery.browserRoots, 10);
   assert.ok(crashRecovery.observedProcessesReclaimed > 10);

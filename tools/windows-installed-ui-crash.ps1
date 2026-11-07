@@ -1,5 +1,6 @@
 param([Parameter(Mandatory)][string]$Application)
 $ErrorActionPreference = 'Stop'
+trap { [Console]::Error.WriteLine($_.Exception.Message); exit 1 }
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or -not $IsWindows) {
     throw 'The installed UI crash is restricted to a hosted Windows fixture'
 }
@@ -12,9 +13,8 @@ $sessionId = [Diagnostics.Process]::GetCurrentProcess().SessionId
 $owners = @($snapshot | Where-Object { $_.ExecutablePath -ieq $app -and $_.SessionId -eq $sessionId })
 if ($owners.Count -ne 1) { throw "Expected one installed Brows process, found $($owners.Count)" }
 $owner = $owners[0]
-$edge = Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'
 $roots = @($snapshot | Where-Object {
-    $_.ParentProcessId -eq $owner.ProcessId -and $_.ExecutablePath -ieq $edge -and
+    $_.ParentProcessId -eq $owner.ProcessId -and $_.Name -ieq 'msedge.exe' -and
     $_.CommandLine -and $_.CommandLine.Contains('\local-brows-desktop\profiles\', [StringComparison]::OrdinalIgnoreCase)
 })
 if ($roots.Count -ne 10) { throw "Expected ten browser roots owned by the installed app, found $($roots.Count)" }
