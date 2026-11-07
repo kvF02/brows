@@ -252,6 +252,7 @@ dependencies = [
 name = "brows-adapters-diagnostic"
 version = "0.1.0"
 dependencies = [
+ "brows-adapters-proxy",
  "brows-application",
  "brows-domain",
 ]

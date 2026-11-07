@@ -6,5 +6,6 @@ license.workspace = true
 description = "Explicit local and network diagnostic adapter for Brows"
 
 [dependencies]
+brows-adapters-proxy = { path = "../adapters-proxy" }
 brows-application = { path = "../application" }
 brows-domain = { path = "../domain" }

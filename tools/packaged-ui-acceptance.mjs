@@ -225,7 +225,7 @@ try {
   await click(await button("保存代理"));
   await notice("代理已保存");
   await testProxy();
-  await notice(fixtureExitIp);
+  await waitFor("authenticated fixture exit", () => text(".data-table tbody tr"), result => result.includes(fixtureExitIp));
   assert.equal(proxyProof.authenticatedConnects, 1);
   assert.equal(proxyProof.authenticatedExitRequests, 1);
   rejectConnect = true;
@@ -288,7 +288,7 @@ try {
   await nav("代理");
   const beforeRetest = proxyProof.authenticatedExitRequests;
   await testProxy();
-  await notice(fixtureExitIp);
+  await waitFor("authenticated fixture exit after reopening", () => text(".data-table tbody tr"), result => result.includes(fixtureExitIp));
   assert.ok(proxyProof.authenticatedExitRequests > beforeRetest, "reopen must perform a new authenticated request");
   checks.push("eleven-profiles-survive-reopen-and-proxy-credential-reused");
   console.log("Installed app crash reclaimed " + crashRecovery.observedProcessesReclaimed + " observed Edge processes across ten roots");
