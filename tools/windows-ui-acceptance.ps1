@@ -8,8 +8,6 @@ $app = (Resolve-Path -LiteralPath $Application).Path
 $installRoot = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE 'target/installed'))
 if ([IO.Path]::GetDirectoryName($app) -ine $installRoot -or [IO.Path]::GetFileName($app) -ine 'brows-desktop.exe') { throw 'Application must be the CI-installed build' }
 $probe = $null
-$tlsCertificates = @()
-$tlsRootThumbprint = $null
 $tlsDirectory = $null
 $probeTrace = Join-Path $env:RUNNER_TEMP 'brows-ui-runtime-discovery.stderr.txt'
 $stage = 'runtime-window-startup'
@@ -63,23 +61,22 @@ try {
     $stage = 'local-tls-fixture'
     $tlsDirectory = Join-Path $env:RUNNER_TEMP ('brows-ui-tls-' + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $tlsDirectory | Out-Null
-    # A short-lived CA belongs only to this disposable hosted CI user. Product
-    # code always uses normal system trust and has no test trust override.
-    $root = New-SelfSignedCertificate -Type Custom -Subject 'CN=Brows disposable UI test root' -CertStoreLocation Cert:\CurrentUser\My -KeyAlgorithm RSA -KeyLength 2048 -HashAlgorithm SHA256 -KeyExportPolicy Exportable -KeyUsage CertSign, CRLSign -TextExtension @('2.5.29.19={critical}{text}ca=1&pathlength=0') -NotAfter (Get-Date).AddHours(2)
-    $tlsCertificates += $root
-    $tlsRootThumbprint = $root.Thumbprint
-    $valid = New-SelfSignedCertificate -Type SSLServerAuthentication -DnsName 'checkip.amazonaws.com' -Signer $root -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy Exportable -NotAfter (Get-Date).AddHours(1)
-    $tlsCertificates += $valid
-    $untrusted = New-SelfSignedCertificate -Type SSLServerAuthentication -DnsName 'checkip.amazonaws.com' -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy Exportable -NotAfter (Get-Date).AddHours(1)
-    $tlsCertificates += $untrusted
-    $password = ConvertTo-SecureString 'brows-ci-fixture-only' -AsPlainText -Force
+    $tlsOutput = Join-Path $tlsDirectory 'setup.stdout.txt'
+    $tlsError = Join-Path $tlsDirectory 'setup.stderr.txt'
+    $tlsSetup = Start-Process -FilePath (Get-Command pwsh.exe).Source -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', "$PSScriptRoot/windows-ui-tls-fixture.ps1", '-Directory', $tlsDirectory) -NoNewWindow -PassThru -RedirectStandardOutput $tlsOutput -RedirectStandardError $tlsError
+    if (-not $tlsSetup.WaitForExit(45000)) {
+        $tlsSetup.Kill($true)
+        $tlsSetup.WaitForExit()
+        Get-Content -LiteralPath $tlsOutput -Tail 8 | Write-Output
+        throw 'CI TLS certificate setup exceeded 45 seconds'
+    }
+    Get-Content -LiteralPath $tlsOutput -Tail 8 | Write-Output
+    if ($tlsSetup.ExitCode -ne 0) {
+        Get-Content -LiteralPath $tlsError -Tail 8 | Write-Output
+        throw 'CI TLS certificate setup failed'
+    }
     $env:BROWS_UI_TLS_PFX = Join-Path $tlsDirectory 'valid.pfx'
     $env:BROWS_UI_UNTRUSTED_TLS_PFX = Join-Path $tlsDirectory 'untrusted.pfx'
-    Export-PfxCertificate -Cert $valid -FilePath $env:BROWS_UI_TLS_PFX -Password $password | Out-Null
-    Export-PfxCertificate -Cert $untrusted -FilePath $env:BROWS_UI_UNTRUSTED_TLS_PFX -Password $password | Out-Null
-    $rootFile = Join-Path $tlsDirectory 'root.cer'
-    Export-Certificate -Cert $root -FilePath $rootFile | Out-Null
-    Import-Certificate -FilePath $rootFile -CertStoreLocation Cert:\CurrentUser\Root | Out-Null
     $stage = 'webdriver'
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
     if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -140,7 +137,21 @@ finally { [IO.File]::WriteAllText($(Quote-Literal $done), [string]`$code) }
     if ($probe -and -not $probe.HasExited) { Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue }
     # Only this CI build is owned. Never stop browsers by process image name.
     Get-CimInstance Win32_Process -Filter "Name='brows-desktop.exe'" | Where-Object { $_.ExecutablePath -ieq $app } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-    if ($tlsRootThumbprint) { Remove-Item -LiteralPath "Cert:\CurrentUser\Root\$tlsRootThumbprint" -ErrorAction SilentlyContinue }
-    foreach ($certificate in $tlsCertificates) { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$($certificate.Thumbprint)" -DeleteKey -ErrorAction SilentlyContinue }
-    if ($tlsDirectory) { Remove-Item -LiteralPath $tlsDirectory -Recurse -Force -ErrorAction SilentlyContinue }
+    if ($tlsDirectory) {
+        $manifestPath = Join-Path $tlsDirectory 'manifest.json'
+        if (Test-Path -LiteralPath $manifestPath) {
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+            $expectedSubject = 'CN=Brows disposable UI test root ' + [IO.Path]::GetFileName($tlsDirectory)
+            if ($manifest.subject -eq $expectedSubject) {
+                if ($manifest.root -match '^[A-Fa-f0-9]{40}$') {
+                    $rootPath = "Cert:\LocalMachine\Root\$($manifest.root)"
+                    if ((Get-Item -LiteralPath $rootPath -ErrorAction SilentlyContinue).Subject -eq $expectedSubject) { Remove-Item -LiteralPath $rootPath -ErrorAction SilentlyContinue }
+                }
+                foreach ($thumbprint in $manifest.my) {
+                    if ($thumbprint -match '^[A-Fa-f0-9]{40}$') { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -DeleteKey -ErrorAction SilentlyContinue }
+                }
+            }
+        }
+        Remove-Item -LiteralPath $tlsDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
