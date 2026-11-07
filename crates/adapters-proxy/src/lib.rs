@@ -2,6 +2,8 @@
 #![deny(missing_debug_implementations)]
 
 mod broker;
+#[cfg(test)]
+mod tls_tests;
 
 use broker::BrokerHandle;
 use brows_application::{
@@ -9,6 +11,7 @@ use brows_application::{
     ProxyLease, ProxyRepository, ProxyRuntime, SecretStore,
 };
 use brows_domain::{ProxyId, ProxyLaunchBinding, ProxySpec, SessionId};
+use native_tls::{Protocol, TlsConnector};
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
@@ -20,7 +23,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-pub const PROXY_TEST_ENDPOINT: &str = "http://checkip.amazonaws.com/";
+pub const PROXY_TEST_ENDPOINT: &str = "https://checkip.amazonaws.com/";
 const PROXY_TEST_HOST: &str = "checkip.amazonaws.com";
 
 #[derive(Debug)]
@@ -117,40 +120,49 @@ impl ProxyConnectivityTester for TcpProxyConnectivityTester {
         proxy: &ProxySpec,
         credential: Option<&brows_application::SecretValue>,
     ) -> PortResult<ProxyConnectivityCheck> {
-        proxy
-            .validate()
-            .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
-        if proxy.scheme == brows_domain::ProxyScheme::Https {
-            return Err(PortError::new(
-                PortErrorKind::CapabilityUnsupported,
-                "TLS-encrypted HTTPS upstream proxies are not enabled yet",
-            ));
-        }
-        let timeout = Duration::from_millis(proxy.connect_timeout_ms.into());
-        let start = Instant::now();
-        let mut broker = BrokerHandle::start(proxy.clone(), credential.cloned())?;
-        let result = test_https_tunnel(broker.port(), timeout).map(|()| {
-            match test_exit_ip_through_broker(broker.port(), timeout) {
-                Ok(exit_ip) => ProxyConnectivityCheck {
-                    reachable: true,
-                    latency_ms: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-                    detail: "Proxy authentication, HTTPS tunnel and exit IP request succeeded"
-                        .to_owned(),
-                    exit_ip: Some(exit_ip),
-                    exit_ip_checked: true,
-                },
-                Err(_) => ProxyConnectivityCheck {
-                    reachable: true,
-                    latency_ms: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
-                    detail: "Proxy authentication and HTTPS tunnel succeeded; the optional HTTP exit IP endpoint was unavailable".to_owned(),
-                    exit_ip: None,
-                    exit_ip_checked: false,
-                },
-            }
-        });
-        broker.stop();
-        result
+        let connector = TlsConnector::builder()
+            .min_protocol_version(Some(Protocol::Tlsv12))
+            .build()
+            .map_err(|_| {
+                PortError::new(
+                    PortErrorKind::Unavailable,
+                    "system TLS initialization failed",
+                )
+            })?;
+        test_proxy_with_connector(proxy, credential, &connector)
     }
+}
+
+fn test_proxy_with_connector(
+    proxy: &ProxySpec,
+    credential: Option<&brows_application::SecretValue>,
+    connector: &TlsConnector,
+) -> PortResult<ProxyConnectivityCheck> {
+    proxy
+        .validate()
+        .map_err(|error| PortError::new(PortErrorKind::InvalidData, error.to_string()))?;
+    if proxy.scheme == brows_domain::ProxyScheme::Https {
+        return Err(PortError::new(
+            PortErrorKind::CapabilityUnsupported,
+            "TLS-encrypted HTTPS upstream proxies are not enabled yet",
+        ));
+    }
+    let timeout = Duration::from_millis(proxy.connect_timeout_ms.into());
+    let start = Instant::now();
+    let mut broker = BrokerHandle::start(proxy.clone(), credential.cloned())?;
+    let result = test_https_exit_ip(broker.port(), timeout, connector).map(|exit_ip| {
+        ProxyConnectivityCheck {
+            reachable: true,
+            latency_ms: start.elapsed().as_millis().try_into().unwrap_or(u64::MAX),
+            detail:
+                "Proxy authentication, verified TLS certificate and HTTPS exit IP request succeeded"
+                    .to_owned(),
+            exit_ip: Some(exit_ip),
+            exit_ip_checked: true,
+        }
+    });
+    broker.stop();
+    result
 }
 
 fn connect_to_broker(port: u16, timeout: Duration) -> PortResult<TcpStream> {
@@ -170,28 +182,52 @@ fn connect_to_broker(port: u16, timeout: Duration) -> PortResult<TcpStream> {
     Ok(stream)
 }
 
-fn test_https_tunnel(port: u16, timeout: Duration) -> PortResult<()> {
+fn test_https_exit_ip(
+    port: u16,
+    timeout: Duration,
+    connector: &TlsConnector,
+) -> PortResult<String> {
     let mut stream = connect_to_broker(port, timeout)?;
     stream
-        .write_all(b"CONNECT www.google.com:443 HTTP/1.1\r\nHost: www.google.com:443\r\nConnection: close\r\n\r\n")
+        .write_all(b"CONNECT checkip.amazonaws.com:443 HTTP/1.1\r\nHost: checkip.amazonaws.com:443\r\n\r\n")
         .map_err(|_| PortError::new(PortErrorKind::ProxyConnect, "HTTPS tunnel test request failed"))?;
     let response = read_response_head(&mut stream)?;
-    if response.starts_with("HTTP/1.1 407") || response.starts_with("HTTP/1.0 407") {
+    let mut status = response
+        .lines()
+        .next()
+        .unwrap_or_default()
+        .split_ascii_whitespace();
+    let version = status.next();
+    let code = status.next();
+    if code == Some("407") {
         return Err(PortError::new(
             PortErrorKind::ProxyAuth,
             "proxy authentication failed",
         ));
     }
-    if !response.starts_with("HTTP/1.1 200") && !response.starts_with("HTTP/1.0 200") {
+    if !matches!(version, Some("HTTP/1.0" | "HTTP/1.1")) || code != Some("200") {
         return Err(PortError::new(
             PortErrorKind::ProxyConnect,
             "proxy HTTPS tunnel failed",
         ));
     }
-    Ok(())
+    // The system trust store and hostname checks stay enabled. CONNECT alone
+    // cannot prove that the proxy delivered a trustworthy HTTPS connection.
+    let mut tls = connector.connect(PROXY_TEST_HOST, stream).map_err(|_| {
+        PortError::new(
+            PortErrorKind::ProxyConnect,
+            "proxy TLS certificate verification or handshake failed",
+        )
+    })?;
+    write!(
+        tls,
+        "GET / HTTP/1.1\r\nHost: {PROXY_TEST_HOST}\r\nConnection: close\r\nUser-Agent: Brows-Proxy-Test/2\r\n\r\n"
+    )
+    .map_err(|_| PortError::new(PortErrorKind::ProxyConnect, "HTTPS exit IP request failed"))?;
+    read_exit_ip_response(tls)
 }
 
-fn read_response_head(stream: &mut TcpStream) -> PortResult<String> {
+fn read_response_head(stream: &mut impl Read) -> PortResult<String> {
     let mut bytes = Vec::new();
     let mut byte = [0_u8; 1];
     while bytes.len() < 16 * 1024 {
@@ -214,30 +250,12 @@ fn read_response_head(stream: &mut TcpStream) -> PortResult<String> {
     ))
 }
 
-fn test_exit_ip_through_broker(port: u16, timeout: Duration) -> PortResult<String> {
-    let mut stream = connect_to_broker(port, timeout)?;
-    write!(
-        stream,
-        "GET {PROXY_TEST_ENDPOINT} HTTP/1.1\r\nHost: {PROXY_TEST_HOST}\r\nConnection: close\r\nUser-Agent: Brows-Proxy-Test/1\r\n\r\n"
-    )
-    .map_err(|_| PortError::new(PortErrorKind::ProxyConnect, "proxy test request failed"))?;
-    read_exit_ip_response(stream)
-}
-
-/// Decode the small plaintext IP response used by the explicit exit checks.
-pub fn read_exit_ip_response(reader: impl Read) -> PortResult<String> {
-    const MAX_RESPONSE: u64 = 16 * 1024;
-    let mut response = String::new();
-    reader
-        .take(MAX_RESPONSE + 1)
-        .read_to_string(&mut response)
-        .map_err(|_| PortError::new(PortErrorKind::ProxyConnect, "proxy test response failed"))?;
+/// Decode a bounded IP response, finishing when HTTP framing is complete.
+/// A framed response does not need a TCP EOF or a TLS close-notify to be usable.
+pub fn read_exit_ip_response(mut reader: impl Read) -> PortResult<String> {
+    let head = read_response_head(&mut reader)?;
     let invalid = || PortError::new(PortErrorKind::InvalidData, "exit IP response was invalid");
-    if response.len() as u64 > MAX_RESPONSE {
-        return Err(invalid());
-    }
-    let (head, body) = response.split_once("\r\n\r\n").ok_or_else(invalid)?;
-    let mut headers = head.split("\r\n");
+    let mut headers = head.trim_end_matches("\r\n").split("\r\n");
     let mut status = headers.next().ok_or_else(invalid)?.split_ascii_whitespace();
     match (status.next(), status.next()) {
         (Some("HTTP/1.0" | "HTTP/1.1"), Some("200")) => {}
@@ -264,47 +282,89 @@ pub fn read_exit_ip_response(reader: impl Read) -> PortResult<String> {
             }
             chunked = true;
         } else if name.eq_ignore_ascii_case("content-length") {
-            if length.is_some() {
+            let digits = value.trim();
+            if length.is_some() || digits.is_empty() || !digits.bytes().all(|c| c.is_ascii_digit())
+            {
                 return Err(invalid());
             }
-            length = Some(value.trim().parse::<usize>().map_err(|_| invalid())?);
+            length = Some(digits.parse::<usize>().map_err(|_| invalid())?);
         }
     }
-    let decoded;
-    let text = if chunked {
+    let body = if chunked {
         if length.is_some() {
             return Err(invalid());
         }
-        decoded = decode_exit_chunks(body).ok_or_else(invalid)?;
-        decoded.as_str()
-    } else {
-        if length.is_some_and(|expected| expected != body.len()) {
+        read_exit_chunks(&mut reader, 16 * 1024 - head.len())?
+    } else if let Some(length) = length {
+        if length > 64 || length > 16 * 1024 - head.len() {
             return Err(invalid());
         }
-        body
+        let mut bytes = vec![0; length];
+        reader.read_exact(&mut bytes).map_err(|_| invalid())?;
+        String::from_utf8(bytes).map_err(|_| invalid())?
+    } else {
+        let mut bytes = Vec::new();
+        reader.take(65).read_to_end(&mut bytes).map_err(|_| {
+            PortError::new(PortErrorKind::ProxyConnect, "proxy test response failed")
+        })?;
+        if bytes.len() > 64 {
+            return Err(invalid());
+        }
+        String::from_utf8(bytes).map_err(|_| invalid())?
     };
-    let ip: IpAddr = text.trim().parse().map_err(|_| invalid())?;
+    let ip: IpAddr = body.trim().parse().map_err(|_| invalid())?;
     Ok(ip.to_string())
 }
 
-fn decode_exit_chunks(mut encoded: &str) -> Option<String> {
-    let mut result = String::new();
+fn read_exit_chunks(reader: &mut impl Read, mut budget: usize) -> PortResult<String> {
+    let invalid = || PortError::new(PortErrorKind::InvalidData, "exit IP chunks were invalid");
+    fn line(reader: &mut impl Read, budget: &mut usize) -> PortResult<String> {
+        let invalid = || PortError::new(PortErrorKind::InvalidData, "exit IP chunks were invalid");
+        let mut bytes = Vec::new();
+        while *budget > 0 {
+            let mut byte = [0];
+            reader.read_exact(&mut byte).map_err(|_| invalid())?;
+            bytes.push(byte[0]);
+            *budget -= 1;
+            if bytes.ends_with(b"\r\n") {
+                return String::from_utf8(bytes).map_err(|_| invalid());
+            }
+        }
+        Err(invalid())
+    }
+    let mut body = Vec::new();
     loop {
-        let (size, data) = encoded.split_once("\r\n")?;
-        let digits = size.split(';').next()?;
-        let count = usize::from_str_radix(digits, 16).ok()?;
+        let size = line(reader, &mut budget)?;
+        let digits = size
+            .trim_end_matches("\r\n")
+            .split(';')
+            .next()
+            .ok_or_else(invalid)?;
+        if digits.is_empty() || !digits.bytes().all(|c| c.is_ascii_hexdigit()) {
+            return Err(invalid());
+        }
+        let count = usize::from_str_radix(digits, 16).map_err(|_| invalid())?;
         if count == 0 {
-            let valid_end = data == "\r\n"
-                || data.strip_suffix("\r\n\r\n").is_some_and(|trailers| {
-                    trailers.split("\r\n").all(|header| header.contains(':'))
-                });
-            return valid_end.then_some(result);
+            loop {
+                let trailer = line(reader, &mut budget)?;
+                if trailer == "\r\n" {
+                    return String::from_utf8(body).map_err(|_| invalid());
+                }
+                if !trailer.contains(':') {
+                    return Err(invalid());
+                }
+            }
         }
-        if count > 64 - result.len() {
-            return None;
+        if count > 64 - body.len() || count + 2 > budget {
+            return Err(invalid());
         }
-        result.push_str(data.get(..count)?);
-        encoded = data.get(count..)?.strip_prefix("\r\n")?;
+        let mut bytes = vec![0; count + 2];
+        reader.read_exact(&mut bytes).map_err(|_| invalid())?;
+        budget -= bytes.len();
+        if !bytes.ends_with(b"\r\n") {
+            return Err(invalid());
+        }
+        body.extend_from_slice(&bytes[..count]);
     }
 }
 
@@ -330,8 +390,32 @@ mod exit_response_tests {
             "HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n203.0.113.9",
             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nb\r\n203.0.113.9\r\n",
             "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 11\r\n\r\nb\r\n203.0.113.9\r\n0\r\n\r\n",
+            "HTTP/1.1 200 OK\r\nContent-Length: 11\r\nContent-Length: 11\r\n\r\n203.0.113.9",
+            "HTTP/1.1 200 OK\r\nContent-Length: +11\r\n\r\n203.0.113.9",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n+1\r\n2\r\n0\r\n\r\n",
+            "HTTP/1.1 2000 OK\r\nContent-Length: 11\r\n\r\n203.0.113.9",
         ] {
             assert!(read_exit_ip_response(response.as_bytes()).is_err());
+        }
+    }
+
+    #[test]
+    fn framed_exit_response_finishes_without_eof() {
+        struct NoEof<'a>(&'a [u8]);
+        impl Read for NoEof<'_> {
+            fn read(&mut self, buffer: &mut [u8]) -> std::io::Result<usize> {
+                assert!(
+                    !self.0.is_empty(),
+                    "must not read beyond the complete HTTP response"
+                );
+                self.0.read(buffer)
+            }
+        }
+        for response in [
+            "HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n203.0.113.9\n",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nb\r\n203.0.113.9\r\n0\r\nX-Test: bounded\r\n\r\n",
+        ] {
+            assert_eq!(read_exit_ip_response(NoEof(response.as_bytes())).unwrap(), "203.0.113.9");
         }
     }
 }

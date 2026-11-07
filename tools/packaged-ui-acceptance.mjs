@@ -3,8 +3,9 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import net from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -38,6 +39,8 @@ const checks = [];
 let session;
 let failure;
 let proxy;
+let proxyTls;
+const tlsSockets = new Set();
 let crashRecovery;
 let stage = "driver-start";
 async function request(method, route, body, timeout = 20000) {
@@ -118,23 +121,46 @@ const fixtureProxyName = "CI authenticated proxy";
 const fixtureProxyUser = "brows-fixture";
 const fixtureProxyPassword = "fixture-only-proxy-password";
 const fixtureExitIp = "203.0.113.9";
-const proxyProof = { authenticatedConnects: 0, authenticatedExitRequests: 0, rejectedConnects: 0 };
+const proxyProof = { authenticatedConnects: 0, authenticatedExitRequests: 0, rejectedConnects: 0, rejectedTlsHandshakes: 0 };
 let rejectConnect = false;
+async function startFixtureTls(pfxFile) {
+  for (const socket of tlsSockets) socket.destroy();
+  if (proxyTls) await new Promise(resolve => proxyTls.close(resolve));
+  proxyTls = createHttpsServer({ pfx: await readFile(pfxFile), passphrase: "brows-ci-fixture-only" }, (req, res) => {
+    assert.equal(req.method, "GET");
+    assert.equal(req.url, "/");
+    assert.equal(req.headers.host, "checkip.amazonaws.com");
+    assert.equal(req.headers["proxy-authorization"], undefined);
+    proxyProof.authenticatedExitRequests++;
+    res.writeHead(200, { "Content-Type": "text/plain", Connection: "close" }).end(fixtureExitIp + "\n");
+  });
+  proxyTls.on("connection", socket => {
+    tlsSockets.add(socket);
+    socket.on("close", () => tlsSockets.delete(socket));
+  });
+  proxyTls.on("tlsClientError", () => proxyProof.rejectedTlsHandshakes++);
+  proxyTls.listen(0, "127.0.0.1");
+  await once(proxyTls, "listening");
+}
 function createFixtureProxy() {
   const expected = "Basic " + Buffer.from(fixtureProxyUser + ":" + fixtureProxyPassword).toString("base64");
   const server = createServer((req, res) => {
-    if (req.headers["proxy-authorization"] === expected && req.method === "GET" && req.url === "http://checkip.amazonaws.com/") {
-      proxyProof.authenticatedExitRequests++;
-      res.writeHead(200, { "Content-Type": "text/plain", Connection: "close" }).end(fixtureExitIp + "\n");
-    } else {
-      res.writeHead(407, { Connection: "close" }).end();
-    }
+    res.writeHead(407, { Connection: "close" }).end();
   });
-  server.on("connect", (req, socket) => {
-    if (req.url === "www.google.com:443" && req.headers["proxy-authorization"] === expected) {
+  server.on("connect", (req, socket, head) => {
+    if (req.url === "checkip.amazonaws.com:443" && req.headers["proxy-authorization"] === expected) {
       if (!rejectConnect) {
         proxyProof.authenticatedConnects++;
-        socket.end("HTTP/1.1 200 Connection Established\r\n\r\n");
+        const upstream = net.connect(proxyTls.address().port, "127.0.0.1", () => {
+          socket.write("HTTP/1.1 200 Connection Established\r\n\r\n");
+          if (head.length) upstream.write(head);
+          socket.pipe(upstream);
+          upstream.pipe(socket);
+        });
+        socket.on("error", () => upstream.destroy());
+        upstream.on("error", () => socket.destroy());
+        socket.on("close", () => upstream.destroy());
+        upstream.on("close", () => socket.destroy());
         return;
       }
       proxyProof.rejectedConnects++;
@@ -216,6 +242,7 @@ try {
   }), elements => elements.length === 2);
   checks.push("encrypted-export-and-restore-with-new-profile-id", "profile-metadata-survives-ui-reload");
   stage = "local-authenticated-proxy";
+  await startFixtureTls(process.env.BROWS_UI_TLS_PFX);
   proxy = createFixtureProxy();
   proxy.listen(0, "127.0.0.1");
   await once(proxy, "listening");
@@ -232,13 +259,20 @@ try {
   await waitFor("authenticated fixture exit", () => text(".data-table tbody tr"), result => result.includes(fixtureExitIp));
   assert.equal(proxyProof.authenticatedConnects, 1);
   assert.equal(proxyProof.authenticatedExitRequests, 1);
+  await startFixtureTls(process.env.BROWS_UI_UNTRUSTED_TLS_PFX);
+  await testProxy();
+  await waitFor("untrusted certificate surfaced", () => text(".data-table tbody tr"), result => result.includes("认证、证书或出口失败") && !result.includes(fixtureExitIp));
+  assert.equal(proxyProof.authenticatedConnects, 2);
+  assert.equal(proxyProof.authenticatedExitRequests, 1, "untrusted TLS must not send an HTTP exit request");
+  assert.ok(proxyProof.rejectedTlsHandshakes >= 1);
+  await startFixtureTls(process.env.BROWS_UI_TLS_PFX);
   rejectConnect = true;
   await testProxy();
-  await waitFor("proxy rejection surfaced", () => text(".data-table tbody tr"), result => result.includes("认证或出口失败"));
+  await waitFor("proxy rejection surfaced", () => text(".data-table tbody tr"), result => result.includes("认证、证书或出口失败"));
   assert.equal(proxyProof.rejectedConnects, 1);
   assert.equal(proxyProof.authenticatedExitRequests, 1, "rejected CONNECT must not run an exit request");
   rejectConnect = false;
-  checks.push("local-proxy-authentication-and-rejection-through-ui");
+  checks.push("local-proxy-authentication-verified-tls-and-rejection-through-ui");
 
   stage = "installed-ui-ten-open";
   await nav("设置");
@@ -317,6 +351,8 @@ try {
     try { await request("DELETE", "/session/" + session, undefined, 10000); } catch {}
   }
   proxy?.close();
+  for (const socket of tlsSockets) socket.destroy();
+  proxyTls?.close();
   driver.kill();
   await writeFile(reportPath, JSON.stringify({
     schemaVersion: 1, assertionsPassed: !failure, complete: false, checks,
