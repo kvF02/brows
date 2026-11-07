@@ -40,9 +40,10 @@ WebDriver 只用于 Windows CI，匹配实际 WebView2 的构建版本并验证 
 
 ## 长稳和故障恢复验收
 
-`Windows soak and recovery` 对相关同仓 PR 默认执行 1 分钟验收。维护者可在 Actions
-手动选择 1、30、120 或 240 分钟，也可为同仓 PR 标题加上 `[soak-2h] ` 前缀，
-在当前提交触发 120 分钟验收。
+`Windows soak and recovery` 对相关同仓 PR 默认分别执行 1 分钟的 SystemNative 和
+SeedableNoise 验收。维护者可在 Actions 手动选择模式和 1、30、120 或 240 分钟。
+同仓 PR 标题可用 `[soak-2h] ` 触发 SystemNative 120 分钟验收，或用
+`[seeded-soak-30m] ` 触发 SeedableNoise 30 分钟验收。
 
 验收在 Windows 托管 runner 上用真实 Edge 启动十个 SystemNative 环境，同时保留一个
 排队环境。每个页面持续向本地测试服务发心跳。稳态结束后强制终止一个浏览器根进程，
@@ -55,8 +56,13 @@ WebDriver 只用于 Windows CI，匹配实际 WebView2 的构建版本并验证 
 
 `windows-soak-report.json` 记录实际持续时间、Edge 和系统版本、故障恢复结果与每分钟
 进程数、工作集和存活进程累计 CPU 时间。资源数据用于比较运行情况，当前没有资源预算门槛。
-这一验收范围是本地页面和生产运行时。完整安装包 UI 长稳、SeedableNoise 十开、真实网站
-会话数据恢复及断电恢复分别验收。
+SeedableNoise 验收用通过能力探针的同版 Edge 启动十个配置一致、种子各异的环境。
+比较本地页面和 Dedicated Worker 首段脚本中的设备字段和 Canvas，验证十组 Canvas 各异，
+且持续负载期间重复读取保持稳定。正常关闭后重开原 SQLite 数据库，重新启动十个环境并
+逐环境复测同一组信号。报告为 `windows-seeded-soak-report.json`。
+
+两种验收都使用生产运行时和本地页面。完整安装包 UI 长稳、真实网站会话数据恢复、
+SeedableNoise 故障恢复及断电恢复分别验收。
 
 ## 设置与退出
 
@@ -83,5 +89,5 @@ WebDriver 只用于 Windows CI，匹配实际 WebView2 的构建版本并验证 
 ## 尚需独立完成
 
 - 产品签名证书、签名更新源和防降级发布流程。
-- 完整桌面 UI 长稳、SeedableNoise 十开和断电故障恢复验收。
+- 完整桌面 UI 长稳、SeedableNoise 故障恢复和断电故障恢复验收。
 - 公网 DNS/ICE 服务部署和互联网环境实测。

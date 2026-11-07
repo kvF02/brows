@@ -1,15 +1,18 @@
 //! Production composition exercised by the Windows soak supervisor.
 use super::{draft, start_capacity_profiles, started, AppState, ControlFixture};
 use brows_contracts::{
-    ProfileIdRequest, ProfileListRequest, ProfileUpdateRequest, SessionLaunchRequest,
+    ProfileIdDto, ProfileIdRequest, ProfileListRequest, ProfileUpdateRequest, SessionLaunchRequest,
     SessionStateDto,
 };
+use brows_domain::SessionId;
 use std::{
     env, fs,
     path::{Path, PathBuf},
     thread,
     time::{Duration, Instant},
 };
+
+mod seeded;
 
 fn await_condition(seconds: u64, description: &str, mut condition: impl FnMut() -> bool) {
     let deadline = Instant::now() + Duration::from_secs(seconds);
@@ -21,49 +24,29 @@ fn await_condition(seconds: u64, description: &str, mut condition: impl FnMut() 
 
 fn page_hits(fixture: &ControlFixture, index: usize) -> u64 {
     let key = format!("/soak/{index}/heartbeat");
-    fixture
-        .proofs
-        .lock()
-        .unwrap()
+    let changed = format!("/soak/{index}/canvas-changed");
+    let proofs = fixture.proofs.lock().unwrap();
+    assert!(
+        !proofs.iter().any(|(path, _, _)| path == &changed),
+        "profile {index} returned different Canvas pixels during the run"
+    );
+    proofs
         .iter()
         .find(|(path, _, _)| path == &key)
         .and_then(|(_, _, count)| count.as_u64())
         .unwrap_or(0)
 }
 
-fn exercise(root: &Path, duration: Duration) {
-    let data = root.join("data");
-    fs::create_dir(&data).expect("soak profile directory must be fresh");
-    let fixture = ControlFixture::start(false);
-    let state = AppState::production(data.clone()).unwrap();
-    let (sessions, profiles) =
-        start_capacity_profiles(&state, |index| format!("{}/soak/{index}", fixture.url));
-    let edge = state
-        .browsers
-        .list_builds()
-        .unwrap()
-        .into_iter()
-        .find(|build| build.provider == "Microsoft Edge")
-        .unwrap();
-    let ids: Vec<brows_domain::SessionId> = sessions
-        .iter()
-        .map(|session| session.id.clone().try_into().unwrap())
-        .collect();
-    await_condition(60, "first heartbeat from every profile", || {
-        (0..10).all(|index| page_hits(&fixture, index) > 0)
-    });
-    let initial_hits: [u64; 10] = std::array::from_fn(|index| page_hits(&fixture, index));
+fn verify_steady_load(
+    state: &AppState,
+    fixture: &ControlFixture,
+    ids: &[SessionId],
+    duration: Duration,
+    queued_profile: Option<&ProfileIdDto>,
+) -> u64 {
     let started_at = Instant::now();
-    let mut activity = [(0, started_at); 10];
-    let ready = serde_json::json!({
-        "runtimeVersion": edge.version,
-        "edgeExecutable": edge.executable_path,
-        "profileRoot": data.join("profiles").canonicalize().unwrap(),
-        "victimPage": format!("{}/soak/0", fixture.url),
-        "profileId": profiles[1],
-    });
-    fs::write(root.join("ready.tmp"), serde_json::to_vec(&ready).unwrap()).unwrap();
-    fs::rename(root.join("ready.tmp"), root.join("steady-ready.json")).unwrap();
+    let initial_hits: Vec<_> = (0..ids.len()).map(|index| page_hits(fixture, index)).collect();
+    let mut activity: Vec<_> = initial_hits.iter().map(|&count| (count, started_at)).collect();
     loop {
         state.sessions.reconcile_exits().unwrap();
         for (index, (count, last_seen)) in activity.iter_mut().enumerate() {
@@ -71,7 +54,7 @@ fn exercise(root: &Path, duration: Duration) {
                 state.browsers.is_running(&ids[index]).unwrap(),
                 "browser {index} exited during the steady phase"
             );
-            let hits = page_hits(&fixture, index);
+            let hits = page_hits(fixture, index);
             if hits > *count {
                 *count = hits;
                 *last_seen = Instant::now();
@@ -88,11 +71,13 @@ fn exercise(root: &Path, duration: Duration) {
                 .iter()
                 .filter(|session| session.state == SessionStateDto::Running)
                 .count(),
-            10
+            ids.len()
         );
-        assert!(current.iter().any(|session| {
-            session.profile_id == profiles[10] && session.state == SessionStateDto::Queued
-        }));
+        if let Some(queued_profile) = queued_profile {
+            assert!(current.iter().any(|session| {
+                &session.profile_id == queued_profile && session.state == SessionStateDto::Queued
+            }));
+        }
         if started_at.elapsed() >= duration {
             break;
         }
@@ -101,12 +86,42 @@ fn exercise(root: &Path, duration: Duration) {
     assert!(initial_hits
         .iter()
         .enumerate()
-        .all(|(index, initial)| page_hits(&fixture, index) > *initial));
-    fs::write(
-        root.join("elapsed.tmp"),
-        started_at.elapsed().as_secs().to_string(),
-    )
-    .unwrap();
+        .all(|(index, initial)| page_hits(fixture, index) > *initial));
+    started_at.elapsed().as_secs()
+}
+
+fn exercise(root: &Path, duration: Duration) {
+    let data = root.join("data");
+    fs::create_dir(&data).expect("soak profile directory must be fresh");
+    let fixture = ControlFixture::start(false);
+    let state = AppState::production(data.clone()).unwrap();
+    let (sessions, profiles) =
+        start_capacity_profiles(&state, |index| format!("{}/soak/{index}", fixture.url));
+    let edge = state
+        .browsers
+        .list_builds()
+        .unwrap()
+        .into_iter()
+        .find(|build| build.provider == "Microsoft Edge")
+        .unwrap();
+    let ids: Vec<SessionId> = sessions
+        .iter()
+        .map(|session| session.id.clone().try_into().unwrap())
+        .collect();
+    await_condition(60, "first heartbeat from every profile", || {
+        (0..10).all(|index| page_hits(&fixture, index) > 0)
+    });
+    let ready = serde_json::json!({
+        "runtimeVersion": edge.version,
+        "edgeExecutable": edge.executable_path,
+        "profileRoot": data.join("profiles").canonicalize().unwrap(),
+        "victimPage": format!("{}/soak/0", fixture.url),
+        "profileId": profiles[1],
+    });
+    fs::write(root.join("ready.tmp"), serde_json::to_vec(&ready).unwrap()).unwrap();
+    fs::rename(root.join("ready.tmp"), root.join("steady-ready.json")).unwrap();
+    let elapsed = verify_steady_load(&state, &fixture, &ids, duration, Some(&profiles[10]));
+    fs::write(root.join("elapsed.tmp"), elapsed.to_string()).unwrap();
     fs::rename(root.join("elapsed.tmp"), root.join("browser-crash-ready")).unwrap();
     await_condition(90, "browser crash and queue promotion", || {
         state.sessions.reconcile_exits().unwrap();
