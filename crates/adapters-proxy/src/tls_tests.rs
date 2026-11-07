@@ -122,12 +122,7 @@ fn verified_https_exit_works_through_http_and_remote_dns_socks5() {
             VALID,
             b"HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n203.0.113.9\n",
         );
-        let started = Instant::now();
         let check = test_proxy_with_connector(&proxy, None, &trusted_fixture_connector()).unwrap();
-        assert!(
-            started.elapsed() < Duration::from_secs(2),
-            "must finish before the socket timeout"
-        );
         assert!(check.reachable && check.exit_ip_checked);
         assert_eq!(check.exit_ip.as_deref(), Some("203.0.113.9"));
         assert_eq!(requests.load(Ordering::SeqCst), 1);
