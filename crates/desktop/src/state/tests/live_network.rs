@@ -336,7 +336,7 @@ fn live_browser_network_acceptance() {
     drop(password);
     let mut report = json!({
         "schemaVersion": 1, "complete": false, "productCommit": env::var("BROWS_PRODUCT_COMMIT").ok(),
-        "browserVersion": edge.version, "runtimeId": edge.id, "runtimeSha256": edge.sha256,
+        "browserVersion": edge.version, "runtimeId": edge.id.as_str(), "runtimeSha256": edge.sha256,
         "runtimeTrust": "verified", "direct": [], "cases": [],
         "dnsAcceptance": {"status": "not_checked", "reason": "expected_proxy_resolver_ranges_not_configured", "method": "fresh_operator_owned_dns4_and_dns6_names"},
         "webrtcScope": "Google public STUN; no media permissions; direct positive control required",
