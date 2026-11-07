@@ -1540,7 +1540,7 @@ function ProxyView({
       const checked = await api.testProxy(proxy.id);
       setTestingProxy(undefined);
       await onRefresh();
-      onNotice(checked.lastExitIp ? `“${proxy.name}”认证和出口请求成功，出口 IP：${checked.lastExitIp}。` : `“${proxy.name}”认证及 HTTPS 隧道可用；明文 HTTP 出口 IP 端点不可用。`);
+      onNotice(checked.lastExitIp ? `“${proxy.name}”HTTPS 证书及出口请求成功，出口 IP：${checked.lastExitIp}。` : `“${proxy.name}”未获得已验证的出口 IP，请重新检查。`);
     } catch (cause) {
       const message = getErrorMessage(cause);
       setTestingProxy(undefined);

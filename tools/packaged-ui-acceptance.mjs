@@ -173,6 +173,9 @@ async function testProxy() {
   const test = "//tr[.//strong[normalize-space(.)='" + fixtureProxyName + "']]//button[normalize-space(.)='测试']";
   await click(await waitFor("fixture proxy test button", () => xpath(test)));
   await click(await button("确认并测试"));
+  await waitFor("proxy test request completed", () => command("POST", "/elements", {
+    using: "css selector", value: ".diagnostic-confirm-modal",
+  }), elements => elements.length === 0, 45000);
 }
 async function waitCardStatus(name, status) {
   await waitFor(name + " " + status, () => cardText(name, "//*[contains(@class,'status-pill')]"), result => result === status, 45000);
