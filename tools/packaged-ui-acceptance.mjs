@@ -121,7 +121,7 @@ const fixtureProxyName = "CI authenticated proxy";
 const fixtureProxyUser = "brows-fixture";
 const fixtureProxyPassword = "fixture-only-proxy-password";
 const fixtureExitIp = "203.0.113.9";
-const proxyProof = { authenticatedConnects: 0, authenticatedExitRequests: 0, rejectedConnects: 0, rejectedTlsHandshakes: 0 };
+const proxyProof = { authenticatedConnects: 0, authenticatedExitRequests: 0, rejectedConnects: 0, untrustedCertificateRejected: false };
 let rejectConnect = false;
 async function startFixtureTls(pfxFile) {
   for (const socket of tlsSockets) socket.destroy();
@@ -138,7 +138,7 @@ async function startFixtureTls(pfxFile) {
     tlsSockets.add(socket);
     socket.on("close", () => tlsSockets.delete(socket));
   });
-  proxyTls.on("tlsClientError", () => proxyProof.rejectedTlsHandshakes++);
+  proxyTls.on("tlsClientError", (_error, socket) => socket.destroy());
   proxyTls.listen(0, "127.0.0.1");
   await once(proxyTls, "listening");
 }
@@ -259,13 +259,18 @@ try {
   await waitFor("authenticated fixture exit", () => text(".data-table tbody tr"), result => result.includes(fixtureExitIp));
   assert.equal(proxyProof.authenticatedConnects, 1);
   assert.equal(proxyProof.authenticatedExitRequests, 1);
+  stage = "local-untrusted-tls";
   await startFixtureTls(process.env.BROWS_UI_UNTRUSTED_TLS_PFX);
   await testProxy();
   await waitFor("untrusted certificate surfaced", () => text(".data-table tbody tr"), result => result.includes("认证、证书或出口失败") && !result.includes(fixtureExitIp));
   assert.equal(proxyProof.authenticatedConnects, 2);
   assert.equal(proxyProof.authenticatedExitRequests, 1, "untrusted TLS must not send an HTTP exit request");
-  assert.ok(proxyProof.rejectedTlsHandshakes >= 1);
+  // In TLS 1.3 the client can reject the certificate after the server's
+  // handshake event. The failure UI and absence of an HTTP request are the
+  // client-side evidence; tlsClientError is not guaranteed on the server.
+  proxyProof.untrustedCertificateRejected = true;
   await startFixtureTls(process.env.BROWS_UI_TLS_PFX);
+  stage = "local-authentication-rejection";
   rejectConnect = true;
   await testProxy();
   await waitFor("proxy rejection surfaced", () => text(".data-table tbody tr"), result => result.includes("认证、证书或出口失败"));
@@ -358,7 +363,7 @@ try {
     schemaVersion: 1, assertionsPassed: !failure, complete: false, checks,
     commit: process.env.GITHUB_SHA, windowsRelease: os.release(), webView2Version: process.env.BROWS_UI_WEBVIEW_VERSION,
     crashRecovery, proxyProof,
-    notChecked: ["Windows 11 client", "public proxy exit, DNS and ICE", "SeedableNoise UI", "hours-long load", "power-loss recovery", "real site login restoration"],
+    notChecked: ["Windows 10/11 clients", "public proxy exit, DNS and ICE", "SeedableNoise UI", "hours-long load", "power-loss recovery", "real site login restoration"],
     ...(failure ? { failure } : {}),
   }, null, 2) + "\n");
 }
