@@ -217,19 +217,19 @@ fn reopen(root: &Path) {
 fn desktop_soak_host() {
     let root = PathBuf::from(env::var_os("BROWS_SOAK_ROOT").expect("missing soak fixture root"));
     assert!(root.join("soak-fixture").is_file());
-    let (exercise, reopen): (fn(&Path, Duration), fn(&Path)) =
-        match env::var("BROWS_SOAK_PERSONA").as_deref() {
-            Ok("SystemNative") => (exercise, reopen),
-            Ok("SeedableNoise") => (seeded::exercise, seeded::reopen),
-            _ => panic!("unknown soak persona"),
-        };
-    match env::var("BROWS_SOAK_PHASE").as_deref() {
-        Ok("exercise") => {
-            let seconds: u64 = env::var("BROWS_SOAK_SECONDS").unwrap().parse().unwrap();
-            assert!((60..=14_400).contains(&seconds));
-            exercise(&root, Duration::from_secs(seconds));
-        }
-        Ok("reopen") => reopen(&root),
-        _ => panic!("unknown soak phase"),
+    let duration = || {
+        let seconds: u64 = env::var("BROWS_SOAK_SECONDS").unwrap().parse().unwrap();
+        assert!((60..=14_400).contains(&seconds));
+        Duration::from_secs(seconds)
+    };
+    match (
+        env::var("BROWS_SOAK_PERSONA").as_deref(),
+        env::var("BROWS_SOAK_PHASE").as_deref(),
+    ) {
+        (Ok("SystemNative"), Ok("exercise")) => exercise(&root, duration()),
+        (Ok("SystemNative"), Ok("reopen")) => reopen(&root),
+        (Ok("SeedableNoise"), Ok("exercise")) => seeded::exercise(&root, duration()),
+        (Ok("SeedableNoise"), Ok("reopen")) => seeded::reopen(&root),
+        _ => panic!("unknown soak persona or phase"),
     }
 }

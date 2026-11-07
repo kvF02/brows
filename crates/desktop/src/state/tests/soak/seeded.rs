@@ -1,6 +1,7 @@
 use super::super::{draft, started, AppState, ControlFixture, SessionLaunchOutcome};
 use super::{
-    await_condition, await_promotion, expect_host_crash, page_hits, verify_steady_load, write_marker,
+    await_condition, await_promotion, expect_host_crash, page_hits, verify_steady_load,
+    write_marker,
 };
 use brows_contracts::{
     BrowserBuildIdDto, BrowserSelectorDto, DeviceMemoryDto, PersonaDto, PlatformDto,
@@ -80,27 +81,23 @@ fn stop_all(state: &AppState, sessions: Vec<SessionDto>) {
 
 fn capture_matrix(fixture: &ControlFixture, indices: Range<usize>) -> Vec<Value> {
     let mut captures = None;
-    await_condition(
-        90,
-        "first-script page and Worker proofs",
-        || {
-            let proofs = fixture.proofs.lock().unwrap();
-            captures = indices
-                .clone()
-                .map(|index| {
-                    let sample = |kind| {
-                        let expected = format!("/seeded-soak/{index}/{kind}/proof");
-                        proofs
-                            .iter()
-                            .find(|(path, _, value)| path == &expected && value["kind"] == kind)
-                            .map(|(_, _, value)| value.clone())
-                    };
-                    Some([sample(CONTEXTS[0])?, sample(CONTEXTS[1])?])
-                })
-                .collect::<Option<Vec<_>>>();
-            captures.is_some()
-        },
-    );
+    await_condition(90, "first-script page and Worker proofs", || {
+        let proofs = fixture.proofs.lock().unwrap();
+        captures = indices
+            .clone()
+            .map(|index| {
+                let sample = |kind| {
+                    let expected = format!("/seeded-soak/{index}/{kind}/proof");
+                    proofs
+                        .iter()
+                        .find(|(path, _, value)| path == &expected && value["kind"] == kind)
+                        .map(|(_, _, value)| value.clone())
+                };
+                Some([sample(CONTEXTS[0])?, sample(CONTEXTS[1])?])
+            })
+            .collect::<Option<Vec<_>>>();
+        captures.is_some()
+    });
 
     let unmodified_canvas = "a42367ff".repeat(16 * 16);
     indices
