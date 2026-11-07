@@ -6,6 +6,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'The Windows soak requires PowerShell on Windows' }
+. "$PSScriptRoot/windows-process-fixture.ps1"
 $testExe = (Resolve-Path -LiteralPath $TestExecutable).Path
 if ([IO.Path]::GetFileName($testExe) -notmatch '^brows_desktop-[a-f0-9]+\.exe$') {
     throw 'Use the brows-desktop library test executable'
@@ -63,10 +64,6 @@ function Wait-SoakMarker([Diagnostics.Process]$Process, [string]$Name, [int]$Lim
     }
 }
 
-function Read-ProcessSnapshot {
-    Get-CimInstance Win32_Process -OperationTimeoutSec 10
-}
-
 function Find-BrowserRoots($Snapshot, [int]$OwnerId, $Ready) {
     $edge = $Ready.edgeExecutable.Replace('\\?\', '')
     $profilePrefix = $Ready.profileRoot.Replace('\\?\', '') + '\'
@@ -81,55 +78,6 @@ function Find-BrowserRoots($Snapshot, [int]$OwnerId, $Ready) {
         throw "Expected ten owned Edge roots, found $($roots.Count) ($($children.Count) direct children, $($edgeChildren.Count) matching Edge paths)"
     }
     $roots
-}
-
-function Find-ProcessTree($Snapshot, $Roots) {
-    $pending = [Collections.Generic.Queue[object]]::new()
-    $seen = [Collections.Generic.HashSet[uint32]]::new()
-    foreach ($entry in $Roots) { $pending.Enqueue($entry) }
-    while ($pending.Count -gt 0) {
-        $entry = $pending.Dequeue()
-        if (-not $seen.Add($entry.ProcessId)) { continue }
-        $entry
-        foreach ($child in $Snapshot) {
-            if ($child.ParentProcessId -eq $entry.ProcessId -and $child.CreationDate -ge $entry.CreationDate) {
-                $pending.Enqueue($child)
-            }
-        }
-    }
-}
-
-function Find-RemainingProcesses($Recorded) {
-    $live = @{}
-    foreach ($entry in (Get-CimInstance Win32_Process -Property ProcessId, CreationDate -OperationTimeoutSec 10)) {
-        $live[$entry.ProcessId] = $entry.CreationDate
-    }
-    $Recorded | Where-Object { $live.ContainsKey($_.ProcessId) -and $live[$_.ProcessId] -eq $_.CreationDate }
-}
-
-function Wait-ProcessTreeExit($Recorded) {
-    $timer = [Diagnostics.Stopwatch]::StartNew()
-    do {
-        $remaining = @(Find-RemainingProcesses $Recorded)
-        if ($remaining.Count -eq 0) { return }
-        Start-Sleep -Milliseconds 500
-    } while ($timer.Elapsed.TotalSeconds -lt 30)
-    throw "$($remaining.Count) captured browser processes survived their owner"
-}
-
-function Stop-OwnedProcess($Entry) {
-    $process = [Diagnostics.Process]::GetProcessById($Entry.ProcessId)
-    try {
-        if ($process.SafeHandle.IsInvalid) { throw 'Unable to retain the owned process handle' }
-        $ageDifference = $process.StartTime.ToUniversalTime() - $Entry.CreationDate.ToUniversalTime()
-        if ([Math]::Abs($ageDifference.TotalMilliseconds) -gt 1) {
-            throw 'Process identity changed before fault injection'
-        }
-        $process.Kill()
-        if (-not $process.WaitForExit(15000)) { throw 'Owned process did not terminate' }
-    } finally {
-        $process.Dispose()
-    }
 }
 
 try {

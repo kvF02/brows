@@ -27,15 +27,20 @@ CI 不自动发布 GitHub Release，不自动升级用户机器上的应用。
 
 CI 在独立 Windows runner 上执行真实静默安装、打开打包后的主窗口、初始化数据库、
 正常关闭、覆盖安装以及卸载，并检查应用数据标记保留。
-随后在 Windows Server 2022 runner 使用 Microsoft Edge WebDriver 驱动**同一构建产物**的 WebView2，确认内嵌资源和真实 Tauri
+随后在 Windows Server 2022 runner 用同一 NSIS 安装器安装并核对应用 SHA256，使用
+Microsoft Edge WebDriver 驱动**已安装应用**的 WebView2，确认内嵌资源和真实 Tauri
 适配器，再操作并发保存、环境新建/编辑/归档恢复、SystemNative 浏览器启动/停止、
 加密备份和恢复到新环境，并核对 UI 重载后的持久数据。测试通过 DOM 输入/点击，
 不直接调用应用 IPC 或写数据库；单独生成 `packaged-ui-acceptance.json` 与截图。
+同一流程从界面配置测试代理，验证本地 HTTP 代理认证成功与主动拒绝两种结果。再从界面
+启动十个 Edge 环境并保留一个排队环境，强退已安装的 Brows 进程，检查已观测的 Edge
+进程树全部退出。重启后核对十一条环境记录、启动一个已有环境，并重新验证代理认证。
+代理仅在本地模拟固定检查端点，公网出口、DNS、ICE 和真实站点登录态需在现场实测。
 WebDriver 只用于 Windows CI，匹配实际 WebView2 的构建版本并验证 Microsoft 签名；
 没有向产品增加调试端口或自动化管理接口。当前 Windows 2025 镜像的 WebDriver 会话创建失败（DevToolsActivePort），因此 UI 自动操作独立执行；安装与生产浏览器验收仍在 windows-latest。报告记录 Windows 和实际 WebView2 版本，不能据此声称较新 WebView2 的自动操作已覆盖。方法依据
 [Microsoft WebView2 WebDriver 文档](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/webdriver)。
 
-这仍不等于代理、SeedableNoise 设置、所有错误分支和完整桌面流程已经验收。
+真实代理、SeedableNoise 设置、其他错误分支和完整桌面流程分别验收。
 只有对应提交的工作流成功且两份验收 JSON 均存在，才算本次安装及所列 UI 流程通过。
 
 ## 长稳和故障恢复验收
@@ -93,3 +98,22 @@ SeedableNoise 验收用通过私有管道能力探针的托管 Edge 快照启动
 - 产品签名证书、签名更新源和防降级发布流程。
 - 完整桌面 UI 长稳和断电故障恢复验收。
 - 公网 DNS/ICE 服务部署和互联网环境实测。
+
+## Windows 11 真机与真实代理验收
+
+1. 在 Windows 11 x64 的专用测试用户下安装对应提交的 NSIS 包。核对
+   `SHA256SUMS.txt` 的安装器和已安装程序摘要，记录 Windows 构建号、WebView2 和
+   Edge 版本。测试用户使用自己的空 Brows 数据目录，避免影响已有环境。
+2. 在设置确认最大并发为 10。通过界面保存一条授权使用的 HTTP CONNECT 或 SOCKS5
+   代理，凭据只填在应用里。先完成代理测试，再为一个测试环境绑定该代理。若使用
+   SeedableNoise，保存托管 Edge 快照并通过能力探针，再让环境固定到该快照。
+3. 按[公网检测部署条件](network-probe-service.md)配置自有 HTTPS、DNS、STUN 端点
+   以及事先已知的代理和解析器出口范围。启动绑定代理的环境，在「诊断」确认端点并
+   记录 HTTP、DNS 和 WebRTC 的逐项状态。证据不足时保留「未检查」。用一组明确排除
+   测试出口的临时规则做一次反例，确认越界观测会报告失败，再恢复原规则。
+4. 从界面启动十个测试环境，确认第十一个排队。选一个允许持久登录的自有测试站点，
+   用测试账号登录并确认测试标记。记录已安装 Brows 的 PID、十个 Edge 根进程及
+   已观测子进程。只强制终止确认属于本次验收的 Brows PID，检查这些进程全部退出。
+5. 重新打开安装版，确认十一条环境记录可读取、旧会话不再占用配额。必要时重新运行
+   快照能力探针。用原环境重新打开同一站点，记录是否保留了测试登录态和标记，并重跑
+   代理与公网检查。仅汇总版本、持续时间、进程数、逐项结果及失败原因。
