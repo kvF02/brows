@@ -21,6 +21,7 @@ on:
       - 'crates/desktop/src/state/tests/soak.rs'
       - 'crates/desktop/src/state/tests/soak/**'
       - 'tools/windows-soak.ps1'
+      - 'tools/windows-process-fixture.ps1'
       - 'tools/test_support/controlled_browser.rs'
       - 'tools/test_support/first_observation.js'
       - 'tools/test_support/seeded_soak_page.js'

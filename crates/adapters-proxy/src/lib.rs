@@ -12,7 +12,7 @@ use brows_domain::{ProxyId, ProxyLaunchBinding, ProxySpec, SessionId};
 use std::{
     collections::BTreeMap,
     io::{Read, Write},
-    net::{TcpStream, ToSocketAddrs},
+    net::{IpAddr, TcpStream, ToSocketAddrs},
     sync::{
         atomic::{AtomicU64, Ordering},
         Arc, Mutex,
@@ -221,39 +221,117 @@ fn test_exit_ip_through_broker(port: u16, timeout: Duration) -> PortResult<Strin
         "GET {PROXY_TEST_ENDPOINT} HTTP/1.1\r\nHost: {PROXY_TEST_HOST}\r\nConnection: close\r\nUser-Agent: Brows-Proxy-Test/1\r\n\r\n"
     )
     .map_err(|_| PortError::new(PortErrorKind::ProxyConnect, "proxy test request failed"))?;
+    read_exit_ip_response(stream)
+}
+
+/// Decode the small plaintext IP response used by the explicit exit checks.
+pub fn read_exit_ip_response(reader: impl Read) -> PortResult<String> {
+    const MAX_RESPONSE: u64 = 16 * 1024;
     let mut response = String::new();
-    stream
+    reader
+        .take(MAX_RESPONSE + 1)
         .read_to_string(&mut response)
         .map_err(|_| PortError::new(PortErrorKind::ProxyConnect, "proxy test response failed"))?;
-    let (head, body) = response.split_once("\r\n\r\n").ok_or_else(|| {
-        PortError::new(
-            PortErrorKind::InvalidData,
-            "proxy test response was invalid",
-        )
-    })?;
-    if head.starts_with("HTTP/1.1 407") || head.starts_with("HTTP/1.0 407") {
-        return Err(PortError::new(
-            PortErrorKind::ProxyAuth,
-            "proxy authentication failed",
-        ));
+    let invalid = || PortError::new(PortErrorKind::InvalidData, "exit IP response was invalid");
+    if response.len() as u64 > MAX_RESPONSE {
+        return Err(invalid());
     }
-    if !head.starts_with("HTTP/1.1 200") && !head.starts_with("HTTP/1.0 200") {
-        return Err(PortError::new(
-            PortErrorKind::ProxyConnect,
-            "proxy exit endpoint rejected the request",
-        ));
+    let (head, body) = response.split_once("\r\n\r\n").ok_or_else(invalid)?;
+    let mut headers = head.split("\r\n");
+    let mut status = headers.next().ok_or_else(invalid)?.split_ascii_whitespace();
+    match (status.next(), status.next()) {
+        (Some("HTTP/1.0" | "HTTP/1.1"), Some("200")) => {}
+        (Some("HTTP/1.0" | "HTTP/1.1"), Some("407")) => {
+            return Err(PortError::new(
+                PortErrorKind::ProxyAuth,
+                "proxy authentication failed",
+            ))
+        }
+        _ => {
+            return Err(PortError::new(
+                PortErrorKind::ProxyConnect,
+                "proxy exit endpoint rejected the request",
+            ))
+        }
     }
-    let ip = body.trim();
-    if ip.is_empty()
-        || ip.len() > 64
-        || !ip
-            .chars()
-            .all(|character| character.is_ascii_hexdigit() || matches!(character, '.' | ':'))
-    {
-        return Err(PortError::new(
-            PortErrorKind::InvalidData,
-            "proxy exit endpoint returned an invalid address",
-        ));
+    let mut chunked = false;
+    let mut length = None;
+    for header in headers {
+        let (name, value) = header.split_once(':').ok_or_else(invalid)?;
+        if name.eq_ignore_ascii_case("transfer-encoding") {
+            if chunked || !value.trim().eq_ignore_ascii_case("chunked") {
+                return Err(invalid());
+            }
+            chunked = true;
+        } else if name.eq_ignore_ascii_case("content-length") {
+            if length.is_some() {
+                return Err(invalid());
+            }
+            length = Some(value.trim().parse::<usize>().map_err(|_| invalid())?);
+        }
     }
-    Ok(ip.to_owned())
+    let decoded;
+    let text = if chunked {
+        if length.is_some() {
+            return Err(invalid());
+        }
+        decoded = decode_exit_chunks(body).ok_or_else(invalid)?;
+        decoded.as_str()
+    } else {
+        if length.is_some_and(|expected| expected != body.len()) {
+            return Err(invalid());
+        }
+        body
+    };
+    let ip: IpAddr = text.trim().parse().map_err(|_| invalid())?;
+    Ok(ip.to_string())
+}
+
+fn decode_exit_chunks(mut encoded: &str) -> Option<String> {
+    let mut result = String::new();
+    loop {
+        let (size, data) = encoded.split_once("\r\n")?;
+        let digits = size.split(';').next()?;
+        let count = usize::from_str_radix(digits, 16).ok()?;
+        if count == 0 {
+            let valid_end = data == "\r\n"
+                || data.strip_suffix("\r\n\r\n").is_some_and(|trailers| {
+                    trailers.split("\r\n").all(|header| header.contains(':'))
+                });
+            return valid_end.then_some(result);
+        }
+        if count > 64 - result.len() {
+            return None;
+        }
+        result.push_str(data.get(..count)?);
+        encoded = data.get(count..)?.strip_prefix("\r\n")?;
+    }
+}
+
+#[cfg(test)]
+mod exit_response_tests {
+    use super::*;
+
+    #[test]
+    fn exit_response_accepts_chunked_fixed_length_and_close_delimited_ip() {
+        for (response, ip) in [
+            ("HTTP/1.1 200 OK\r\nTransfer-Encoding: Chunked\r\n\r\n7\r\n203.0.1\r\n5\r\n13.9\n\r\n0\r\n\r\n", "203.0.113.9"),
+            ("HTTP/1.1 200 OK\r\nContent-Length: 12\r\n\r\n203.0.113.9\n", "203.0.113.9"),
+            ("HTTP/1.0 200 OK\r\n\r\n2001:db8::1\n", "2001:db8::1"),
+        ] {
+            assert_eq!(read_exit_ip_response(response.as_bytes()).unwrap(), ip);
+        }
+    }
+
+    #[test]
+    fn exit_response_rejects_bad_ip_and_incomplete_or_ambiguous_framing() {
+        for response in [
+            "HTTP/1.1 200 OK\r\n\r\n999.0.113.9",
+            "HTTP/1.1 200 OK\r\nContent-Length: 99\r\n\r\n203.0.113.9",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nb\r\n203.0.113.9\r\n",
+            "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 11\r\n\r\nb\r\n203.0.113.9\r\n0\r\n\r\n",
+        ] {
+            assert!(read_exit_ip_response(response.as_bytes()).is_err());
+        }
+    }
 }

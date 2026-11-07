@@ -13,6 +13,7 @@ $result = [ordered]@{
     complete = $false
     checks = $checks
     launches = $launches
+    installedApplicationSha256 = $null
     notChecked = @('interactive UI workflows', 'older-schema rollback', 'Authenticode signing', 'long-running multi-session load')
     failure = $null
 }
@@ -72,6 +73,7 @@ try {
     $checks.Add('silent-install')
     $executable = Join-Path $installRoot 'brows-desktop.exe'
     if (-not (Test-Path $executable)) { throw 'Installed executable missing' }
+    $result.installedApplicationSha256 = (Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash.ToLowerInvariant()
     $phase = 'initial-launch'
     Test-InstalledLaunch -Executable $executable -Round 1
     $checks.Add('packaged-window')
@@ -81,6 +83,9 @@ try {
     [IO.File]::WriteAllText($sentinel, 'preserve-user-data')
     Install-Beta
     if ([IO.File]::ReadAllText($sentinel) -ne 'preserve-user-data') { throw 'Upgrade removed application data' }
+    if ((Get-FileHash -LiteralPath $executable -Algorithm SHA256).Hash -ine $result.installedApplicationSha256) {
+        throw 'Reinstalling the same package changed the installed executable hash'
+    }
     $checks.Add('upgrade-preserves-data')
     $phase = 'post-upgrade-launch'
     foreach ($round in 2..3) {

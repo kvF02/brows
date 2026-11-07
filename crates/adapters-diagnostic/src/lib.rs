@@ -1,6 +1,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_debug_implementations)]
 
+use brows_adapters_proxy::read_exit_ip_response;
 use brows_application::{
     Clock, DiagnosticRequest, DiagnosticRunner, PortError, PortErrorKind, PortResult, ProxyRuntime,
 };
@@ -201,32 +202,7 @@ impl LocalNetworkDiagnosticRunner {
                 }
             }
             write!(stream, "GET / HTTP/1.1\r\nHost: {}\r\nConnection: close\r\nUser-Agent: Brows-Diagnostic/1\r\n\r\n", self.endpoint.host).map_err(|_| PortError::new(PortErrorKind::ProxyConnect, "exit IP request failed"))?;
-            let mut response = String::new();
-            stream.read_to_string(&mut response).map_err(|_| {
-                PortError::new(PortErrorKind::ProxyConnect, "exit IP response failed")
-            })?;
-            let (head, body) = response.split_once("\r\n\r\n").ok_or_else(|| {
-                PortError::new(PortErrorKind::InvalidData, "invalid exit IP response")
-            })?;
-            if !is_success(head.as_bytes()) {
-                return Err(PortError::new(
-                    PortErrorKind::ProxyConnect,
-                    "exit IP endpoint rejected request",
-                ));
-            }
-            let ip = body.trim();
-            if ip.is_empty()
-                || ip.len() > 64
-                || !ip
-                    .chars()
-                    .all(|c| c.is_ascii_hexdigit() || matches!(c, '.' | ':'))
-            {
-                return Err(PortError::new(
-                    PortErrorKind::InvalidData,
-                    "exit IP response was invalid",
-                ));
-            }
-            Ok((ip.to_owned(), route.to_owned()))
+            Ok((read_exit_ip_response(stream)?, route.to_owned()))
         })();
         if let Some(lease) = &lease {
             let _ = self.proxies.release_session(lease);

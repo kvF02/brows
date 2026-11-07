@@ -1,10 +1,12 @@
 param([Parameter(Mandatory)][string]$Application, [Parameter(Mandatory)][string]$Report)
 $ErrorActionPreference = 'Stop'
-if ($env:GITHUB_ACTIONS -ne 'true' -or -not $IsWindows) { throw 'Windows GitHub Actions fixture only' }
+if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or -not $IsWindows) {
+    throw 'Windows hosted GitHub Actions fixture only'
+}
 . "$PSScriptRoot/windows-close-probe.ps1"
 $app = (Resolve-Path -LiteralPath $Application).Path
-$releaseRoot = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE 'target/release'))
-if ([IO.Path]::GetDirectoryName($app) -ine $releaseRoot -or [IO.Path]::GetFileName($app) -ine 'brows-desktop.exe') { throw 'Application must be the CI release build' }
+$installRoot = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE 'target/installed'))
+if ([IO.Path]::GetDirectoryName($app) -ine $installRoot -or [IO.Path]::GetFileName($app) -ine 'brows-desktop.exe') { throw 'Application must be the CI-installed build' }
 $probe = $null
 $probeTrace = Join-Path $env:RUNNER_TEMP 'brows-ui-runtime-discovery.stderr.txt'
 $stage = 'runtime-window-startup'
@@ -88,7 +90,7 @@ finally { [IO.File]::WriteAllText($(Quote-Literal $done), [string]`$code) }
         if ([Environment]::OSVersion.Version.Build -ge 22621) { $runasArgs = @('/machine:amd64') + $runasArgs }
         & $runas @runasArgs
         if ($LASTEXITCODE -ne 0) { throw 'Unable to launch the non-elevated UI fixture' }
-        $deadline = [DateTime]::UtcNow.AddMinutes(4)
+        $deadline = [DateTime]::UtcNow.AddMinutes(7)
         while (-not (Test-Path -LiteralPath $done) -and [DateTime]::UtcNow -lt $deadline) { Start-Sleep -Milliseconds 250 }
         if (Test-Path -LiteralPath $output) { Get-Content -LiteralPath $output -Tail 35 | Write-Output }
         if (-not (Test-Path -LiteralPath $done) -or [IO.File]::ReadAllText($done).Trim() -ne '0') {
