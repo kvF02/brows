@@ -511,6 +511,9 @@ mod tests {
     #[cfg(windows)]
     mod soak;
 
+    #[cfg(windows)]
+    mod live_network;
+
     fn draft(name: &str) -> ProfileDraftDto {
         ProfileDraftDto {
             name: name.to_owned(),

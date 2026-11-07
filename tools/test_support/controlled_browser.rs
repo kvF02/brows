@@ -227,6 +227,15 @@ impl ControlFixture {
                 String::from_utf8_lossy(&body)
             );
             ("ok".to_owned(), "text/plain")
+        } else if path.starts_with("/live-network/") && path.ends_with("/page") {
+            let workload = include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tools/test_support/live_network_page.js"
+            ));
+            (
+                format!("<!doctype html><meta charset='utf-8'><script>{workload}</script>"),
+                "text/html",
+            )
         } else if path.starts_with("/seeded-soak/") && path.ends_with("/page") {
             let workload = include_str!(concat!(
                 env!("CARGO_MANIFEST_DIR"),
