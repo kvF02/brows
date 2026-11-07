@@ -33,32 +33,37 @@ try {
         $port = [int] $item.port
         $curlScheme = if ($item.scheme -eq 'socks5') { 'socks5h' } else { 'http' }
         $proxy = "${curlScheme}://${hostIp}:$port"
-        $body = Join-Path $scratch 'ip.txt'
-        $err = Join-Path $scratch 'curl-error.txt'
-        Remove-Item $body, $err -ErrorAction SilentlyContinue
-        & curl.exe --silent --show-error --fail --connect-timeout 5 --max-time 12 --max-filesize 128 --proxy $proxy --output $body 'https://ipv4.webshare.io/' 2> $err
-        $curlCode = $LASTEXITCODE
-        $exitIp = if (Test-Path $body) { Read-PublicIp (Get-Content $body -Raw) } else { $null }
-        $curlError = if (Test-Path $err) { (Get-Content $err -Raw).Trim() } else { '' }
+        $httpsResults = @()
+        foreach ($target in @('https://ipv4.webshare.io/', 'https://api.ipify.org/', 'https://checkip.amazonaws.com/')) {
+            $body = Join-Path $scratch 'ip.txt'
+            $err = Join-Path $scratch 'curl-error.txt'
+            Remove-Item $body, $err -ErrorAction SilentlyContinue
+            & curl.exe --silent --show-error --fail --connect-timeout 5 --max-time 12 --max-filesize 128 --proxy $proxy --output $body $target 2> $err
+            $curlCode = $LASTEXITCODE
+            $exitIp = if (Test-Path $body) { Read-PublicIp (Get-Content $body -Raw) } else { $null }
+            $curlError = if (Test-Path $err) { ([string] (Get-Content $err -Raw)).Trim() } else { '' }
+            $httpsResults += [pscustomobject]@{ target = $target; curlExit = $curlCode; exitIp = $exitIp; error = $curlError }
+        }
         $stdout = Join-Path $scratch 'adapter-out.txt'
         $stderr = Join-Path $scratch 'adapter-error.txt'
         $process = Start-Process -FilePath $adapter -ArgumentList @($item.scheme, $hostIp, "$port") -NoNewWindow -PassThru -RedirectStandardOutput $stdout -RedirectStandardError $stderr
         $finished = $process.WaitForExit(30000)
         if (-not $finished) { $process.Kill(); $process.WaitForExit(); $adapterCode = 124 } else { $adapterCode = $process.ExitCode }
-        $adapterOutput = (Get-Content $stdout -Raw).Trim()
+        $adapterOutput = ([string] (Get-Content $stdout -Raw)).Trim()
         $adapterIp = if ($adapterOutput -match '^OK\|true\|true\|([0-9a-fA-F:.]+)$') { Read-PublicIp $Matches[1] } else { $null }
         $result = [ordered]@{
             scheme = $item.scheme; host = $hostIp; port = $port
-            curlExit = $curlCode; curlExitIp = $exitIp; curlError = $curlError
+            https = $httpsResults
             adapterExit = $adapterCode; adapterResult = $adapterOutput; adapterExitIp = $adapterIp
-            verified = ($curlCode -eq 0 -and $adapterCode -eq 0 -and $exitIp -and $adapterIp -and $exitIp -eq $adapterIp -and $exitIp -ne $baselineIp)
+            verified = ($adapterCode -eq 0 -and $adapterIp -and $adapterIp -ne $baselineIp -and @($httpsResults | Where-Object { $_.curlExit -eq 0 -and $_.exitIp -eq $adapterIp }).Count -gt 0)
         }
         $results += [pscustomobject] $result
         $result | ConvertTo-Json -Compress | Write-Output
     }
     $evidence = [ordered]@{
         capturedAt = [DateTimeOffset]::UtcNow.ToString('o'); commit = $env:GITHUB_SHA
-        os = [Environment]::OSVersion.VersionString; source = 'https://geonode.com/free-proxy-list/usa'
+        os = [Environment]::OSVersion.VersionString
+        sources = @('https://geonode.com/free-proxy-list/usa', 'https://geonode.com/free-proxy-list')
         directExitIp = $baselineIp; candidates = $results
         verifiedCount = @($results | Where-Object verified).Count
         scope = 'Anonymous public GET only. Curl verifies HTTPS response with normal certificate validation; Brows tests its production loopback broker, CONNECT and HTTP exit-IP decoder. No browser UI, credentials, DNS-leak or ICE-leak acceptance.'

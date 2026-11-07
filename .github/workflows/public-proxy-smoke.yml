@@ -23,7 +23,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo build -p brows-adapters-proxy --example public_proxy_probe --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Test six explicitly listed public proxies
+      - name: Recheck one reachable SOCKS5 and two public alternatives
         timeout-minutes: 5
         shell: pwsh
         run: |
@@ -31,11 +31,8 @@ jobs:
           # They are temporary diagnostics, never application defaults.
           @'
           [
-            {"scheme":"http","host":"192.169.179.201","port":7890},
-            {"scheme":"http","host":"38.127.172.219","port":37234},
-            {"scheme":"http","host":"147.93.176.66","port":3128},
-            {"scheme":"socks5","host":"107.150.41.226","port":18080},
-            {"scheme":"socks5","host":"107.181.252.58","port":1081},
+            {"scheme":"http","host":"45.91.248.107","port":80},
+            {"scheme":"socks5","host":"185.239.141.194","port":10808},
             {"scheme":"socks5","host":"184.178.172.17","port":4145}
           ]
           '@ | Set-Content public-proxy-candidates.json
