@@ -124,6 +124,41 @@ impl ControlFixture {
             return;
         };
         let path = headers.split_whitespace().nth(1).unwrap_or("/").to_owned();
+        if let Some(route) = path.strip_prefix("/soak/") {
+            let (index, heartbeat) = route
+                .strip_suffix("/heartbeat")
+                .map_or((route, false), |index| (index, true));
+            if let Ok(index) = index.parse::<usize>() {
+                if index < 11 && (!heartbeat || headers.starts_with("POST ")) {
+                    let (kind, content) = if heartbeat {
+                        let key = format!("/soak/{index}/heartbeat");
+                        let mut proofs = output.lock().unwrap();
+                        if let Some((_, _, count)) =
+                            proofs.iter_mut().find(|(path, _, _)| path == &key)
+                        {
+                            *count = serde_json::json!(count.as_u64().unwrap() + 1);
+                        } else {
+                            proofs.push((key, String::new(), serde_json::json!(1)));
+                        }
+                        ("text/plain", "ok")
+                    } else {
+                        (
+                            "text/html",
+                            include_str!(concat!(
+                                env!("CARGO_MANIFEST_DIR"),
+                                "/../../tools/test_support/soak_page.html"
+                            )),
+                        )
+                    };
+                    let response = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{content}",
+                        content.len()
+                    );
+                    let _ = stream.write_all(response.as_bytes());
+                    return;
+                }
+            }
+        }
         println!("local acceptance request: {path}");
         let revision = service_version.load(std::sync::atomic::Ordering::Acquire);
         let script = include_str!(concat!(
