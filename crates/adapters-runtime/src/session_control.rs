@@ -167,7 +167,6 @@ impl Wire {
                 "Runtime.runIfWaitingForDebugger"
                     | "Debugger.enable"
                     | "Debugger.pause"
-                    | "Debugger.resume"
                     | "Debugger.disable"
             ) {
                 error["message"]
@@ -380,7 +379,8 @@ impl Controller {
                                 return Ok(());
                             }
                             if job.target.kind == "service_worker" {
-                                w.call("Debugger.resume", json!({}), Some(session))?;
+                                // Disabling the private debugger releases its pause.
+                                // A separate resume lets the worker exit before disable can reply.
                                 w.call("Debugger.disable", json!({}), Some(session))?;
                                 w.paused
                                     .lock()
