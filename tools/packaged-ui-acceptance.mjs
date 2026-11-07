@@ -245,7 +245,8 @@ try {
   const names = Array.from({ length: 11 }, (_, i) => "Installed UI recovery " + (i + 1));
   const profileIds = [];
   for (const [index, name] of names.entries()) {
-    await click(await button("新建环境"));
+    stage = "installed-ui-create-" + (index + 1);
+    await click(await waitFor("new environment button", () => xpath("//button[contains(normalize-space(.),'新建环境')]")));
     await fill("#profile-name", name);
     await click(await xpath("//select[@id='profile-runtime']/option[starts-with(normalize-space(.),'Microsoft Edge')][not(@disabled)]"));
     if (index === 0) {
@@ -257,6 +258,7 @@ try {
   }
   assert.equal(new Set(profileIds).size, names.length);
   for (const [index, name] of names.entries()) {
+    stage = "installed-ui-start-" + (index + 1);
     await cardAction(name, "启动");
     await waitCardStatus(name, index < 10 ? "运行中" : "排队中");
   }
