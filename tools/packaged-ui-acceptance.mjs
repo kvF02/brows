@@ -91,6 +91,10 @@ const profileCard = name => "//article[contains(@class,'profile-card')][.//h2[@t
 const cardText = async (name, part) => command("GET", "/element/" + await xpath(profileCard(name) + part) + "/text");
 async function cardAction(name, action) {
   const id = await xpath(profileCard(name) + "//button[normalize-space(.)='" + action + "']");
+  await command("POST", "/execute/sync", {
+    script: "arguments[0].scrollIntoView({block:'center',inline:'center'});",
+    args: [{ [elementKey]: id }],
+  });
   await click(id);
 }
 async function notice(fragment) {
