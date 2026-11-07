@@ -8,6 +8,7 @@ $app = (Resolve-Path -LiteralPath $Application).Path
 $installRoot = [IO.Path]::GetFullPath((Join-Path $env:GITHUB_WORKSPACE 'target/installed'))
 if ([IO.Path]::GetDirectoryName($app) -ine $installRoot -or [IO.Path]::GetFileName($app) -ine 'brows-desktop.exe') { throw 'Application must be the CI-installed build' }
 $probe = $null
+$tlsDirectory = $null
 $probeTrace = Join-Path $env:RUNNER_TEMP 'brows-ui-runtime-discovery.stderr.txt'
 $stage = 'runtime-window-startup'
 function Read-Version([string]$File) {
@@ -57,6 +58,25 @@ try {
     if (-not (Read-Version $driver).StartsWith("$branch.")) { throw 'WebView2 and WebDriver build mismatch' }
     $env:BROWS_UI_WEBVIEW_VERSION = $version
     Write-Output "Testing packaged UI with WebView2 $version and driver $(Read-Version $driver)"
+    $stage = 'local-tls-fixture'
+    $tlsDirectory = Join-Path $env:RUNNER_TEMP ('brows-ui-tls-' + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Path $tlsDirectory | Out-Null
+    $tlsOutput = Join-Path $tlsDirectory 'setup.stdout.txt'
+    $tlsError = Join-Path $tlsDirectory 'setup.stderr.txt'
+    $tlsSetup = Start-Process -FilePath (Get-Command pwsh.exe).Source -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-File', "$PSScriptRoot/windows-ui-tls-fixture.ps1", '-Directory', $tlsDirectory) -NoNewWindow -PassThru -RedirectStandardOutput $tlsOutput -RedirectStandardError $tlsError
+    if (-not $tlsSetup.WaitForExit(45000)) {
+        $tlsSetup.Kill($true)
+        $tlsSetup.WaitForExit()
+        Get-Content -LiteralPath $tlsOutput -Tail 8 | Write-Output
+        throw 'CI TLS certificate setup exceeded 45 seconds'
+    }
+    Get-Content -LiteralPath $tlsOutput -Tail 8 | Write-Output
+    if ($tlsSetup.ExitCode -ne 0) {
+        Get-Content -LiteralPath $tlsError -Tail 8 | Write-Output
+        throw 'CI TLS certificate setup failed'
+    }
+    $env:BROWS_UI_TLS_PFX = Join-Path $tlsDirectory 'valid.pfx'
+    $env:BROWS_UI_UNTRUSTED_TLS_PFX = Join-Path $tlsDirectory 'untrusted.pfx'
     $stage = 'webdriver'
     $principal = [Security.Principal.WindowsPrincipal]::new([Security.Principal.WindowsIdentity]::GetCurrent())
     if ($principal.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
@@ -117,4 +137,21 @@ finally { [IO.File]::WriteAllText($(Quote-Literal $done), [string]`$code) }
     if ($probe -and -not $probe.HasExited) { Stop-Process -Id $probe.Id -Force -ErrorAction SilentlyContinue }
     # Only this CI build is owned. Never stop browsers by process image name.
     Get-CimInstance Win32_Process -Filter "Name='brows-desktop.exe'" | Where-Object { $_.ExecutablePath -ieq $app } | ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
+    if ($tlsDirectory) {
+        $manifestPath = Join-Path $tlsDirectory 'manifest.json'
+        if (Test-Path -LiteralPath $manifestPath) {
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+            $expectedSubject = 'CN=Brows disposable UI test root ' + [IO.Path]::GetFileName($tlsDirectory)
+            if ($manifest.subject -eq $expectedSubject) {
+                if ($manifest.root -match '^[A-Fa-f0-9]{40}$') {
+                    $rootPath = "Cert:\LocalMachine\Root\$($manifest.root)"
+                    if ((Get-Item -LiteralPath $rootPath -ErrorAction SilentlyContinue).Subject -eq $expectedSubject) { Remove-Item -LiteralPath $rootPath -ErrorAction SilentlyContinue }
+                }
+                foreach ($thumbprint in $manifest.my) {
+                    if ($thumbprint -match '^[A-Fa-f0-9]{40}$') { Remove-Item -LiteralPath "Cert:\CurrentUser\My\$thumbprint" -DeleteKey -ErrorAction SilentlyContinue }
+                }
+            }
+        }
+        Remove-Item -LiteralPath $tlsDirectory -Recurse -Force -ErrorAction SilentlyContinue
+    }
 }
