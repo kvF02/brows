@@ -1,0 +1,42 @@
+name: Requested authenticated proxy diagnostics
+on:
+  push:
+    branches: [codex/run-authenticated-proxy]
+    paths: ['.github/workflows/requested-authenticated-proxy.yml']
+permissions:
+  contents: read
+concurrency:
+  group: requested-authenticated-proxy
+  cancel-in-progress: true
+jobs:
+  diagnose:
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: 06ea379ba41438d43a3809ad93f91e95de2effb2
+          persist-credentials: false
+      - name: Build the reviewed production-adapter probe
+        shell: pwsh
+        run: |
+          cargo build -p brows-adapters-proxy --example public_proxy_probe --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          @{ productCommit = (git rev-parse HEAD); diagnosticCommit = $env:GITHUB_SHA } | ConvertTo-Json | Set-Content target/proxy-acceptance-build.json
+      - name: Check the two authorized proxies through HTTP and SOCKS5
+        shell: pwsh
+        env:
+          BROWS_PROXY_ENDPOINTS: 82.22.73.227:7433,64.52.28.63:7750
+          BROWS_PROXY_ACCEPTANCE_USERNAME: ${{ secrets.BROWS_PROXY_ACCEPTANCE_USERNAME }}
+          BROWS_PROXY_ACCEPTANCE_PASSWORD: ${{ secrets.BROWS_PROXY_ACCEPTANCE_PASSWORD }}
+        run: ./tools/windows-authenticated-proxy-acceptance.ps1 -Protocols both
+      - name: Preserve sanitized results only
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: requested-authenticated-proxy-diagnostics
+          path: |
+            target/authenticated-proxy-acceptance.json
+            target/proxy-acceptance-build.json
+          if-no-files-found: warn
+          retention-days: 7
