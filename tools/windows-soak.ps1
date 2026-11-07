@@ -1,7 +1,8 @@
 param(
     [Parameter(Mandatory)][string]$TestExecutable,
     [Parameter(Mandatory)][ValidateRange(60, 14400)][int]$Seconds,
-    [Parameter(Mandatory)][string]$Report
+    [Parameter(Mandatory)][string]$Report,
+    [ValidateSet('SystemNative', 'SeedableNoise')][string]$Persona = 'SystemNative'
 )
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'The Windows soak requires PowerShell on Windows' }
@@ -26,13 +27,13 @@ $result = [ordered]@{
     platform = [Environment]::OSVersion.VersionString
     loopbackSleepException = $env:BROWS_SOAK_LOOPBACK_POLICY
     commit = $env:GITHUB_SHA
-    persona = 'SystemNative'
+    persona = $Persona
     concurrentProfiles = 10
     requestedSeconds = $Seconds
     observedSeconds = 0
     checks = $checks
     samples = $samples
-    notChecked = @('packaged UI soak', 'SeedableNoise soak', 'real websites', 'power loss', 'resource limits')
+    notChecked = @('packaged UI soak', 'real websites and public DNS/ICE', 'power loss', 'resource limits')
     failure = $null
 }
 
@@ -40,7 +41,12 @@ function Start-SoakHost([string]$Phase) {
     $start = @{
         FilePath = $testExe
         ArgumentList = @('--ignored', '--exact', 'state::tests::soak::desktop_soak_host', '--nocapture')
-        Environment = @{ BROWS_SOAK_ROOT = $root; BROWS_SOAK_PHASE = $Phase; BROWS_SOAK_SECONDS = [string]$Seconds }
+        Environment = @{
+            BROWS_SOAK_ROOT = $root
+            BROWS_SOAK_PHASE = $Phase
+            BROWS_SOAK_SECONDS = [string]$Seconds
+            BROWS_SOAK_PERSONA = $Persona
+        }
         RedirectStandardOutput = Join-Path $root "$Phase.stdout.txt"
         RedirectStandardError = Join-Path $root "$Phase.stderr.txt"
         PassThru = $true
@@ -131,6 +137,7 @@ try {
     Wait-SoakMarker $soakProcess 'steady-ready.json' 180
     $ready = Get-Content -LiteralPath (Join-Path $root 'steady-ready.json') -Raw | ConvertFrom-Json
     $result.runtimeVersion = $ready.runtimeVersion
+    if ($Persona -eq 'SeedableNoise') { $result.runtimeId = $ready.runtimeId }
     $checks.Add('ten-pages-sending-heartbeats')
 
     $stage = 'steady'
@@ -168,7 +175,16 @@ try {
     $stage = 'browser-crash'
     $snapshot = @(Read-ProcessSnapshot)
     $roots = @(Find-BrowserRoots $snapshot $soakProcess.Id $ready)
-    $victims = @($roots | Where-Object { $_.CommandLine.Contains($ready.victimPage) })
+    if ($Persona -eq 'SeedableNoise') {
+        # Controlled startup URLs are sent through the pipe. Match the exact
+        # user-data argument emitted for the first fixture-owned browser.
+        $argument = '"--user-data-dir=' + $ready.victimUserData.Replace('\\?\', '') + '"'
+        $victims = @($roots | Where-Object {
+            $_.CommandLine.Replace('\\?\', '').Contains($argument, [StringComparison]::OrdinalIgnoreCase)
+        })
+    } else {
+        $victims = @($roots | Where-Object { $_.CommandLine.Contains($ready.victimPage) })
+    }
     if ($victims.Count -ne 1) { throw 'Could not identify the owned fault target' }
     $victimTree = @(Find-ProcessTree $snapshot $victims)
     $tracked += $victimTree
@@ -198,8 +214,24 @@ try {
     Wait-SoakMarker $reopened 'reopen-verified' 120
     if (-not $reopened.WaitForExit(30000) -or $reopened.ExitCode -ne 0) { throw 'The reopened test host failed' }
     $checks.Add('sqlite-profiles-and-relaunch-survive-host-crash')
+    if ($Persona -eq 'SeedableNoise') {
+        $evidence = Get-Content -LiteralPath (Join-Path $root 'reopen-verified') -Raw | ConvertFrom-Json
+        if ($evidence.restartedProfiles -ne 11 -or $evidence.profileSignals.Count -ne 11) {
+            throw 'Missing SeedableNoise fingerprint recovery evidence'
+        }
+        $result.restartedProfiles = $evidence.restartedProfiles
+        $result.contexts = $evidence.contexts
+        $result.profileSignals = $evidence.profileSignals
+        $result.complete = $false
+        $checks.Add('distinct-seed-canvas')
+        $checks.Add('page-and-worker-consistency')
+        $checks.Add('continuous-page-canvas')
+        $checks.Add('eleven-fresh-matching-fingerprints-after-host-crash')
+        Write-Output 'All eleven reopened SeedableNoise profiles reproduced their page and Worker signals'
+    } else {
+        Write-Output 'Reopened all eleven profiles and relaunched an existing profile'
+    }
     $result.assertionsPassed = $true
-    Write-Output 'Reopened all eleven profiles and relaunched an existing profile'
 } catch {
     $result.failure = @{ stage = $stage; message = $_.Exception.Message }
     foreach ($name in @('exercise.stdout.txt', 'exercise.stderr.txt', 'reopen.stdout.txt', 'reopen.stderr.txt')) {
@@ -208,7 +240,7 @@ try {
     }
     throw
 } finally {
-    $result | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $reportPath -Encoding utf8
+    $result | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $reportPath -Encoding utf8
     foreach ($process in @($soakProcess, $reopened)) {
         if ($process -and -not $process.HasExited) { $process.Kill(); $null = $process.WaitForExit(15000) }
     }
