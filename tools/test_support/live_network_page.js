@@ -8,7 +8,7 @@ void (async () => {
       const response = await fetch(url, {
         signal: controller.signal, credentials: 'omit', cache: 'no-store', redirect: 'error',
       });
-      if (response.status !== 200) throw new Error('http');
+      if (response.status !== 200) throw new Error('http_' + response.status);
       const reader = response.body.getReader();
       const chunks = []; let size = 0;
       for (;;) {
@@ -23,17 +23,24 @@ void (async () => {
       return JSON.parse(new TextDecoder().decode(bytes));
     } finally { clearTimeout(timer); }
   };
+  const failure = error => {
+    if (error?.name === 'AbortError') return 'request_timeout';
+    if (error?.message === 'size') return 'response_too_large';
+    if (/^http_[1-5][0-9]{2}$/.test(error?.message)) return error.message;
+    if (error?.name === 'SyntaxError') return 'invalid_json';
+    return 'request_failed';
+  };
   const ip = json('https://api.ipify.org/?format=json')
     .then(value => ({status: 'observed', ip: typeof value.ip === 'string' ? value.ip.slice(0, 64) : null}))
-    .catch(() => ({status: 'not_checked', reason: 'https_request_failed'}));
+    .catch(error => ({status: 'not_checked', reason: failure(error)}));
   const dns = Promise.all(['dns4', 'dns6'].map(async family => {
-    const nonce = Array.from(crypto.getRandomValues(new Uint8Array(12)), n => n.toString(16).padStart(2, '0')).join('');
+    const nonce = Array.from(crypto.getRandomValues(new Uint8Array(6)), n => n.toString(16).padStart(2, '0')).join('');
     try {
       // Operator-owned authoritative DNS test. A new hostname prevents cache reuse.
       const value = await json(`https://${nonce}.${family}.browserleaks.net/`);
       const resolvers = value && typeof value === 'object' && !Array.isArray(value) ? Object.keys(value) : [];
       return {family, status: resolvers.length ? 'observed' : 'not_checked', resolvers: resolvers.slice(0, 32)};
-    } catch { return {family, status: 'not_checked', resolvers: []}; }
+    } catch (error) { return {family, status: 'not_checked', reason: failure(error), resolvers: []}; }
   }));
   const rtc = new Promise(resolve => {
     let peer, timer, finished = false;

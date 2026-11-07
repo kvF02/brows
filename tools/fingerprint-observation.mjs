@@ -72,7 +72,7 @@ export function parseObservation(html) {
 export function browserArgs(directory, url, extension, language = 'pl-PL') {
   return ['--headless=new', '--dump-dom', '--no-first-run', '--no-default-browser-check',
     '--disable-background-networking', '--disable-component-update', '--disable-sync',
-    '--force-webrtc-ip-handling-policy=disable_non_proxied_udp', '--window-size=900,700',
+    '--webrtc-ip-handling-policy=disable_non_proxied_udp', '--window-size=900,700',
     '--virtual-time-budget=5000', `--lang=${language}`, `--user-data-dir=${directory}`,
     ...(extension ? [`--load-extension=${extension}`] : []), url];
 }
