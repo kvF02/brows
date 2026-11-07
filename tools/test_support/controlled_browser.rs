@@ -131,7 +131,11 @@ impl ControlFixture {
             if let Ok(index) = index.parse::<usize>() {
                 if index < 11 && (!heartbeat || headers.starts_with("POST ")) {
                     let (kind, content) = if heartbeat {
-                        let key = format!("/soak/{index}/heartbeat");
+                        let key = if body == b"canvas-changed" {
+                            format!("/soak/{index}/canvas-changed")
+                        } else {
+                            format!("/soak/{index}/heartbeat")
+                        };
                         let mut proofs = output.lock().unwrap();
                         if let Some((_, _, count)) =
                             proofs.iter_mut().find(|(path, _, _)| path == &key)
@@ -223,6 +227,15 @@ impl ControlFixture {
                 String::from_utf8_lossy(&body)
             );
             ("ok".to_owned(), "text/plain")
+        } else if path.starts_with("/seeded-soak/") && path.ends_with("/page") {
+            let workload = include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tools/test_support/seeded_soak_page.js"
+            ));
+            (
+                format!("<!doctype html><meta charset='utf-8'><script>{script}{workload}</script>"),
+                "text/html",
+            )
         } else {
             let worker = if path.ends_with("page") {
                 include_str!(concat!(
