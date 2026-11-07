@@ -1,0 +1,71 @@
+name: Authenticated proxy acceptance
+on:
+  workflow_dispatch:
+    inputs:
+      endpoints:
+        description: 'Authorized proxy IPv4:port addresses, comma separated; no credentials'
+        required: true
+        type: string
+      protocols:
+        description: Protocols that must pass for every endpoint
+        type: choice
+        options: [both, http, socks5]
+        default: both
+  pull_request:
+    paths:
+      - '.github/workflows/authenticated-proxy-acceptance.yml'
+      - 'tools/windows-authenticated-proxy-acceptance.ps1'
+      - 'tools/test-authenticated-proxy-acceptance.ps1'
+      - 'tools/proxy-probe-env.test.mjs'
+      - 'crates/adapters-proxy/examples/public_proxy_probe.rs'
+permissions:
+  contents: read
+concurrency:
+  group: authenticated-proxy-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  validate:
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Compile the production-adapter probe
+        run: cargo build -p brows-adapters-proxy --example public_proxy_probe --locked
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Verify actual HTTP and SOCKS5 credential forwarding on loopback
+        shell: pwsh
+        env:
+          BROWS_TEST_PROXY_PROBE: target/debug/examples/public_proxy_probe.exe
+        run: node --test --test-timeout=30000 tools/proxy-probe-env.test.mjs
+      - name: Verify bounded processes and sanitized evidence using dummy data
+        shell: pwsh
+        run: ./tools/test-authenticated-proxy-acceptance.ps1
+  live:
+    needs: validate
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/master'
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: cargo build -p brows-adapters-proxy --example public_proxy_probe --locked
+      - name: Compare curl and Brows through the supplied authenticated proxies
+        shell: pwsh
+        env:
+          BROWS_PROXY_ENDPOINTS: ${{ inputs.endpoints }}
+          BROWS_PROXY_PROTOCOLS: ${{ inputs.protocols }}
+          BROWS_PROXY_ACCEPTANCE_USERNAME: ${{ secrets.BROWS_PROXY_ACCEPTANCE_USERNAME }}
+          BROWS_PROXY_ACCEPTANCE_PASSWORD: ${{ secrets.BROWS_PROXY_ACCEPTANCE_PASSWORD }}
+        run: ./tools/windows-authenticated-proxy-acceptance.ps1 -Protocols $env:BROWS_PROXY_PROTOCOLS
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: authenticated-proxy-acceptance-${{ github.run_id }}
+          path: target/authenticated-proxy-acceptance.json
+          if-no-files-found: warn
+          retention-days: 7
