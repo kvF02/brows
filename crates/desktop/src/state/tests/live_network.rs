@@ -223,6 +223,13 @@ fn live_browser_network_acceptance() {
         .into_iter()
         .find(|b| b.provider == "Microsoft Edge")
         .expect("signed Edge");
+    let edge = harness
+        .state()
+        .runtime_management
+        .as_ref()
+        .unwrap()
+        .capture(edge.id)
+        .expect("capture admitted Edge through production runtime management");
     let support = harness
         .state()
         .browsers
