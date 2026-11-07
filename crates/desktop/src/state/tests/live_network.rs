@@ -223,16 +223,25 @@ fn live_browser_network_acceptance() {
         .into_iter()
         .find(|b| b.provider == "Microsoft Edge")
         .expect("signed Edge");
-    let edge = harness
+    let support = harness
         .state()
         .browsers
         .probe_fingerprint_support(&edge.id)
-        .unwrap()
-        .build;
+        .unwrap();
+    write_report(&json!({
+        "schemaVersion": 1, "complete": false, "phase": "capability_probe",
+        "productCommit": env::var("BROWS_PRODUCT_COMMIT").ok(),
+        "browserVersion": support.build.version,
+        "fingerprintSupport": format!("{:?}", support.build.capabilities.fingerprint_support),
+        "detail": support.detail,
+    }));
+    let edge = support.build;
     assert_eq!(edge.trust, brows_domain::RuntimeTrust::Verified);
     assert_eq!(
         edge.capabilities.fingerprint_support,
-        brows_domain::FingerprintSupport::Supported
+        brows_domain::FingerprintSupport::Supported,
+        "{}",
+        support.detail
     );
     let mut native = draft("Live network direct control");
     native.browser = BrowserSelectorDto::Pinned {
