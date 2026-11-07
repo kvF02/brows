@@ -1,11 +1,11 @@
 use super::super::{draft, started, AppState, ControlFixture, NativeAcceptanceRoot};
 use super::{await_condition, page_hits, verify_steady_load};
 use brows_contracts::{
-    BrowserSelectorDto, DeviceMemoryDto, PersonaDto, PlatformDto, ProfileCreateRequest,
-    ProfileDto, ProfileIdRequest, ScreenConfigDto, SessionDto, SessionLaunchRequest,
-    SessionStateDto, SessionStopRequest,
+    BrowserSelectorDto, DeviceMemoryDto, PersonaDto, PlatformDto, ProfileCreateRequest, ProfileDto,
+    ProfileIdRequest, ScreenConfigDto, SessionDto, SessionLaunchRequest, SessionStateDto,
+    SessionStopRequest,
 };
-use brows_domain::{BrowserBuild, FingerprintSupport, RuntimeTrust, SessionId};
+use brows_domain::{BrowserBuild, BrowserBuildId, FingerprintSupport, RuntimeTrust, SessionId};
 use serde_json::{json, Value};
 use std::{collections::BTreeSet, env, fs, path::PathBuf, time::Duration};
 
@@ -24,16 +24,9 @@ const FIELDS: [&str; 10] = [
     "canvas",
 ];
 
-fn admitted_edge(state: &AppState) -> BrowserBuild {
-    let edge = state
-        .browsers
-        .list_builds()
-        .unwrap()
-        .into_iter()
-        .find(|build| build.provider == "Microsoft Edge")
-        .expect("signed Edge registered");
-    assert_eq!(edge.trust, RuntimeTrust::Verified);
-    let result = state.browsers.probe_fingerprint_support(&edge.id).unwrap();
+fn admitted_edge(state: &AppState, id: &BrowserBuildId) -> BrowserBuild {
+    let result = state.browsers.probe_fingerprint_support(id).unwrap();
+    assert_eq!(result.build.trust, RuntimeTrust::Verified);
     assert_eq!(
         result.build.capabilities.fingerprint_support,
         FingerprintSupport::Supported,
@@ -75,26 +68,30 @@ fn stop_all(state: &AppState, sessions: Vec<SessionDto>) {
 
 fn capture_matrix(fixture: &ControlFixture, revision: u64) -> Vec<Value> {
     let mut captures = None;
-    await_condition(90, "first-script page and Worker proofs for all ten profiles", || {
-        let proofs = fixture.proofs.lock().unwrap();
-        captures = (0..PROFILES)
-            .map(|index| {
-                let sample = |kind| {
-                    let expected = format!("/seeded-soak/{index}/{kind}/proof");
-                    proofs
-                        .iter()
-                        .find(|(path, _, value)| {
-                            path == &expected
-                                && value["kind"] == kind
-                                && value["fixtureVersion"] == revision
-                        })
-                        .map(|(_, _, value)| value.clone())
-                };
-                Some([sample(CONTEXTS[0])?, sample(CONTEXTS[1])?])
-            })
-            .collect::<Option<Vec<_>>>();
-        captures.is_some()
-    });
+    await_condition(
+        90,
+        "first-script page and Worker proofs for all ten profiles",
+        || {
+            let proofs = fixture.proofs.lock().unwrap();
+            captures = (0..PROFILES)
+                .map(|index| {
+                    let sample = |kind| {
+                        let expected = format!("/seeded-soak/{index}/{kind}/proof");
+                        proofs
+                            .iter()
+                            .find(|(path, _, value)| {
+                                path == &expected
+                                    && value["kind"] == kind
+                                    && value["fixtureVersion"] == revision
+                            })
+                            .map(|(_, _, value)| value.clone())
+                    };
+                    Some([sample(CONTEXTS[0])?, sample(CONTEXTS[1])?])
+                })
+                .collect::<Option<Vec<_>>>();
+            captures.is_some()
+        },
+    );
 
     let unmodified_canvas = "a42367ff".repeat(16 * 16);
     let matrix: Vec<_> = captures
@@ -119,9 +116,18 @@ fn capture_matrix(fixture: &ControlFixture, revision: u64) -> Vec<Value> {
             assert_eq!(page["offsetSummer"], -540);
             let canvas = page["canvas"].as_str().unwrap();
             assert_eq!(canvas.len(), unmodified_canvas.len());
-            assert_ne!(canvas, unmodified_canvas, "profile {index} returned unmodified Canvas");
-            assert_eq!(page["repeat"], page["canvas"], "profile {index} page repeat");
-            assert_eq!(worker["repeat"], page["canvas"], "profile {index} Worker repeat");
+            assert_ne!(
+                canvas, unmodified_canvas,
+                "profile {index} returned unmodified Canvas"
+            );
+            assert_eq!(
+                page["repeat"], page["canvas"],
+                "profile {index} page repeat"
+            );
+            assert_eq!(
+                worker["repeat"], page["canvas"],
+                "profile {index} Worker repeat"
+            );
             Value::Object(
                 FIELDS
                     .iter()
@@ -134,7 +140,11 @@ fn capture_matrix(fixture: &ControlFixture, revision: u64) -> Vec<Value> {
         .iter()
         .map(|sample| sample["canvas"].as_str().unwrap())
         .collect();
-    assert_eq!(distinct.len(), PROFILES, "the ten fixture seeds must be distinct");
+    assert_eq!(
+        distinct.len(),
+        PROFILES,
+        "the ten fixture seeds must be distinct"
+    );
     matrix
 }
 
@@ -149,7 +159,21 @@ fn seedable_noise_soak() {
     let owned = NativeAcceptanceRoot::new("seeded-soak");
     let fixture = ControlFixture::start(false);
     let state = AppState::production(owned.0.clone()).unwrap();
-    let edge = admitted_edge(&state);
+    let installed = state
+        .browsers
+        .list_builds()
+        .unwrap()
+        .into_iter()
+        .find(|build| build.provider == "Microsoft Edge")
+        .expect("signed Edge registered");
+    let snapshot = state
+        .runtime_management
+        .as_ref()
+        .unwrap()
+        .capture(installed.id)
+        .unwrap();
+    let edge = admitted_edge(&state, &snapshot.id);
+    println!("Managed Edge {} admitted", edge.version);
     let profiles: Vec<_> = (0..PROFILES)
         .map(|index| {
             let mut profile = draft(&format!("seeded-soak-{index}"));
@@ -205,7 +229,7 @@ fn seedable_noise_soak() {
 
     let state = AppState::production(owned.0.clone()).unwrap();
     assert!(state.sessions.list().unwrap().is_empty());
-    let reopened_edge = admitted_edge(&state);
+    let reopened_edge = admitted_edge(&state, &edge.id);
     assert_eq!(edge.id, reopened_edge.id);
     assert_eq!(edge.sha256, reopened_edge.sha256);
     for profile in &profiles {
@@ -228,7 +252,10 @@ fn seedable_noise_soak() {
     }
     for (index, (before, after)) in initial.iter().zip(after.iter()).enumerate() {
         for field in FIELDS {
-            assert_eq!(before[field], after[field], "profile {index} changed {field} after restart");
+            assert_eq!(
+                before[field], after[field],
+                "profile {index} changed {field} after restart"
+            );
         }
     }
     stop_all(&state, restarted);
@@ -239,6 +266,7 @@ fn seedable_noise_soak() {
         "complete": false,
         "commit": env::var("GITHUB_SHA").ok(),
         "runtimeVersion": edge.version,
+        "runtimeId": edge.id.as_str(),
         "persona": "SeedableNoise",
         "loopbackSleepException": env::var("BROWS_SOAK_LOOPBACK_POLICY").ok(),
         "concurrentProfiles": PROFILES,

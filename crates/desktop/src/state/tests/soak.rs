@@ -45,8 +45,13 @@ fn verify_steady_load(
     queued_profile: Option<&ProfileIdDto>,
 ) -> u64 {
     let started_at = Instant::now();
-    let initial_hits: Vec<_> = (0..ids.len()).map(|index| page_hits(fixture, index)).collect();
-    let mut activity: Vec<_> = initial_hits.iter().map(|&count| (count, started_at)).collect();
+    let initial_hits: Vec<_> = (0..ids.len())
+        .map(|index| page_hits(fixture, index))
+        .collect();
+    let mut activity: Vec<_> = initial_hits
+        .iter()
+        .map(|&count| (count, started_at))
+        .collect();
     loop {
         state.sessions.reconcile_exits().unwrap();
         for (index, (count, last_seen)) in activity.iter_mut().enumerate() {
