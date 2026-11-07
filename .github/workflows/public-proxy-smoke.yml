@@ -1,46 +1,42 @@
-name: Public proxy smoke diagnostics
+name: Public proxy TLS regression
 on:
   push:
     branches: [codex/public-proxy-smoke]
-    paths:
-      - '.github/workflows/public-proxy-smoke.yml'
-      - 'tools/public-proxy-smoke.ps1'
-      - 'crates/adapters-proxy/examples/public_proxy_probe.rs'
+    paths: ['.github/workflows/public-proxy-smoke.yml']
 permissions:
   contents: read
 jobs:
-  public-proxy:
+  tls-recheck:
     runs-on: windows-latest
-    timeout-minutes: 10
+    timeout-minutes: 6
     steps:
       - uses: actions/checkout@v4
-      - name: Build and check the actual Brows proxy adapter
+      - name: Check the previously reachable public SOCKS5 with verified HTTPS
         shell: pwsh
         run: |
-          cargo fmt --all -- --check
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          cargo test -p brows-adapters-proxy --locked
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $ErrorActionPreference = 'Stop'
+          $PSNativeCommandUseErrorActionPreference = $false
+          New-Item -ItemType Directory -Force target | Out-Null
           cargo build -p brows-adapters-proxy --example public_proxy_probe --locked
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Recheck one reachable SOCKS5 and two public alternatives
-        timeout-minutes: 5
-        shell: pwsh
-        run: |
-          # Public, anonymous samples retrieved from the source on 2026-11-07.
-          # They are temporary diagnostics, never application defaults.
-          @'
-          [
-            {"scheme":"http","host":"45.91.248.107","port":80},
-            {"scheme":"socks5","host":"185.239.141.194","port":10808},
-            {"scheme":"socks5","host":"184.178.172.17","port":4145}
-          ]
-          '@ | Set-Content public-proxy-candidates.json
-          ./tools/public-proxy-smoke.ps1 -Candidates public-proxy-candidates.json
-      - name: Preserve public-proxy evidence
+          $output = & ./target/debug/examples/public_proxy_probe.exe socks5 184.178.172.17 4145
+          $code = $LASTEXITCODE
+          $text = [string] $output
+          $rejectedUntrustedTls = $code -eq 1 -and $text -eq 'ERROR|ProxyConnect|proxy TLS certificate verification or handshake failed'
+          @{
+            productCommit = '305b1a2b60ffb1a7d8fe133495568f9f02b24be4'
+            observedAt = [DateTimeOffset]::UtcNow.ToString('o')
+            source = 'https://geonode.com/free-proxy-list/usa'
+            proxy = 'socks5://184.178.172.17:4145'
+            adapterExit = $code
+            adapterResult = $text
+            rejectedUntrustedTls = $rejectedUntrustedTls
+            scope = 'Single anonymous fixed HTTPS IP request via production adapter. No user credentials, direct fallback or certificate-validation bypass.'
+          } | ConvertTo-Json | Tee-Object target/public-proxy-tls-regression.json
+          if (-not $rejectedUntrustedTls) { throw 'Public endpoint changed or could not reproduce TLS rejection; inspect the evidence' }
+      - uses: actions/upload-artifact@v4
         if: always()
-        uses: actions/upload-artifact@v4
         with:
-          name: public-proxy-smoke-${{ github.sha }}
-          path: target/public-proxy-smoke.json
+          name: public-proxy-tls-regression
+          path: target/public-proxy-tls-regression.json
           if-no-files-found: warn
