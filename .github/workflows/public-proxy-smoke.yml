@@ -34,6 +34,7 @@ jobs:
             scope = 'Single anonymous fixed HTTPS IP request via production adapter. No user credentials, direct fallback or certificate-validation bypass.'
           } | ConvertTo-Json | Tee-Object target/public-proxy-tls-regression.json
           if (-not $rejectedUntrustedTls) { throw 'Public endpoint changed or could not reproduce TLS rejection; inspect the evidence' }
+          exit 0
       - uses: actions/upload-artifact@v4
         if: always()
         with:
