@@ -43,6 +43,7 @@ test('collects actual exit, fresh DNS names and positive STUN evidence without c
   assert.deepEqual(report.dns.map(v => v.status), ['observed', 'observed']);
   const names = requests.filter(v => v.url.includes('browserleaks.net')).map(v => new URL(v.url).hostname);
   assert.equal(names.length, 2);
+  for (const name of names) assert.match(name, /^[0-9a-f]{12}\.dns[46]\.browserleaks\.net$/);
   assert.notEqual(names[0].split('.')[0], names[1].split('.')[0]);
   assert.deepEqual(report.webrtc.srflx, ['198.51.100.6']);
   assert.deepEqual(report.webrtc.protocols, ['udp']);
@@ -67,6 +68,7 @@ test('missing resolver and ICE evidence remains incomplete', async () => {
 test('oversized public responses and RTC errors do not become successful measurements', async () => {
   const {report, peers} = await run({oversized: true, rtc: 'error'});
   assert.equal(report.https.status, 'not_checked');
+  assert.equal(report.https.reason, 'response_too_large');
   assert.equal(report.webrtc.status, 'error');
   assert.equal(peers[0].closed, true);
 });

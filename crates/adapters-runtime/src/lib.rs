@@ -389,7 +389,7 @@ impl ManagedChromiumRuntime {
                 }
                 LaunchArgument::DisableNonProxiedWebRtc => {
                     rendered.push(OsString::from(
-                        "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+                        "--webrtc-ip-handling-policy=disable_non_proxied_udp",
                     ));
                 }
                 LaunchArgument::AcceptLanguages(languages) => {
