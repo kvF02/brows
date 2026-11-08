@@ -51,6 +51,9 @@ jobs:
       - name: Verify native, seeded, reopened and different-seed GPU pixel paths
         timeout-minutes: 3
         run: cargo +1.97.1 test -p brows-adapters-runtime private_webgl_pixel_acceptance --locked -- --ignored --nocapture
+      - name: Stress fresh browser navigation without retries
+        timeout-minutes: 5
+        run: cargo +1.97.1 test -p brows-adapters-runtime private_startup_navigation_stress_acceptance --locked -- --ignored --nocapture
       - name: Repeat real first-navigation and lifecycle checks without retries
         timeout-minutes: 10
         shell: pwsh
@@ -71,6 +74,7 @@ jobs:
           name: navigation-lifecycle-evidence
           path: |
             target/fingerprint-pending-navigation-acceptance.json
+            target/fingerprint-startup-navigation-stress-acceptance.json
             target/fingerprint-webgl-pixels-acceptance.json
             target/fingerprint-worker-lifecycle-acceptance.json
             target/fingerprint-renderer-crash-acceptance.json

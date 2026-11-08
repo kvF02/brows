@@ -1,6 +1,31 @@
 //! Correlate first-navigation start, independently of the website's response.
 use url::Url;
 
+#[cfg(test)]
+pub(super) fn document_result_code(result: &serde_json::Value) -> Option<&str> {
+    result["errorText"].as_str().filter(|code| {
+        code.len() <= 64
+            && code.starts_with("net::ERR_")
+            && !code[9..].is_empty()
+            && code[9..]
+                .bytes()
+                .all(|b| b.is_ascii_uppercase() || b.is_ascii_digit() || b == b'_')
+    })
+}
+
+#[cfg(test)]
+pub(super) fn document_url_kind(url: &str) -> &'static str {
+    if url == "about:blank" {
+        "blank"
+    } else if url.starts_with("chrome-error://") {
+        "browser-error"
+    } else if url.starts_with("http://") || url.starts_with("https://") {
+        "web"
+    } else {
+        "other"
+    }
+}
+
 pub(super) fn navigation_reply_acknowledged(result: &serde_json::Value, frame: &str) -> bool {
     // errorText/isDownload describe the website outcome, not protocol failure.
     // Website success is verified separately, never inferred from this ack.
@@ -49,6 +74,31 @@ impl NavigationStart {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn document_diagnostics_keep_fixed_codes_and_url_classes_without_private_values() {
+        for code in ["net::ERR_ABORTED", "net::ERR_HTTP2_PROTOCOL_ERROR"] {
+            assert_eq!(
+                document_result_code(&serde_json::json!({"errorText":code})),
+                Some(code)
+            );
+        }
+        for code in [
+            "net::ERR_",
+            "net::ERR_ABORTED https://private.test/?token=secret",
+            "anything",
+        ] {
+            assert!(document_result_code(&serde_json::json!({"errorText":code})).is_none());
+        }
+        assert_eq!(
+            document_url_kind("https://user:secret@private.test/path"),
+            "web"
+        );
+        assert_eq!(document_url_kind("about:blank"), "blank");
+        assert_eq!(
+            document_url_kind("chrome-error://chromewebdata/"),
+            "browser-error"
+        );
+    }
     #[test]
     fn website_errors_acknowledge_the_request_without_claiming_a_loaded_document() {
         for outcome in [
