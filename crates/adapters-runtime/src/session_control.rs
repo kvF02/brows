@@ -669,6 +669,9 @@ impl Controller {
         self.wire.fail();
         Ok(())
     }
+    pub(super) fn request_close(&self) -> std::io::Result<bool> {
+        self.wire.process.request_close()
+    }
     pub(super) fn wait(&self) -> std::io::Result<()> {
         self.wire.process.wait()
     }

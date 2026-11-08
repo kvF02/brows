@@ -115,6 +115,38 @@ extern "system" {
     fn GetExitCodeProcess(process: Handle, code: *mut u32) -> i32;
     fn TerminateProcess(process: Handle, code: u32) -> i32;
 }
+#[link(name = "user32")]
+extern "system" {
+    fn EnumWindows(
+        callback: unsafe extern "system" fn(Handle, isize) -> i32,
+        parameter: isize,
+    ) -> i32;
+    fn GetWindowThreadProcessId(window: Handle, process_id: *mut u32) -> u32;
+    fn IsWindowVisible(window: Handle) -> i32;
+    fn PostMessageW(window: Handle, message: u32, word: usize, parameter: isize) -> i32;
+}
+struct CloseWindows {
+    process: Handle,
+    id: u32,
+    posted: bool,
+}
+unsafe extern "system" fn close_owned_window(window: Handle, parameter: isize) -> i32 {
+    // SAFETY: EnumWindows invokes this synchronously with the caller's live
+    // stack context. No pointer or window handle escapes the callback.
+    let context = unsafe { &mut *(parameter as *mut CloseWindows) };
+    let mut owner = 0;
+    // Keep the original owned process handle live and unsignalled, so PID
+    // reuse cannot cause a close request to reach a different process.
+    if unsafe { GetWindowThreadProcessId(window, &mut owner) } != 0
+        && owner == context.id
+        && unsafe { WaitForSingleObject(context.process, 0) } == 258
+        && unsafe { IsWindowVisible(window) } != 0
+        && unsafe { PostMessageW(window, 0x0010, 0, 0) } != 0
+    {
+        context.posted = true;
+    }
+    1
+}
 #[derive(Debug)]
 pub(super) struct Process {
     process: OwnedHandle,
@@ -124,6 +156,25 @@ pub(super) struct Process {
 impl Process {
     pub(super) fn id(&self) -> u32 {
         self.id
+    }
+    pub(super) fn request_close(&self) -> io::Result<bool> {
+        let mut context = CloseWindows {
+            process: self.process.as_raw_handle(),
+            id: self.id,
+            posted: false,
+        };
+        // WM_CLOSE is queued asynchronously. A hung page cannot block this
+        // thread; the runtime's grace deadline still ends in job termination.
+        if unsafe {
+            EnumWindows(
+                close_owned_window,
+                (&mut context as *mut CloseWindows) as isize,
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(context.posted)
     }
     pub(super) fn kill(&self) -> io::Result<()> {
         if unsafe { TerminateJobObject(self.job.as_raw_handle(), 1) } == 0 {

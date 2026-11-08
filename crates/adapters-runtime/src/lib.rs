@@ -34,6 +34,7 @@ mod fingerprint_probe;
 mod profile_floor;
 #[cfg(windows)]
 mod session_control;
+mod shutdown;
 mod snapshots;
 #[cfg(windows)]
 mod target_registry;
@@ -56,6 +57,27 @@ enum ManagedProcess {
     Native(win_pipe::Process),
     #[cfg(windows)]
     Controlled(std::sync::Arc<session_control::Controller>),
+}
+impl shutdown::OwnedProcess for ManagedProcess {
+    fn exited(&mut self) -> std::io::Result<bool> {
+        self.try_wait().map(|status| status.is_some())
+    }
+    fn request_close(&mut self) -> std::io::Result<bool> {
+        match self {
+            #[cfg(not(windows))]
+            Self::Plain(_) => Ok(false),
+            #[cfg(windows)]
+            Self::Native(child) => child.request_close(),
+            #[cfg(windows)]
+            Self::Controlled(child) => child.request_close(),
+        }
+    }
+    fn force(&mut self) -> std::io::Result<()> {
+        self.kill()
+    }
+    fn reap(&mut self) -> std::io::Result<()> {
+        self.wait()
+    }
 }
 impl ManagedProcess {
     fn id(&self) -> u32 {
@@ -643,21 +665,13 @@ impl BrowserRuntime for ManagedChromiumRuntime {
         let child = processes
             .get_mut(session_id)
             .ok_or_else(|| PortError::not_found("browser process"))?;
-        if child
-            .try_wait()
-            .map_err(|error| internal(format!("failed to query browser process: {error}")))?
-            .is_none()
-        {
-            child.kill().map_err(|error| {
-                PortError::new(
-                    PortErrorKind::Unavailable,
-                    format!("failed to stop browser process: {error}"),
-                )
-            })?;
-        }
-        child
-            .wait()
-            .map_err(|error| internal(format!("failed to reap browser process: {error}")))?;
+        let grace = std::time::Duration::from_secs(if cfg!(windows) { 5 } else { 0 });
+        shutdown::stop(child, grace).map_err(|error| {
+            PortError::new(
+                PortErrorKind::Unavailable,
+                format!("failed to stop browser process: {error}"),
+            )
+        })?;
         processes.remove(session_id);
         Ok(())
     }
