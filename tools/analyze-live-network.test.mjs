@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import {analyzeLiveNetwork} from './analyze-live-network.mjs';
 const sample = (direct = false) => ({schemaVersion: 2, https: {status: 'observed', ip: direct ? '198.51.100.9' : '203.0.113.9'}, https6: {status: 'not_checked'}, dns: ['dns4','dns6'].map(family => ({family,status:'observed',resolvers:['192.0.2.53']})), stun: ['google','cloudflare'].map(service => ({service,status:'complete',protocols: direct ? ['udp'] : [],srflx: direct ? ['198.51.100.9'] : []}))});
 function report() {
-  return {schemaVersion:2,complete:true,direct:[sample(true),sample(true)],allBrowserChecksPassed:true,cases:['http','socks5'].flatMap(p => ['native','seeded'].flatMap(m => [0,1].map(round => ({label:`1-${p}-${m}`,round,expectedExit:'203.0.113.9',sample:sample()}))))};
+  return {schemaVersion:2,complete:true,requestedEndpoints:1,direct:[sample(true),sample(true)],allBrowserChecksPassed:true,cases:['http','socks5'].flatMap(p => ['native','seeded'].flatMap(m => [0,1].map(round => ({label:`1-${p}-${m}`,round,expectedExit:'203.0.113.9',sample:sample()}))))};
 }
 test('recomputes scope; missing independent policy, IPv6 and TURN stay unaccepted', () => {
   const r = analyzeLiveNetwork(report());
@@ -24,6 +24,7 @@ test('detects a second-provider UDP leak even when producer pass flags are true'
 });
 test('rejects incomplete matrices, duplicate records and forged direct exits', () => {
   const r=report(); r.cases.pop(); assert.throws(()=>analyzeLiveNetwork(r));
+  const omitted=report(); omitted.requestedEndpoints=2; assert.throws(()=>analyzeLiveNetwork(omitted));
   const d=report(); d.cases[0]=d.cases[1]; assert.throws(()=>analyzeLiveNetwork(d));
   const e=report(); e.cases[0].sample.https.ip='198.51.100.9'; assert.equal(analyzeLiveNetwork(e).browserIpv4.status,'fail');
 });

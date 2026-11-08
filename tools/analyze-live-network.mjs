@@ -23,7 +23,7 @@ function policyRules(policy, name) {
   return ip => rules.check(ip, isIP(ip) === 4 ? 'ipv4' : 'ipv6');
 }
 export function analyzeLiveNetwork(report, policy = {}) {
-  if (report?.schemaVersion !== 2 || report.complete !== true || !Array.isArray(report.direct) || report.direct.length !== 2 || !Array.isArray(report.cases) || ![8,16].includes(report.cases.length)) throw Error('incomplete or unsupported browser evidence');
+  if (report?.schemaVersion !== 2 || report.complete !== true || !Array.isArray(report.direct) || report.direct.length !== 2 || !Array.isArray(report.cases) || ![1,2].includes(report.requestedEndpoints) || report.cases.length !== report.requestedEndpoints * 8) throw Error('incomplete or unsupported browser evidence');
   const cases = report.cases, labels = new Set(), rounds = new Set(), endpoints = new Map();
   for (const item of cases) {
     if (!/^[12]-(http|socks5)-(native|seeded)$/.test(item.label) || ![0,1].includes(item.round) || item.sample?.schemaVersion !== 2 || isIP(item.expectedExit) !== 4) throw Error('invalid case identity or expectation');
@@ -35,7 +35,7 @@ export function analyzeLiveNetwork(report, policy = {}) {
     endpoints.set(endpoint, item.expectedExit);
     if (!Array.isArray(item.sample.stun) || item.sample.stun.length !== 2 || providers.some(name => item.sample.stun.filter(v => v.service === name).length !== 1)) throw Error('both STUN providers required');
   }
-  if (cases.length !== endpoints.size * 8 || [...endpoints.keys()].some(id => ['http','socks5'].some(scheme => ['native','seeded'].some(mode => !labels.has(`${id}-${scheme}-${mode}`))))) throw Error('incomplete case matrix');
+  if (endpoints.size !== report.requestedEndpoints || !endpoints.has('1') || [...endpoints.keys()].some(id => ['http','socks5'].some(scheme => ['native','seeded'].some(mode => !labels.has(`${id}-${scheme}-${mode}`))))) throw Error('incomplete case matrix');
   const direct4 = report.direct.map(ipv4), exitsBad = cases.filter(c => !ipv4(c.sample) || ipv4(c.sample) !== c.expectedExit || direct4.includes(ipv4(c.sample))).map(c => `${c.label}/${c.round}`);
   const browserIpv4 = {status: exitsBad.length ? 'fail' : direct4.every(Boolean) ? 'pass' : 'not_checked', observations: cases.length, failedCases: exitsBad};
   const stun = providers.map(service => {
