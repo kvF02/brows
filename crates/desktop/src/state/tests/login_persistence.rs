@@ -142,6 +142,21 @@ fn stop(state: &AppState, session: SessionDto) {
         })
         .unwrap();
 }
+fn storage_metadata(data: &std::path::Path, profile: &ProfileDto) -> Value {
+    let journal =
+        brows_adapters_profile_data::ProfileDataJournal::new(data.join("profiles"), None).unwrap();
+    let id = profile.id.clone().try_into().unwrap();
+    let output = Command::new("python.exe")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../tools/test_support/login_storage_metadata.py"
+        ))
+        .arg(journal.profile_dir(&id).join("userdata"))
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "cookie metadata fixture failed");
+    serde_json::from_slice(&output.stdout).unwrap()
+}
 fn force_browser_crash(root: &std::path::Path) -> Value {
     let output = Command::new("pwsh.exe")
         .args(["-NoLogo", "-NoProfile", "-NonInteractive", "-File"])
@@ -248,13 +263,15 @@ fn login_persistence_acceptance() {
                 profile = updated;
                 let proof = site.verify(&round, account, expected);
                 stop(&state.0, session);
+                let metadata = storage_metadata(&data, &profile);
+                println!("login storage after {round}/{account}: {metadata}");
                 // Pagehide proves an orderly document shutdown, independently of storage reads.
                 normal_closes.push((
                     format!("closed/{round}/{account}"),
                     site.proofs()[format!("closed/{round}/{account}")].clone(),
                 ));
                 evidence
-                    .push(json!({"persona":persona,"phase":phase,"profile":account,"proof":proof}));
+                    .push(json!({"persona":persona,"phase":phase,"profile":account,"proof":proof,"storageMetadata":metadata}));
                 fs::write(
                     &report,
                     json!({"assertionsPassed":false,"samples":evidence}).to_string(),

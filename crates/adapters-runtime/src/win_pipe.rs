@@ -74,6 +74,15 @@ struct ExtendedLimits {
     peak_process: usize,
     peak_job: usize,
 }
+#[repr(C)]
+#[derive(Default)]
+struct JobAccounting {
+    times: [i64; 4],
+    page_faults: u32,
+    total_processes: u32,
+    active_processes: u32,
+    terminated_processes: u32,
+}
 #[link(name = "kernel32")]
 extern "system" {
     fn CreatePipe(read: *mut Handle, write: *mut Handle, security: Handle, size: u32) -> i32;
@@ -110,6 +119,13 @@ extern "system" {
     fn SetInformationJobObject(job: Handle, class: u32, information: Handle, size: u32) -> i32;
     fn AssignProcessToJobObject(job: Handle, process: Handle) -> i32;
     fn TerminateJobObject(job: Handle, code: u32) -> i32;
+    fn QueryInformationJobObject(
+        job: Handle,
+        class: u32,
+        information: Handle,
+        size: u32,
+        returned: *mut u32,
+    ) -> i32;
     fn ResumeThread(thread: Handle) -> u32;
     fn WaitForSingleObject(handle: Handle, milliseconds: u32) -> u32;
     fn GetExitCodeProcess(process: Handle, code: *mut u32) -> i32;
@@ -156,6 +172,22 @@ pub(super) struct Process {
 impl Process {
     pub(super) fn id(&self) -> u32 {
         self.id
+    }
+    pub(super) fn tree_exited(&self) -> io::Result<bool> {
+        let mut accounting = JobAccounting::default();
+        if unsafe {
+            QueryInformationJobObject(
+                self.job.as_raw_handle(),
+                1,
+                (&mut accounting as *mut JobAccounting).cast(),
+                mem::size_of::<JobAccounting>() as u32,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io::Error::last_os_error());
+        }
+        Ok(accounting.active_processes == 0)
     }
     pub(super) fn request_close(&self) -> io::Result<bool> {
         let mut context = CloseWindows {

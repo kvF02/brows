@@ -60,7 +60,14 @@ enum ManagedProcess {
 }
 impl shutdown::OwnedProcess for ManagedProcess {
     fn exited(&mut self) -> std::io::Result<bool> {
-        self.try_wait().map(|status| status.is_some())
+        match self {
+            #[cfg(not(windows))]
+            Self::Plain(child) => child.try_wait().map(|status| status.is_some()),
+            #[cfg(windows)]
+            Self::Native(child) => child.tree_exited(),
+            #[cfg(windows)]
+            Self::Controlled(child) => child.tree_exited(),
+        }
     }
     fn request_close(&mut self) -> std::io::Result<bool> {
         match self {
