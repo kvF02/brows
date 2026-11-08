@@ -56,8 +56,22 @@ impl Site {
         }
     }
     fn proofs(&self) -> Value {
-        fs::read(self.directory.join("proofs.json"))
-            .ok()
+        let latest = fs::read_dir(&self.directory)
+            .into_iter()
+            .flatten()
+            .filter_map(Result::ok)
+            .filter_map(|entry| {
+                let name = entry.file_name().into_string().ok()?;
+                let sequence = name
+                    .strip_prefix("proofs-")?
+                    .strip_suffix(".json")?
+                    .parse::<u64>()
+                    .ok()?;
+                Some((sequence, entry.path()))
+            })
+            .max_by_key(|(sequence, _)| *sequence);
+        latest
+            .and_then(|(_, path)| fs::read(path).ok())
             .and_then(|b| serde_json::from_slice(&b).ok())
             .unwrap_or(json!({}))
     }

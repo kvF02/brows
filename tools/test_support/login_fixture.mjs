@@ -8,12 +8,28 @@ import {readFile, writeFile, rename} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 import path from 'node:path';
 
+// Never replace a file the Rust poller may currently have open on Windows.
+// Each published snapshot is immutable; only complete .json files are read.
+export function createProofPublisher(directory) {
+  let sequence = 0;
+  let writes = Promise.resolve();
+  return value => {
+    const file = path.join(directory, `proofs-${++sequence}.json`);
+    const bytes = JSON.stringify(value);
+    writes = writes.then(async () => {
+      await writeFile(file + '.tmp', bytes, {flag: 'wx'});
+      await rename(file + '.tmp', file);
+    });
+    return writes;
+  };
+}
+
 export async function startLoginFixture({tls, onProof = () => {}} = {}) {
   const tokens = new Map(['a','b'].map(account => [randomBytes(32).toString('hex'), account]));
   const accounts = new Map([...tokens].map(([token, account]) => [account, token]));
   const proofs = {};
   const cookieName = '__Host-brows-fixture';
-  const record = (key, value) => { proofs[key] = value; onProof({...proofs}); };
+  const record = async (key, value) => { proofs[key] = value; await onProof({...proofs}); };
   const handler = async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
     const url = new URL(req.url, 'https://localhost');
@@ -24,18 +40,19 @@ export async function startLoginFixture({tls, onProof = () => {}} = {}) {
     const [, action, round, expected] = match;
     const key = round+'/'+expected;
     if (action === 'closed' && req.method === 'POST') {
-      record('closed/'+key, true); res.end('ok'); return;
+      await record('closed/'+key, true); res.end('ok'); return;
     }
     if (action === 'proof' && req.method === 'POST') {
       const bytes = []; let size = 0;
       for await (const chunk of req) { size += chunk.length; if (size > 4096) { res.writeHead(413).end(); return; } bytes.push(chunk); }
+      let safe;
       try {
         const body = JSON.parse(Buffer.concat(bytes));
-        const safe = {account, local: body.local ?? null, indexed: body.indexed ?? null, cache: body.cache ?? null,
+        safe = {account, local: body.local ?? null, indexed: body.indexed ?? null, cache: body.cache ?? null,
           httpOnly: body.httpOnly === true, secureContext: body.secureContext === true, error: body.error ? 'site-storage-error' : null};
         if (![safe.local,safe.indexed,safe.cache].every(v => v === null || v === 'a' || v === 'b')) throw Error('Invalid marker');
-        record(key, safe); res.end('ok');
-      } catch { res.writeHead(400).end(); }
+      } catch { res.writeHead(400).end(); return; }
+      await record(key, safe); res.end('ok');
       return;
     }
     if (req.method !== 'GET' || !['enroll','check'].includes(action)) { res.writeHead(405).end(); return; }
@@ -59,10 +76,13 @@ if (process.argv[1] && import.meta.url === pathToFileURL(path.resolve(process.ar
   const [pfx, directory] = process.argv.slice(2);
   if (!pfx || !directory) throw Error('Expected fixture certificate and directory');
   let writes = Promise.resolve();
+  const publish = createProofPublisher(directory);
   const fixture = await startLoginFixture({tls: {pfx: await readFile(pfx), passphrase: 'brows-ci-fixture-only'},
-    onProof: value => { writes = writes.then(async () => {
-      const file = path.join(directory, 'proofs.json'); await writeFile(file+'.tmp', JSON.stringify(value)); await rename(file+'.tmp', file);
-    }).catch(error => { process.stderr.write(error.message); process.exitCode = 1; }); }});
+    onProof: value => {
+      writes = publish(value);
+      writes.catch(error => { process.stderr.write(`Login proof publication failed: ${error.code ?? 'unknown'}\n`); process.exitCode = 1; });
+      return writes;
+    }});
   await writeFile(path.join(directory, 'ready.json'), JSON.stringify({origin: fixture.origin}));
-  process.stdin.resume(); process.stdin.on('end', async () => { await fixture.close(); await writes; });
+  process.stdin.resume(); process.stdin.on('end', async () => { await fixture.close(); await writes.catch(() => {}); });
 }
