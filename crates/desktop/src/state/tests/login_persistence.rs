@@ -167,7 +167,7 @@ fn force_browser_crash(root: &std::path::Path) -> Value {
         .arg("-OwnerId")
         .arg(std::process::id().to_string())
         .arg("-ProfileRoot")
-        .arg(root.join("profiles"))
+        .arg(root.join("profiles").canonicalize().unwrap())
         .output()
         .unwrap();
     assert!(

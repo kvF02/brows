@@ -4,6 +4,7 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hoste
 . "$PSScriptRoot/windows-process-fixture.ps1"
 $root = (Resolve-Path -LiteralPath $ProfileRoot).ProviderPath.Replace('\\?\', '')
 $directory = [IO.DirectoryInfo]::new($root)
+$root = $directory.FullName.TrimEnd('\')
 if ($directory.Name -ne 'profiles' -or $directory.Parent.Name -ne 'data' -or $directory.Parent.Parent.Name -notmatch '^brows-login-[a-f0-9-]{36}$') { throw 'Expected the isolated login fixture' }
 $marker = Join-Path $directory.Parent.Parent.FullName 'login-fixture-owner.json'
 if (-not (Test-Path -LiteralPath $marker) -or (Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json).ownerId -ne $OwnerId) { throw 'Missing the matching fixture ownership marker' }
@@ -13,7 +14,12 @@ if ($owner.Count -ne 1) { throw 'Missing owned Rust test host' }
 $caller = @($snapshot | Where-Object ProcessId -eq $PID)
 if ($caller.Count -ne 1 -or $caller[0].ParentProcessId -ne $OwnerId) { throw 'Crash helper must be a direct child of the test host' }
 $roots = @($snapshot | Where-Object { $_.ParentProcessId -eq $OwnerId -and $_.Name -ieq 'msedge.exe' -and $_.CommandLine -and $_.CommandLine.Replace('\\?\', '').Contains($root + '\', [StringComparison]::OrdinalIgnoreCase) })
-if ($roots.Count -ne 1) { throw "Expected one owned active browser, found $($roots.Count)" }
+if ($roots.Count -ne 1) {
+    $children = @($snapshot | Where-Object ParentProcessId -eq $OwnerId)
+    $edgeChildren = @($children | Where-Object Name -ieq 'msedge.exe')
+    $pathMatches = @($snapshot | Where-Object { $_.Name -ieq 'msedge.exe' -and $_.CommandLine -and $_.CommandLine.Replace('\\?\', '').Contains($root + '\', [StringComparison]::OrdinalIgnoreCase) })
+    throw "Expected one owned active browser, found $($roots.Count) ($($children.Count) direct children, $($edgeChildren.Count) Edge children, $($pathMatches.Count) matching paths)"
+}
 $tree = @(Find-ProcessTree $snapshot $roots)
 Stop-OwnedProcess $roots[0]
 foreach ($remaining in @(Find-RemainingProcesses $tree)) {
