@@ -31,6 +31,8 @@ use std::{
 
 mod authenticode;
 mod fingerprint_probe;
+#[cfg(any(windows, test))]
+mod navigation;
 mod profile_floor;
 #[cfg(windows)]
 mod session_control;

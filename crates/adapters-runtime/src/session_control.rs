@@ -1,7 +1,9 @@
 //! Session-scoped control and observation over private inherited pipes.
 //! No generic command/evaluate surface is exposed through application ports.
 use super::{
-    internal, invalid_data, now_ms,
+    internal, invalid_data,
+    navigation::NavigationStart,
+    now_ms,
     target_registry::{Target, TargetJob, Targets, MAX_TARGETS},
     win_pipe,
 };
@@ -38,6 +40,7 @@ struct Wire {
     orderly_shutdown: AtomicBool,
     version: Mutex<String>,
     policy_failure: Mutex<Option<String>>,
+    navigation: Mutex<Option<NavigationStart>>,
     writer: mpsc::SyncSender<Vec<u8>>,
     pending: Arc<Mutex<BTreeMap<u64, mpsc::Sender<Value>>>>,
     paused: Mutex<BTreeSet<String>>,
@@ -177,24 +180,30 @@ impl Wire {
         self.finish_until(reply, Instant::now() + TIMEOUT)
     }
     fn finish_until(&self, reply: PendingReply, deadline: Instant) -> PortResult<Value> {
+        let value = reply
+            .receive_until(deadline)
+            .map_err(|error| self.reply_error(&reply, error))?;
+        self.complete_reply(&reply, value)
+    }
+    fn reply_error(&self, reply: &PendingReply, error: mpsc::RecvTimeoutError) -> PortError {
         let method = &reply.method;
-        let result = reply.receive_until(deadline);
-        let value = result.map_err(|error| {
-            #[cfg(test)]
-            self.trace_failure();
-            let failure = self
-                .policy_failure
-                .lock()
-                .ok()
-                .and_then(|reason| reason.clone());
-            if reply.session.is_none() {
-                self.fail();
-            }
-            PortError::new(
-                PortErrorKind::Unavailable,
-                reply_failure_message(method, error, failure.as_deref()),
-            )
-        })?;
+        #[cfg(test)]
+        self.trace_failure();
+        let failure = self
+            .policy_failure
+            .lock()
+            .ok()
+            .and_then(|reason| reason.clone());
+        if reply.session.is_none() {
+            self.fail();
+        }
+        PortError::new(
+            PortErrorKind::Unavailable,
+            reply_failure_message(method, error, failure.as_deref()),
+        )
+    }
+    fn complete_reply(&self, reply: &PendingReply, value: Value) -> PortResult<Value> {
+        let method = &reply.method;
         if let Some(error) = value.get("error") {
             if target_execution_ended(error) {
                 return Err(PortError::new(
@@ -248,6 +257,76 @@ impl Wire {
     }
     fn call(&self, method: &str, params: Value, session: Option<&str>) -> PortResult<Value> {
         self.finish(self.begin(method, params, session)?)
+    }
+    fn start_navigation(&self, session: &str, url: &str) -> PortResult<()> {
+        let tree = self.call("Page.getFrameTree", json!({}), Some(session))?;
+        let frame = tree["frameTree"]["frame"]["id"]
+            .as_str()
+            .filter(|id| !id.is_empty() && id.len() <= 128)
+            .ok_or_else(|| internal("browser omitted the startup frame identity"))?;
+        {
+            let mut navigation = self
+                .navigation
+                .lock()
+                .map_err(|_| internal("navigation lock poisoned"))?;
+            if navigation.is_some() {
+                return Err(internal("startup navigation already pending"));
+            }
+            *navigation = Some(
+                NavigationStart::new(session, frame, url)
+                    .ok_or_else(|| invalid_data("invalid startup navigation"))?,
+            );
+        }
+        let outcome = (|| {
+            let reply = self.begin(
+                "Page.navigate",
+                json!({"url":url,"frameId":frame}),
+                Some(session),
+            )?;
+            let deadline = Instant::now() + TIMEOUT;
+            loop {
+                let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    return Err(self.reply_error(&reply, mpsc::RecvTimeoutError::Timeout));
+                };
+                match reply
+                    .receive
+                    .recv_timeout(remaining.min(Duration::from_millis(25)))
+                {
+                    Ok(value) => {
+                        let result = self.complete_reply(&reply, value)?;
+                        if result.get("errorText").is_some() || result["isDownload"] == true {
+                            return Err(internal("startup document navigation failed"));
+                        }
+                        return Ok(());
+                    }
+                    Err(mpsc::RecvTimeoutError::Disconnected) => {
+                        return Err(self.reply_error(&reply, mpsc::RecvTimeoutError::Disconnected))
+                    }
+                    Err(mpsc::RecvTimeoutError::Timeout) => {}
+                }
+                self.ensure_open()?;
+                if Instant::now() >= deadline {
+                    return Err(self.reply_error(&reply, mpsc::RecvTimeoutError::Timeout));
+                }
+                if self
+                    .navigation
+                    .lock()
+                    .map_err(|_| internal("navigation lock poisoned"))?
+                    .as_ref()
+                    .is_some_and(NavigationStart::started)
+                {
+                    // The matching main-frame request has started. Network load
+                    // and its eventual navigation result belong to the page,
+                    // not the control-policy acknowledgement budget.
+                    return Ok(());
+                }
+            }
+        })();
+        self.navigation
+            .lock()
+            .map_err(|_| internal("navigation lock poisoned"))?
+            .take();
+        outcome
     }
     fn pause_service_worker(&self, session: &str) -> PortResult<()> {
         self.paused
@@ -313,6 +392,7 @@ impl Controller {
             orderly_shutdown: AtomicBool::new(false),
             version: Mutex::new(String::new()),
             policy_failure: Mutex::new(None),
+            navigation: Mutex::new(None),
             writer,
             pending: Arc::new(Mutex::new(BTreeMap::new())),
             paused: Mutex::new(BTreeSet::new()),
@@ -356,6 +436,16 @@ impl Controller {
                             if let Ok(mut pending) = w.pending.lock() {
                                 if let Some(sender) = pending.remove(&id) {
                                     let _ = sender.send(value);
+                                }
+                            }
+                        } else if value["method"] == "Page.frameStartedNavigating" {
+                            if let Ok(mut navigation) = w.navigation.lock() {
+                                if let Some(navigation) = navigation.as_mut() {
+                                    navigation.observe(
+                                        value["sessionId"].as_str().unwrap_or(""),
+                                        value["params"]["frameId"].as_str().unwrap_or(""),
+                                        value["params"]["url"].as_str().unwrap_or(""),
+                                    );
                                 }
                             }
                         } else if value["method"] == "Debugger.paused" {
@@ -706,9 +796,7 @@ impl Controller {
                 .ok_or_else(|| internal("browser omitted target identity"))?;
             let target = controller.await_target(id)?;
             if url != "about:blank" {
-                controller
-                    .wire
-                    .call("Page.navigate", json!({"url":url}), Some(&target.session))?;
+                controller.wire.start_navigation(&target.session, &url)?;
             }
         }
         Ok(controller)
