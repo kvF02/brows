@@ -2,7 +2,7 @@
 //! No generic command/evaluate surface is exposed through application ports.
 use super::{
     internal, invalid_data,
-    navigation::NavigationStart,
+    navigation::{navigation_reply_acknowledged, NavigationStart},
     now_ms,
     target_registry::{Target, TargetJob, Targets, MAX_TARGETS},
     win_pipe,
@@ -294,8 +294,18 @@ impl Wire {
                 {
                     Ok(value) => {
                         let result = self.complete_reply(&reply, value)?;
-                        if result.get("errorText").is_some() || result["isDownload"] == true {
-                            return Err(internal("startup document navigation failed"));
+                        if !navigation_reply_acknowledged(&result, frame) {
+                            return Err(internal("browser omitted the requested navigation frame"));
+                        }
+                        #[cfg(test)]
+                        if let Some(code) = result["errorText"].as_str().filter(|code| {
+                            code.len() <= 64
+                                && code.starts_with("net::ERR_")
+                                && code[9..]
+                                    .bytes()
+                                    .all(|b| b.is_ascii_uppercase() || b == b'_')
+                        }) {
+                            eprintln!("startup navigation document result: {code}");
                         }
                         return Ok(());
                     }
@@ -1438,6 +1448,36 @@ mod tests {
             _ => panic!("expected fixed RGBA8/RGB8 fixture PNG"),
         };
         rgba.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    #[ignore = "closes only the owned loopback document connection; requires signed Edge"]
+    fn private_navigation_error_result_acceptance() {
+        let fixture = browser_fixture::ControlFixture::start(false);
+        let browser = acceptance_browser(&fixture, "closed");
+        assert!(!fixture
+            .wait_kind_count("/closed/", "closed-response-fixture", 1)
+            .is_empty());
+        assert!(browser.controller.try_wait().unwrap().is_none());
+        assert!(browser
+            .controller
+            .wire
+            .call("Browser.getVersion", json!({}), None)
+            .is_ok());
+        assert!(browser
+            .controller
+            .wire
+            .policy_failure
+            .lock()
+            .unwrap()
+            .is_none());
+        // The fixture returned no HTTP response, and supplied no page proof.
+        assert!(!fixture
+            .proofs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, _, value)| value["kind"] == "page"));
     }
 
     #[test]

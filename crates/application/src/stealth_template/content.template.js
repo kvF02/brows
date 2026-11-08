@@ -66,7 +66,7 @@
     const proto = globalThis[name]?.prototype;
     return proto && {
       proto, second: name === 'WebGL2RenderingContext', get: proto.getParameter,
-      read: descriptorOf(proto, 'readPixels'), lost: proto.isContextLost,
+      read: descriptorOf(proto, 'readPixels'), lost: proto.isContextLost, status: proto.checkFramebufferStatus,
       width: descriptorOf(proto, 'drawingBufferWidth')?.get,
       height: descriptorOf(proto, 'drawingBufferHeight')?.get,
       colorSpace: descriptorOf(proto, 'drawingBufferColorSpace')?.get,
@@ -113,7 +113,7 @@
     const integer = Number.isSafeInteger;
     for (const api of glApis) {
       try {
-        if (typeof api.read?.value !== 'function' || !api.width || !api.height || !api.lost || !arrayTag || !arrayLength || !arrayBuffer || !bufferLength) continue;
+        if (typeof api.read?.value !== 'function' || !api.width || !api.height || !api.lost || !api.status || !arrayTag || !arrayLength || !arrayBuffer || !bufferLength) continue;
         const original = api.read.value;
         Object.defineProperty(api.proto, 'readPixels', { ...api.read, value: function (...args) {
           const result = Reflect.apply(original, this, args);
@@ -134,6 +134,7 @@
             if (get(api.second ? 36010 : 36006) !== null) return result; // default read framebuffer
             if (api.second && (get(35053) !== null || get(3074) !== 1029 ||
                 get(3330) !== 0 || get(3331) !== 0 || get(3332) !== 0)) return result;
+            if (api.status.call(this, api.second ? 36008 : 36160) !== 36053) return result;
             if (api.colorSpace && api.colorSpace.call(this) !== 'srgb') return result;
             if (get(35738) !== 5121 || get(35739) !== 6408) return result;
             const alignment = get(3333);

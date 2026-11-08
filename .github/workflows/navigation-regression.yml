@@ -62,6 +62,9 @@ jobs:
       - name: Verify native, seeded, reopened and different-seed GPU pixel paths
         timeout-minutes: 3
         run: cargo +1.97.1 test -p brows-adapters-runtime private_webgl_pixel_acceptance --locked -- --ignored --nocapture
+      - name: Keep document network errors separate from session-control failure
+        timeout-minutes: 1
+        run: cargo +1.97.1 test -p brows-adapters-runtime private_navigation_error_result_acceptance --locked -- --ignored --nocapture
       - uses: actions/upload-artifact@v4
         if: always()
         with:

@@ -29,7 +29,7 @@ function environment(overrides = {}, missing = [], worker = false) {
   class WebGLRenderingContext {
     constructor(canvas, second = false) {
       brands.gl.add(this); this.extensionAvailable = true; this.canvas = canvas;
-      this.second = second; this.error = 0; this.lost = false; this.colorSpace = 'srgb';
+      this.second = second; this.errors = new Set(); this.lost = false; this.colorSpace = 'srgb';
       this.parameters = new Map([[36006,null],[36010,null],[35053,null],[3074,1029],
         [3330,0],[3331,0],[3332,0],[3333,4],[35738,5121],[35739,6408]]);
     }
@@ -37,9 +37,13 @@ function environment(overrides = {}, missing = [], worker = false) {
     get drawingBufferHeight() { branded('gl', this); return this.canvas?.height ?? 4; }
     get drawingBufferColorSpace() { branded('gl', this); return this.colorSpace; }
     isContextLost() { branded('gl', this); return this.lost; }
-    getError() { branded('gl', this); calls.glErrors++; const error = this.error; this.error = 0; return error; }
+    get error() { return this.errors.values().next().value ?? 0; }
+    set error(value) { if (value) this.errors.add(value); }
+    getError() { branded('gl', this); calls.glErrors++; const error = this.error; this.errors.delete(error); return error; }
+    checkFramebufferStatus() { branded('gl', this); return this.incomplete ? 0x8cd6 : 0x8cd5; }
     getParameter(...args) {
       branded('gl', this);
+      if (this.incomplete && [35738,35739].includes(args[0])) { this.error=0x0502; return null; }
       if (this.parameters.has(args[0])) return this.parameters.get(args[0]);
       if ((args[0] === 37445 || args[0] === 37446) && !this.extensionAvailable) return null;
       return args[0] === 37445 ? 'Native vendor' : args[0] === 37446 ? 'Native renderer' : args[0] === 123 ? 64 : null;
@@ -50,16 +54,17 @@ function environment(overrides = {}, missing = [], worker = false) {
       const [x,y,width,height] = args.slice(0,4).map(v => Number(v) | 0);
       const output = args[6], offset = this.second ? Number(args[7] ?? 0) : 0;
       if (this.lost) return;
+      if (this.incomplete) { this.error=0x0506; return; }
       const stride = Math.ceil(width * 4 / this.parameters.get(3333)) * this.parameters.get(3333);
       if (args[4] !== 6408 || args[5] !== 5121 || Object.prototype.toString.call(output) !== '[object Uint8Array]' ||
           this.parameters.get(35053) || this.parameters.get(3074) === 0 || this.parameters.get(35738) !== 5121 ||
           width < 0 || height < 0 || offset < 0 || offset + (height - 1) * stride + width * 4 > output.length) {
-        this.error ||= 0x0502; return;
+        this.error = 0x0502; return;
       }
       for (let row = 0; row < height; row++) for (let col = 0; col < width; col++) {
         const sx = x + col, sy = this.drawingBufferHeight - y - row - 1;
         const dest = offset + row * stride + col * 4;
-        if (sx < 0 || sy < 0 || sx >= this.drawingBufferWidth || sy >= this.drawingBufferHeight) output.fill(0,dest,dest+4);
+        if (sx < 0 || sy < 0 || sx >= this.drawingBufferWidth || sy >= this.drawingBufferHeight) continue;
         else output.set(this.canvas.pixels.subarray((sy*this.drawingBufferWidth+sx)*4,(sy*this.drawingBufferWidth+sx)*4+4),dest);
       }
     }
@@ -464,4 +469,14 @@ test('WebGL recognizes cross-realm byte arrays and leaves shared-memory readback
     gl.readPixels(0,0,6,4,6408,5121,shared);
     assert.deepEqual(topRows(shared,6,4),[...canvas.pixels]);
   }
+});
+
+test('WebGL incomplete read buffers do not gain extra errors or change caller bytes', () => {
+  const env = environment(), canvas = populatedCanvas(env), gl = canvas.getContext('webgl2');
+  gl.incomplete = true;
+  const bytes = new Uint8Array(96).fill(81);
+  gl.readPixels(0,0,6,4,6408,5121,bytes);
+  assert.ok(bytes.every(v=>v===81));
+  assert.equal(gl.getError(),0x0506);
+  assert.equal(gl.getError(),0, 'read-format queries must not add INVALID_OPERATION on incomplete buffers');
 });
