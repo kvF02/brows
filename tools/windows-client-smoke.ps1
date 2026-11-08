@@ -7,6 +7,7 @@ if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hoste
 $result = [ordered]@{
     schemaVersion = 1; evidenceType = 'automated-hosted-client'
     assertionsPassed = $false; complete = $false
+    clientPackageChecksComplete = $false
     commit = $null; platform = $null; applicationArchitecture = $null
     hardware = 'hosted-virtual-machine'; x64Emulation = $false
     package = $null; failure = $null
@@ -28,11 +29,11 @@ try {
     $packageReport = "$Report.package.json"
     & "$PSScriptRoot/windows-beta-smoke.ps1" -Installer (Join-Path $KitDirectory $kit.installerName) -Report $packageReport
     $result.package = [IO.File]::ReadAllText($packageReport) | ConvertFrom-Json
-    if (-not $result.package.assertionsPassed -or -not $result.package.complete -or $result.package.installedApplicationSha256 -cne $kit.installedSha256) {
+    if (-not $result.package.assertionsPassed -or -not $result.package.packageChecksComplete -or $result.package.installedApplicationSha256 -cne $kit.installedSha256) {
         throw 'Installed package acceptance incomplete or application hash mismatch'
     }
     $result.assertionsPassed = $true
-    $result.complete = $true
+    $result.clientPackageChecksComplete = $true
 } catch {
     $result.failure = @{ phase = $phase; message = $_.Exception.Message }
     throw

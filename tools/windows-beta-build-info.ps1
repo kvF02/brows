@@ -29,7 +29,8 @@ try {
 `$result | ConvertTo-Json | Set-Content -LiteralPath $(Quote-Value $probeReport) -Encoding UTF8
 "@
     $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($child))
-    $hostExe = Join-Path $env:SystemRoot 'System32/WindowsPowerShell/v1.0/powershell.exe'
+    # Reuse this host's executable/module environment for the isolated query.
+    $hostExe = (Get-Process -Id $PID).Path
     $process = Start-Process -FilePath $hostExe -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded) -PassThru -WindowStyle Hidden
     if (-not $process.WaitForExit($TimeoutSeconds * 1000)) {
         $result.authenticodeProbe = 'timeout'

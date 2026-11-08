@@ -14,6 +14,7 @@ $result = [ordered]@{
     schemaVersion = 1
     assertionsPassed = $false
     complete = $false
+    packageChecksComplete = $false
     checks = $checks
     launches = $launches
     installedApplicationSha256 = $null
@@ -111,7 +112,7 @@ try {
     if ([IO.File]::ReadAllText($sentinel) -ne 'preserve-user-data') { throw 'Uninstall removed application data' }
     $checks.Add('uninstall-preserves-data')
     $result.assertionsPassed = $true
-    $result.complete = $true
+    $result.packageChecksComplete = $true
 } catch {
     $result.failure = @{ phase = $phase; message = $_.Exception.Message }
     throw

@@ -41,11 +41,14 @@ CI 不自动发布 GitHub Release，不自动升级用户机器上的应用。
 
 CI 在独立 Windows runner 上执行真实静默安装、打开打包后的主窗口、初始化数据库、
 正常关闭、覆盖安装以及卸载，并检查应用数据标记保留。
+报告 `assertionsPassed` 表示所列断言通过，`packageChecksComplete` 表示本次安装检查已完成；
+旧的 `complete: false` 继续保留，表示报告之外的全目标尚未覆盖。
 另外在 `windows-11-arm` 桌面客户端运行器上，下载同一 x64 内测包，核对摘要、PE 架构、
 Windows ProductType/构建号和 ARM64 本机架构，再执行安装、三次窗口启动/正常退出、
 覆盖安装及卸载数据保留。`windows11-arm-acceptance.json` 单独记录 x64 模拟运行和每次
 实际使用的 WebView2 版本。它不覆盖 Windows 10、x64 真机、ARM64 原生应用、ARM64
 SeedableNoise 能力或完整 UI 流程。此项成功后才能声称对应提交通过该客户端冒烟验收。
+客户端报告同样保留 `complete: false`，用 `clientPackageChecksComplete` 单独标记本次范围。
 随后在 Windows Server 2022 runner 用同一 NSIS 安装器安装并核对应用 SHA256，使用
 Microsoft Edge WebDriver 驱动**已安装应用**的 WebView2，确认内嵌资源和真实 Tauri
 适配器，再操作并发保存、环境新建/编辑/归档恢复、批量标签和代理编辑、批量启动/停止、
