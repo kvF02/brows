@@ -665,7 +665,7 @@ function draftFromInput(input: ProfileInput): ProfileDraftDto {
     tags: [...input.tags],
     presetId: input.presetId,
     presetVersion: 1,
-    proxyId: input.proxyId,
+    proxyId: input.proxyId || undefined,
     browser: { mode: "pinned", value: { buildId: input.runtimeId } },
     persona: buildPersonaDto(input.persona) as ProfileDraftDto extends never ? never : ProfileDraftDto["persona"],
     locale: { acceptLanguages: [...(input.acceptLanguages ?? ["zh-CN", "zh"])], timezone: input.persona?.kind === "seedable_noise" ? input.timezone : undefined },
@@ -735,7 +735,7 @@ function mergeDraft(dto: ProfileDto, changes: Partial<ProfileInput>): ProfileDra
     presetId: changes.presetId ?? dto.presetId,
     presetVersion: changes.presetId && changes.presetId !== dto.presetId ? 1 : dto.presetVersion,
     proxyId: Object.prototype.hasOwnProperty.call(changes, "proxyId")
-      ? changes.proxyId
+      ? changes.proxyId || undefined
       : dto.proxyId,
     browser: changes.runtimeId
       ? { mode: "pinned", value: { buildId: changes.runtimeId } }
