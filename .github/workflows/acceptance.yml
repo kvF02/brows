@@ -79,6 +79,12 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo +1.97.1 clippy --workspace --all-targets --locked -- -D warnings
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: HTTPS login storage and backup recovery acceptance
+        id: login_storage
+        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
+        timeout-minutes: 7
+        shell: pwsh
+        run: ./tools/windows-login-acceptance.ps1
       - name: Production registration and capability probe
         timeout-minutes: 5
         shell: pwsh
@@ -90,7 +96,7 @@ jobs:
             Copy-Item -LiteralPath target/fingerprint-session-acceptance.json -Destination "target/fingerprint-session-acceptance-round-$round.json" -ErrorAction Stop
           }
       - name: Worker restart and rendering acceptance
-        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' && steps.login_storage.outcome == 'success' }}
         timeout-minutes: 5
         shell: pwsh
         run: |
@@ -100,11 +106,11 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
       - name: Module Worker first-script acceptance
-        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' && steps.login_storage.outcome == 'success' }}
         timeout-minutes: 3
         run: cargo +1.97.1 test -p brows-adapters-runtime private_module_worker_acceptance -- --ignored --nocapture
       - name: Renderer crash and reload acceptance
-        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' && steps.login_storage.outcome == 'success' }}
         timeout-minutes: 3
         shell: pwsh
         run: |
@@ -114,18 +120,13 @@ jobs:
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           }
       - name: Managed runtime capture and restart acceptance
-        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' && steps.login_storage.outcome == 'success' }}
         timeout-minutes: 7
         run: cargo +1.97.1 test -p brows-desktop managed_runtime_acceptance -- --ignored --nocapture
       - name: Ten-profile bounded capacity acceptance
-        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
+        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' && steps.login_storage.outcome == 'success' }}
         timeout-minutes: 4
         run: cargo +1.97.1 test -p brows-desktop desktop_capacity_acceptance -- --ignored --nocapture
-      - name: HTTPS login storage and backup recovery acceptance
-        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
-        timeout-minutes: 7
-        shell: pwsh
-        run: ./tools/windows-login-acceptance.ps1
       - uses: actions/cache/save@v4
         if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' && steps.rust_cache.outputs.cache-hit != 'true' }}
         with:
