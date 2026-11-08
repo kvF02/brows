@@ -90,7 +90,7 @@ impl Wire {
     fn trace_failure(&self) {
         if let Ok(trace) = self.trace.lock() {
             eprintln!(
-                "bounded control trace (methods only):\n{}",
+                "bounded control trace (methods and redacted document state):\n{}",
                 trace.iter().cloned().collect::<Vec<_>>().join("\n")
             );
         }
@@ -298,13 +298,7 @@ impl Wire {
                             return Err(internal("browser omitted the requested navigation frame"));
                         }
                         #[cfg(test)]
-                        if let Some(code) = result["errorText"].as_str().filter(|code| {
-                            code.len() <= 64
-                                && code.starts_with("net::ERR_")
-                                && code[9..]
-                                    .bytes()
-                                    .all(|b| b.is_ascii_uppercase() || b == b'_')
-                        }) {
+                        if let Some(code) = super::navigation::document_result_code(&result) {
                             eprintln!("startup navigation document result: {code}");
                         }
                         return Ok(());
@@ -440,15 +434,41 @@ impl Controller {
                             Err(_) => break 'read,
                         };
                         frame.clear();
+                        #[cfg(test)]
+                        if value["method"] == "Page.frameNavigated" {
+                            w.trace(
+                                "document-committed",
+                                super::navigation::document_url_kind(
+                                    value["params"]["frame"]["url"].as_str().unwrap_or(""),
+                                ),
+                                value["sessionId"].as_str(),
+                            );
+                        }
                         if let Some(id) = value["id"].as_u64() {
                             #[cfg(test)]
                             w.trace("reply", &id.to_string(), value["sessionId"].as_str());
+                            #[cfg(test)]
+                            if let Some(code) =
+                                super::navigation::document_result_code(&value["result"])
+                            {
+                                // start_navigation may already have accepted a
+                                // correlated start event and released its waiter.
+                                w.trace("document-result", code, value["sessionId"].as_str());
+                            }
                             if let Ok(mut pending) = w.pending.lock() {
                                 if let Some(sender) = pending.remove(&id) {
                                     let _ = sender.send(value);
                                 }
                             }
                         } else if value["method"] == "Page.frameStartedNavigating" {
+                            #[cfg(test)]
+                            w.trace(
+                                "document-started",
+                                super::navigation::document_url_kind(
+                                    value["params"]["url"].as_str().unwrap_or(""),
+                                ),
+                                value["sessionId"].as_str(),
+                            );
                             if let Ok(mut navigation) = w.navigation.lock() {
                                 if let Some(navigation) = navigation.as_mut() {
                                     navigation.observe(
@@ -1280,10 +1300,49 @@ mod tests {
         root: std::path::PathBuf,
         webgl: Value,
         user_agent: String,
+        startup_url: String,
     }
 
     impl Drop for AcceptanceBrowser {
         fn drop(&mut self) {
+            if std::thread::panicking() {
+                self.controller.wire.trace_failure();
+                let pages = self
+                    .controller
+                    .targets
+                    .0
+                    .lock()
+                    .map(|state| state.snapshot())
+                    .unwrap_or_default();
+                let deadline = Instant::now() + Duration::from_millis(750);
+                for target in pages
+                    .into_iter()
+                    .filter(|target| target.kind == "page")
+                    .take(2)
+                {
+                    if Instant::now() >= deadline {
+                        break;
+                    }
+                    let state = self
+                        .controller
+                        .wire
+                        .begin("Page.getFrameTree", json!({}), Some(&target.session))
+                        .and_then(|reply| self.controller.wire.finish_until(reply, deadline));
+                    if let Ok(state) = state {
+                        let frame = &state["frameTree"]["frame"];
+                        eprintln!(
+                            "failed fixture page: kind={} requested={} unreachable={}",
+                            super::super::navigation::document_url_kind(
+                                frame["url"].as_str().unwrap_or("")
+                            ),
+                            frame["url"].as_str() == Some(self.startup_url.as_str()),
+                            frame["unreachableUrl"]
+                                .as_str()
+                                .is_some_and(|url| !url.is_empty())
+                        );
+                    }
+                }
+            }
             let _ = self.controller.kill();
             let _ = self.controller.wait();
             let _ = std::fs::remove_dir_all(&self.root);
@@ -1441,11 +1500,12 @@ mod tests {
             OsString::from(format!("--user-agent={user_agent}")),
             OsString::from("--lang=en-US"),
         ];
+        let startup_url = format!("{}/{route}/page", fixture.url);
         let controller = Controller::start(
             &executable,
             &args,
             policy,
-            &[format!("{}/{route}/page", fixture.url)],
+            std::slice::from_ref(&startup_url),
         )
         .unwrap();
         AcceptanceBrowser {
@@ -1453,6 +1513,7 @@ mod tests {
             root,
             webgl: expected_webgl,
             user_agent,
+            startup_url,
         }
     }
 
@@ -1781,6 +1842,24 @@ mod tests {
             .targets
             .iter()
             .any(|target| target.kind == "service_worker"));
+    }
+
+    #[test]
+    #[ignore = "requires signed Edge; fail-fast fresh-browser startup stress without retries"]
+    fn private_startup_navigation_stress_acceptance() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/fingerprint-startup-navigation-stress-acceptance.json");
+        for completed in 0..=30 {
+            let report = json!({"assertionsPassed":completed==30,"complete":false,
+                "completedRounds":completed,"requiredRounds":30,
+                "scope":"fresh signed Edge and owned nine-context module fixture"});
+            std::fs::write(&path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+            if completed == 30 {
+                break;
+            }
+            eprintln!("Fresh browser startup {} / 30", completed + 1);
+            private_module_worker_acceptance();
+        }
     }
 
     #[test]
