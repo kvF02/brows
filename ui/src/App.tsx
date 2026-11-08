@@ -1037,8 +1037,8 @@ function SeedableNoiseFields({
     <div className="seedable-noise-fields">
       <div className="form-info">
         <span aria-hidden="true">⚠</span>
-        此配置依赖浏览器支持加载 MV3 扩展，生成预览不代表注入已生效。
-        Canvas 读取 / 导出与离线 Audio 渲染可进行种子微扰；Client Hints、字体、真实 GPU 和 worker 等仍未完整覆盖，不代表完整 anti-detect。
+        此配置需要所选可信内核通过指纹能力检测，生成预览不代表覆盖已生效。
+        Canvas、部分 WebGL 像素读取与离线 Audio 渲染可进行种子微扰；字体、真实 GPU 能力、实时音频和网络栈仍依赖主机，不代表完整 anti-detect。
       </div>
 
       <label className="field-label" htmlFor="persona-seed">种子</label>
@@ -1207,8 +1207,8 @@ function SeedableNoiseFields({
             onChange={(event) => onChange({ ...value, spoofCanvas: event.target.checked })}
           />
           <span>
-            Canvas 读取 / 导出扰动
-            <small>确定性像素微扰，不修改原始画布；仍可被检测</small>
+            Canvas / 部分 WebGL 读取与导出扰动
+            <small>确定性像素微扰，不修改原始画布或 GPU 绘制缓存；仍可被检测</small>
           </span>
         </label>
         <label className="toggle-row">

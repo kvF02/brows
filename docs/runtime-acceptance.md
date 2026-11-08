@@ -51,6 +51,8 @@ iframe、Dedicated/Shared/Service Worker 采用暂停、配置、恢复的顺序
 其他 URL 或初始 about:blank 的事件当作确认。确认的是浏览器已开始导航，不是站点加载
 成功。网页等待响应、网络错误及下载不能换算成代理或网站验收通过，后续真实页面证明
 仍须单独读取。匹配状态随首次导航等待结束删除；网址不写入控制取证日志。
+导航回复的 `errorText`/`isDownload` 是网页结果；主 frame 确认后浏览器可继续运行并呈现
+该结果。协议错误、策略错误或缺失/错误的主 frame 仍失败关闭，不把文档错误冒充控制错误。
 
 `Windows navigation lifecycle regression` 在独立 runner 连续执行六轮：扣住本地页面的
 HTTP 响应，要求受控会话先返回且保持存活，再释放响应并核对六类上下文的首脚本信号；

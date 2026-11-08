@@ -1,6 +1,12 @@
 //! Correlate first-navigation start, independently of the website's response.
 use url::Url;
 
+pub(super) fn navigation_reply_acknowledged(result: &serde_json::Value, frame: &str) -> bool {
+    // errorText/isDownload describe the website outcome, not protocol failure.
+    // Website success is verified separately, never inferred from this ack.
+    result["frameId"].as_str() == Some(frame)
+}
+
 pub(super) struct NavigationStart {
     session: String,
     frame: String,
@@ -43,6 +49,21 @@ impl NavigationStart {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn website_errors_acknowledge_the_request_without_claiming_a_loaded_document() {
+        for outcome in [
+            serde_json::json!({"frameId":"main","errorText":"net::ERR_ABORTED"}),
+            serde_json::json!({"frameId":"main","errorText":"net::ERR_CERT_AUTHORITY_INVALID"}),
+            serde_json::json!({"frameId":"main","isDownload":true}),
+        ] {
+            assert!(navigation_reply_acknowledged(&outcome, "main"));
+            assert!(!navigation_reply_acknowledged(&outcome, "other"));
+        }
+        assert!(!navigation_reply_acknowledged(
+            &serde_json::json!({}),
+            "main"
+        ));
+    }
     #[test]
     fn only_the_requested_url_in_the_requested_main_frame_can_start_navigation() {
         let mut state =

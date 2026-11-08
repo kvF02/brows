@@ -295,9 +295,11 @@ dependencies = [
 name = "brows-adapters-runtime"
 version = "0.1.0"
 dependencies = [
+ "base64 0.22.1",
  "brows-adapters-profile-data",
  "brows-application",
  "brows-domain",
+ "png 0.18.1",
  "serde",
  "serde_json",
  "sha2",

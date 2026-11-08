@@ -39,7 +39,7 @@ Brows 的当前基础能力是多环境数据隔离；`SeedableNoise` 是可选�
 | Screen | Screen getter | 声明宽高、色深；可用区按声明尺寸返回，不模拟系统任务栏 |
 | 窗口与比例 | Chromium 参数 | 不是物理显示器替换；缩放和最大化影响实际视口 |
 | WebGL vendor/renderer | WebGL1/2 `getParameter` | 仅有效的 unmasked 字符串；GPU 像素、扩展、能力仍真实 |
-| Canvas | 2D `getImageData`、HTML `toDataURL/toBlob`、Offscreen `convertToBlob` | 稳定 RGB 低位扰动，导出用副本；未覆盖所有绘制/读取 API |
+| Canvas / 部分 WebGL 像素 | 2D `getImageData`、HTML `toDataURL/toBlob`、Offscreen `convertToBlob`；默认 WebGL1/2 缓冲区 RGBA8 CPU 读取 | 稳定 RGB 低位扰动，导出用副本；WebGL 仅支持 sRGB、不透明像素、`Uint8Array` 和标准行布局，保留 PACK 对齐及 WebGL2 目标偏移 |
 | Audio | `OfflineAudioContext.startRendering` 与完成事件 buffer | 离线输出稀疏微扰；实时播放、设备采样率保持真实 |
 | 时区 | 原生 Emulation 与 Worker 读取核对 | 不支持或不一致时关闭会话 |
 | Worker | 私有 target 暂停与配置，共用完整 hook | UA、语言、平台、CPU、Memory、时区、OffscreenCanvas 读取/导出和 WebGL 声明；缺失 API 保持缺失 |
@@ -47,8 +47,14 @@ Brows 的当前基础能力是多环境数据隔离；`SeedableNoise` 是可选�
 
 Canvas 的扰动由 seed 与绝对像素坐标确定，使普通数值参数的局部读取与整幅读取一致。
 不改变 alpha 或透明黑，不累计扰动，不改原画布；Float16/HDR 读取保留原值。
-不支持的输入形式或 API 回退原生行为。WebGL `readPixels`、
-`createImageBitmap` 等旁路不能宣称已覆盖。跨源污染画布仍由原生 API 抛出安全错误，
+不支持的输入形式或 API 保留原生行为。WebGL `readPixels` 先执行原生读取，保留 receiver、
+异常及参数转换，不调用会消耗错误状态的 `getError`。仅在已知默认读取缓冲区、RGBA /
+UNSIGNED_BYTE、sRGB、标准 PACK 行布局、完整范围和足够目标空间时扰动不透明 RGB；
+用 drawingBufferHeight 转换到 Canvas 左上坐标，使普通局部读取、整图和导出的坐标噪声一致。
+不改 GPU 缓冲区、alpha、半透明像素、行填充或目标范围外的字节。自定义 FBO、浮点格式、
+PBO、非默认行长度/跳行、共享内存、P3/HDR、越界读取及 `createImageBitmap` 等路径仍未覆盖。
+这些原生路径可用于读取未扰动内容，不能声称 GPU 像素已全面隔离。
+跨源污染画布仍由原生 API 抛出安全错误，
 不绕过浏览器同源限制。
 
 扩展与私有会话控制器共用同一个脚本生成器。Worker 使用 `WorkerNavigator` 与
@@ -96,6 +102,8 @@ for Testing 的支持路线仍需可信发布者、安装来源与更新校验�
 3. 页面 hook 行为：API 缺失互不影响、原生非法 receiver/异常语义、重复读取一致、
    局部/导出一致、透明像素/原画布不变、Canvas/Audio 开关有效、音频不累计；
    Worker 无窗口 API 的行为和重复策略注入。
+   WebGL 另验整图/局部读取、坐标原点、PACK 对齐、目标偏移、已有 GL 错误保留、原生失败
+   不改目标、非法 receiver/转换副作用、上下文丢失和关闭开关。
 4. UI：内核/语言/窗口修改后必须重预览；重复选择当前 persona 不重置 seed；显示
    配置值而非观测值；不把数字字符串写入页面 number 字段。
 5. 真实运行时（独立步骤）：隔离临时用户数据，验证扩展确实载入，再记录窗口/frame/
@@ -125,6 +133,13 @@ P2：原生时区、Worker 核对、别名规范化及 Intl/Date 冬夏偏移验
 
 P3：如需内核级字体、GPU、Audio、网络栈一致性，评估受控 Chromium 内核路线及
 安全更新成本。Canvas 输出扰动可以继续改进，但不能替代这项工作。
+
+`private_webgl_pixel_acceptance` 在签名 Edge 上分别验证关闭扰动、启用扰动、相同种子重启、
+不同种子四组真实浏览器，并覆盖九类页面/Worker 首脚本。页面 WebGL1 和 WebGL2 必须有
+正向可用控制；其他上下文的原生可用性不能被覆盖层改变。比较 CPU 读取与 2D 读取的
+像素、重复/局部读取和实际 PNG 解码结果；再用未覆盖的 FBO 副本读取原生绘制结果，
+确认源缓冲区没有被改写，并验证目标过小的原生错误。未通过对应提交的原生验收前不能
+把本地 mock 成功换算成 GPU 覆盖已生效；`complete` 继续为 false。
 
 
 ## 签名运行时与实测工具补充

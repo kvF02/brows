@@ -168,6 +168,14 @@ impl ControlFixture {
             return;
         };
         let path = headers.split_whitespace().nth(1).unwrap_or("/").to_owned();
+        if path == "/closed/page" {
+            output.lock().unwrap().push((
+                path,
+                String::new(),
+                serde_json::json!({"kind":"closed-response-fixture"}),
+            ));
+            return;
+        }
         if path == "/held/page" && !document_gate.hold() {
             return;
         }
@@ -217,6 +225,13 @@ impl ControlFixture {
             "/../../tools/test_support/first_observation.js"
         ))
         .replace("__BROWS_FIXTURE_VERSION__", &revision.to_string())
+        .replace(
+            "__BROWS_GPU_OBSERVATION__",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tools/test_support/webgl_observation.js"
+            )),
+        )
         .replace(
             "__BROWS_FIXTURE_PHASE__",
             if path.ends_with("dependency.mjs") {

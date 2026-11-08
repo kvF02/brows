@@ -7,6 +7,7 @@ on:
       - 'crates/application/src/**'
       - 'tools/test_support/controlled_browser.rs'
       - 'tools/test_support/first_observation.js'
+      - 'tools/test_support/webgl_observation.js'
       - 'tools/test_support/fixture_page.js'
   push:
     branches: [master]
@@ -16,6 +17,7 @@ on:
       - 'crates/application/src/**'
       - 'tools/test_support/controlled_browser.rs'
       - 'tools/test_support/first_observation.js'
+      - 'tools/test_support/webgl_observation.js'
       - 'tools/test_support/fixture_page.js'
   workflow_dispatch:
 permissions:
@@ -57,12 +59,19 @@ jobs:
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
           }
+      - name: Verify native, seeded, reopened and different-seed GPU pixel paths
+        timeout-minutes: 3
+        run: cargo +1.97.1 test -p brows-adapters-runtime private_webgl_pixel_acceptance --locked -- --ignored --nocapture
+      - name: Keep document network errors separate from session-control failure
+        timeout-minutes: 1
+        run: cargo +1.97.1 test -p brows-adapters-runtime private_navigation_error_result_acceptance --locked -- --ignored --nocapture
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: navigation-lifecycle-evidence
           path: |
             target/fingerprint-pending-navigation-acceptance.json
+            target/fingerprint-webgl-pixels-acceptance.json
             target/fingerprint-worker-lifecycle-acceptance.json
             target/fingerprint-renderer-crash-acceptance.json
             target/fingerprint-module-worker-acceptance.json

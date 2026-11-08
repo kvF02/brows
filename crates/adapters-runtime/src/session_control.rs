@@ -2,7 +2,7 @@
 //! No generic command/evaluate surface is exposed through application ports.
 use super::{
     internal, invalid_data,
-    navigation::NavigationStart,
+    navigation::{navigation_reply_acknowledged, NavigationStart},
     now_ms,
     target_registry::{Target, TargetJob, Targets, MAX_TARGETS},
     win_pipe,
@@ -294,8 +294,18 @@ impl Wire {
                 {
                     Ok(value) => {
                         let result = self.complete_reply(&reply, value)?;
-                        if result.get("errorText").is_some() || result["isDownload"] == true {
-                            return Err(internal("startup document navigation failed"));
+                        if !navigation_reply_acknowledged(&result, frame) {
+                            return Err(internal("browser omitted the requested navigation frame"));
+                        }
+                        #[cfg(test)]
+                        if let Some(code) = result["errorText"].as_str().filter(|code| {
+                            code.len() <= 64
+                                && code.starts_with("net::ERR_")
+                                && code[9..]
+                                    .bytes()
+                                    .all(|b| b.is_ascii_uppercase() || b == b'_')
+                        }) {
+                            eprintln!("startup navigation document result: {code}");
                         }
                         return Ok(());
                     }
@@ -1294,6 +1304,33 @@ mod tests {
             if !value["webgl"].is_null() {
                 assert_eq!(value["webgl"], self.webgl);
             }
+            assert!(value["gpuPixels"].is_object());
+            for kind in ["webgl", "webgl2"] {
+                let sample = &value["gpuPixels"][kind];
+                if sample.is_null() {
+                    continue;
+                }
+                assert_eq!(sample["error"], Value::Null);
+                for check in [
+                    "repeatStable",
+                    "cropConsistent",
+                    "errorsPreserved",
+                    "sourceUnchanged",
+                ] {
+                    assert_eq!(sample[check], true, "{} {kind} {check}", value["kind"]);
+                }
+                assert_eq!(
+                    sample["pixels"], value["canvas"],
+                    "{} {kind} readPixels/2D",
+                    value["kind"]
+                );
+                assert_eq!(
+                    decode_gpu_png(sample["png"].as_str().unwrap()),
+                    sample["pixels"].as_str().unwrap(),
+                    "{} {kind} exported PNG/readPixels",
+                    value["kind"]
+                );
+            }
         }
         fn write_report(&self, name: &str, observations: Value) {
             let version = self.controller.wire.version.lock().unwrap().clone();
@@ -1309,6 +1346,14 @@ mod tests {
     fn acceptance_browser(
         fixture: &browser_fixture::ControlFixture,
         route: &str,
+    ) -> AcceptanceBrowser {
+        acceptance_browser_options(fixture, route, true, "worker-lifecycle")
+    }
+    fn acceptance_browser_options(
+        fixture: &browser_fixture::ControlFixture,
+        route: &str,
+        canvas_noise: bool,
+        seed: &str,
     ) -> AcceptanceBrowser {
         use brows_domain::{DeviceMemoryGb, ScreenConfig, SeedableNoisePersona, WebGLProfile};
         let executable = std::path::PathBuf::from(
@@ -1328,7 +1373,7 @@ mod tests {
         ));
         std::fs::create_dir_all(&root).unwrap();
         let persona = SeedableNoisePersona {
-            seed: "worker-lifecycle".to_owned(),
+            seed: seed.to_owned(),
             platform: PlatformKind::Windows,
             hardware_concurrency: 3,
             device_memory: DeviceMemoryGb::Half,
@@ -1343,7 +1388,7 @@ mod tests {
                 vendor: String::new(),
                 unmasked_renderer: String::new(),
             },
-            spoof_canvas: true,
+            spoof_canvas: canvas_noise,
             spoof_audio: false,
         };
         let fp =
@@ -1377,6 +1422,157 @@ mod tests {
             root,
             webgl: expected_webgl,
             user_agent,
+        }
+    }
+
+    fn decode_gpu_png(encoded: &str) -> String {
+        use base64::Engine;
+        assert!(encoded.len() <= 16384);
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(encoded)
+            .unwrap();
+        let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
+        decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
+        let mut reader = decoder.read_info().unwrap();
+        assert_eq!((reader.info().width, reader.info().height), (16, 16));
+        let size = reader.output_buffer_size().unwrap();
+        assert!(size <= 1024);
+        let mut output = vec![0; size];
+        let info = reader.next_frame(&mut output).unwrap();
+        let rgba = match info.color_type {
+            png::ColorType::Rgba => output[..info.buffer_size()].to_vec(),
+            png::ColorType::Rgb => output[..info.buffer_size()]
+                .chunks_exact(3)
+                .flat_map(|rgb| [rgb[0], rgb[1], rgb[2], 255])
+                .collect(),
+            _ => panic!("expected fixed RGBA8/RGB8 fixture PNG"),
+        };
+        rgba.iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    #[test]
+    #[ignore = "closes only the owned loopback document connection; requires signed Edge"]
+    fn private_navigation_error_result_acceptance() {
+        let fixture = browser_fixture::ControlFixture::start(false);
+        let browser = acceptance_browser(&fixture, "closed");
+        assert!(!fixture
+            .wait_kind_count("/closed/", "closed-response-fixture", 1)
+            .is_empty());
+        assert!(browser.controller.try_wait().unwrap().is_none());
+        assert!(browser
+            .controller
+            .wire
+            .call("Browser.getVersion", json!({}), None)
+            .is_ok());
+        assert!(browser
+            .controller
+            .wire
+            .policy_failure
+            .lock()
+            .unwrap()
+            .is_none());
+        // The fixture returned no HTTP response, and supplied no page proof.
+        assert!(!fixture
+            .proofs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(_, _, value)| value["kind"] == "page"));
+    }
+
+    #[test]
+    #[ignore = "requires signed Edge and verifies real WebGL readback/export in isolated profiles"]
+    fn private_webgl_pixel_acceptance() {
+        let fixture = browser_fixture::ControlFixture::start(true);
+        let mut modes = Vec::new();
+        let mut first_samples: Option<Vec<Value>> = None;
+        let mut native_availability = std::collections::BTreeMap::new();
+        for (route, noise, seed) in [
+            ("gpu-native", false, "pixel-seed"),
+            ("gpu-seeded", true, "pixel-seed"),
+            ("gpu-reopen", true, "pixel-seed"),
+            ("gpu-other", true, "different-pixel-seed"),
+        ] {
+            let browser = acceptance_browser_options(&fixture, route, noise, seed);
+            let proofs = fixture.wait_proofs(&format!("/{route}/"));
+            assert_eq!(
+                proofs
+                    .iter()
+                    .map(|(_, _, v)| v["kind"].as_str().unwrap())
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+                9
+            );
+            let samples: Vec<Value> = proofs.into_iter().map(|(_, _, v)| v).collect();
+            let page = samples.iter().find(|v| v["kind"] == "page").unwrap();
+            for kind in ["webgl", "webgl2"] {
+                assert!(
+                    page["gpuPixels"][kind].is_object(),
+                    "positive page GPU control required: {kind}"
+                );
+            }
+            for sample in &samples {
+                browser.assert_signals(sample);
+                for kind in ["webgl", "webgl2"] {
+                    let available = !sample["gpuPixels"][kind].is_null();
+                    let key = (sample["kind"].as_str().unwrap().to_owned(), kind.to_owned());
+                    if !noise {
+                        native_availability.insert(key, available);
+                    } else {
+                        assert_eq!(
+                            Some(&available),
+                            native_availability.get(&key),
+                            "GPU availability must be preserved"
+                        );
+                    }
+                    if available {
+                        if noise {
+                            assert_ne!(
+                                sample["gpuPixels"][kind]["pixels"],
+                                json!("a42367ff".repeat(256))
+                            );
+                        } else {
+                            assert_eq!(
+                                sample["gpuPixels"][kind]["pixels"],
+                                json!("a42367ff".repeat(256))
+                            );
+                        }
+                    }
+                }
+            }
+            if route == "gpu-reopen" || route == "gpu-other" {
+                for sample in &samples {
+                    let previous = first_samples
+                        .as_ref()
+                        .unwrap()
+                        .iter()
+                        .find(|v| v["kind"] == sample["kind"])
+                        .unwrap();
+                    for kind in ["webgl", "webgl2"] {
+                        if sample["gpuPixels"][kind].is_null() {
+                            continue;
+                        }
+                        if route == "gpu-reopen" {
+                            assert_eq!(
+                                sample["gpuPixels"][kind]["pixels"],
+                                previous["gpuPixels"][kind]["pixels"]
+                            );
+                        } else {
+                            assert_ne!(
+                                sample["gpuPixels"][kind]["pixels"],
+                                previous["gpuPixels"][kind]["pixels"]
+                            );
+                        }
+                    }
+                }
+            }
+            if route == "gpu-seeded" {
+                first_samples = Some(samples.clone());
+            }
+            modes.push(json!({"mode":route,"observations":samples}));
+            if route == "gpu-other" {
+                browser.write_report("webgl-pixels", json!(modes));
+            }
         }
     }
 
