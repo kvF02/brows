@@ -62,10 +62,11 @@ async function probe(host, transport, port, username, credential) {
     }
   };
   socket.on(transport === 'udp' ? 'message' : 'data', consume);
-  let timer;
+  let timer, phase = 'connect';
   try {
     const work = async () => {
       if (transport !== 'udp') await new Promise(resolve => socket.once(transport === 'tls' ? 'secureConnect' : 'connect', resolve));
+      phase = 'challenge';
       const exchange = async (type, fields, key) => {
         const req = request(type, fields, key);
         const response = new Promise(resolve => { pending = resolve; });
@@ -78,6 +79,7 @@ async function probe(host, transport, port, username, credential) {
       if (challenge.type !== 0x113 || !realm || !nonce || realm.length > 128 || nonce.length > 256) throw new Error('auth_challenge_missing');
       const key = createHash('md5').update(`${username}:${realm.toString()}:${credential}`).digest();
       const auth = [attr(6, Buffer.from(username)), attr(0x14, realm), attr(0x15, nonce)];
+      phase = 'authenticated_allocation';
       const allocation = await exchange(3, [...base, ...auth], key);
       const error = allocation.fields.get(9);
       if (allocation.type !== 0x103) return {status: 'not_checked', reason: 'allocation_rejected', errorCode: error?.length >= 4 ? error[2] * 100 + error[3] : null};
@@ -91,7 +93,7 @@ async function probe(host, transport, port, username, credential) {
     return await Promise.race([work(), failure, new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('timeout')), 9000); })]);
   } catch (error) {
     const allowed = ['invalid_response','connection_failed','connection_closed','auth_challenge_missing','response_integrity_failed','allocation_addresses_missing','timeout'];
-    return {status: 'not_checked', reason: allowed.includes(error.message) ? error.message : 'probe_failed'};
+    return {status: 'not_checked', phase, reason: allowed.includes(error.message) ? error.message : 'probe_failed'};
   } finally { clearTimeout(timer); if (transport === 'udp') { try { socket.close(); } catch {} } else socket.destroy(); }
 }
 const host = process.env.BROWS_TURN_HOST;

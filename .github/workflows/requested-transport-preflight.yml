@@ -29,7 +29,11 @@ jobs:
         shell: pwsh
         run: |
           $value = & curl.exe --silent --show-error --max-time 10 --ipv6 'https://api6.ipify.org/?format=json' 2>$null
-          @{ service = 'api6.ipify.org'; curlExitCode = $LASTEXITCODE; response = "$value" } | ConvertTo-Json | Set-Content target/ipv6-preflight.json
+          $code = $LASTEXITCODE
+          $routeCount = if (Get-Command Get-NetRoute -ErrorAction SilentlyContinue) { @(Get-NetRoute -AddressFamily IPv6 -DestinationPrefix '::/0' -ErrorAction SilentlyContinue).Count } else { $null }
+          $globalCount = if (Get-Command Get-NetIPAddress -ErrorAction SilentlyContinue) { @(Get-NetIPAddress -AddressFamily IPv6 -ErrorAction SilentlyContinue | Where-Object IPAddress -Match '^[23]').Count } else { $null }
+          @{ service = 'api6.ipify.org'; status = $(if ($code -eq 0) { 'observed' } else { 'not_checked' }); curlExitCode = $code; response = "$value"; defaultIpv6Routes = $routeCount; globalIpv6Addresses = $globalCount } | ConvertTo-Json | Set-Content target/ipv6-preflight.json
+          exit 0
       - uses: actions/upload-artifact@v4
         if: always()
         with:
