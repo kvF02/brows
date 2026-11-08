@@ -1,0 +1,40 @@
+name: Requested transport preflight
+on:
+  push:
+    branches: [codex/run-transport-preflight]
+    paths: ['.github/workflows/requested-transport-preflight.yml']
+permissions:
+  contents: read
+jobs:
+  preflight:
+    runs-on: windows-latest
+    timeout-minutes: 4
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Probe documented public static-auth TURN without media traffic
+        shell: pwsh
+        env:
+          BROWS_TURN_HOST: staticauth.openrelay.metered.ca
+          BROWS_TURN_REST_SECRET: openrelayprojectsecret
+        run: |
+          New-Item -ItemType Directory -Force target | Out-Null
+          node tools/turn-allocation-probe.mjs target/turn-preflight.json
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Check native IPv6 HTTPS reachability
+        shell: pwsh
+        run: |
+          $value = & curl.exe --silent --show-error --max-time 10 --ipv6 'https://api6.ipify.org/?format=json' 2>$null
+          @{ service = 'api6.ipify.org'; curlExitCode = $LASTEXITCODE; response = "$value" } | ConvertTo-Json | Set-Content target/ipv6-preflight.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: requested-transport-preflight
+          path: |
+            target/turn-preflight.json
+            target/ipv6-preflight.json
+          retention-days: 7
