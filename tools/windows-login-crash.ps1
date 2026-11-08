@@ -14,6 +14,13 @@ $roots = @($snapshot | Where-Object { $_.ParentProcessId -eq $OwnerId -and $_.Na
 if ($roots.Count -ne 1) { throw "Expected one owned active browser, found $($roots.Count)" }
 $tree = @(Find-ProcessTree $snapshot $roots)
 Stop-OwnedProcess $roots[0]
-foreach ($remaining in @(Find-RemainingProcesses $tree)) { Stop-OwnedProcess $remaining }
+foreach ($remaining in @(Find-RemainingProcesses $tree)) {
+    try { Stop-OwnedProcess $remaining }
+    catch {
+        # Killing the root can make a captured child exit by itself between
+        # the snapshot and handle acquisition. Never target a replacement PID.
+        if (@(Find-RemainingProcesses @($remaining)).Count -gt 0) { throw }
+    }
+}
 Wait-ProcessTreeExit $tree
 @{ browserRoots = 1; observedProcessesReclaimed = $tree.Count } | ConvertTo-Json -Compress
