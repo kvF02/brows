@@ -1475,7 +1475,8 @@ mod tests {
     #[test]
     fn profile_edits_require_a_stopped_unreserved_profile_and_current_revision() {
         let root = std::env::temp_dir().join(format!("brows-edit-lease-{}", uuid::Uuid::new_v4()));
-        let state = AppState::prototype_with_capacity(root.clone(), 1).unwrap();
+        let state = AppState::prototype(root.clone()).unwrap();
+        state.sessions.configure_idle_limit(1, || Ok(())).unwrap();
         let draft = |name: &str| ProfileDraftDto {
             name: name.to_owned(),
             tags: vec![],
