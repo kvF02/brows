@@ -382,6 +382,17 @@ fn login_persistence_acceptance() {
         .unwrap();
     drop(state);
     let reopened = OwnedState(AppState::production(data).unwrap());
+    // Capability observations expire with the host. Exercise the same fresh
+    // probe required by Settings before reopening SeedableNoise environments.
+    let admitted = reopened
+        .0
+        .browsers
+        .probe_fingerprint_support(&managed.id)
+        .unwrap();
+    assert_eq!(
+        admitted.build.capabilities.fingerprint_support,
+        brows_domain::FingerprintSupport::Supported
+    );
     for p in saved {
         let p = reopened
             .0
