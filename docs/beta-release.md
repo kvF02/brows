@@ -13,6 +13,10 @@ npm run desktop:package
 ```
 
 命令固定 Tauri CLI 2.12.4，先构建嵌入式前端，再生成当前用户 NSIS 安装包。
+CI 在编译前准备该版本固定的 NSIS 3.13 和 Tauri 插件 0.5.3；缓存只保存下载文件，
+每次重新核对官方固定 SHA256，再核对 Tauri 使用的可执行文件/插件摘要后解压使用。
+GitHub Release 下载失败时尝试官方 Release asset API（NSIS 另有官方 SourceForge 源），
+每个端点等待最多 20 秒，整个准备步骤最多 3 分钟；所有来源均不跳过摘要校验。
 WebView2 未安装时，安装器需要联网取得 Microsoft WebView2 引导程序。
 设计依据：[Tauri 官方 Windows 安装包文档](https://v2.tauri.app/distribute/windows-installer/)。
 
@@ -21,13 +25,30 @@ SHA256SUMS、构建提交号、实际 Authenticode 状态以及安装验收报�
 `installed/brows-desktop.exe` 是安装器实际落盘的程序摘要，单文件应用有独立记录。
 CI 不自动发布 GitHub Release，不自动升级用户机器上的应用。
 
+同一次工作流另附 `brows-windows-client-kit-<commit>`，包含同一安装器、便携程序、摘要、
+构建标识和 Windows PowerShell 5.1/7 验收脚本。下载并完整解压后按其中的
+[本机验收说明](../tools/client-acceptance/README.md)操作。脚本只校验包及已安装程序、
+记录系统版本和逐项人工结果，不自动安装/卸载、不读 Cookie 或凭据、不上传数据。
+跳过项目保留 incomplete，人工记录标为 operator-attestation，不能当作自动化网站证据。
+
 仓库没有配置产品代码签名证书或更新签名密钥。当前包应作为**未签名内测包**处理；
 浏览器运行时的 Google/Microsoft 签名校验和 Brows 安装包自身签名是两回事。
+安装包签名元数据查询在独立进程等待最多 45 秒，超时/失败记录 `authenticodeChecked=false`、
+`authenticode=Indeterminate`，不能当作已验证签名。此项仅为内测构建信息，不承担发布准入；
+产品浏览器运行时的签名准入继续严格校验。
 
 ## 安装与升级验收
 
 CI 在独立 Windows runner 上执行真实静默安装、打开打包后的主窗口、初始化数据库、
 正常关闭、覆盖安装以及卸载，并检查应用数据标记保留。
+报告 `assertionsPassed` 表示所列断言通过，`packageChecksComplete` 表示本次安装检查已完成；
+旧的 `complete: false` 继续保留，表示报告之外的全目标尚未覆盖。
+另外在 `windows-11-arm` 桌面客户端运行器上，下载同一 x64 内测包，核对摘要、PE 架构、
+Windows ProductType/构建号和 ARM64 本机架构，再执行安装、三次窗口启动/正常退出、
+覆盖安装及卸载数据保留。`windows11-arm-acceptance.json` 单独记录 x64 模拟运行和每次
+实际使用的 WebView2 版本。它不覆盖 Windows 10、x64 真机、ARM64 原生应用、ARM64
+SeedableNoise 能力或完整 UI 流程。此项成功后才能声称对应提交通过该客户端冒烟验收。
+客户端报告同样保留 `complete: false`，用 `clientPackageChecksComplete` 单独标记本次范围。
 随后在 Windows Server 2022 runner 用同一 NSIS 安装器安装并核对应用 SHA256，使用
 Microsoft Edge WebDriver 驱动**已安装应用**的 WebView2，确认内嵌资源和真实 Tauri
 适配器，再操作并发保存、环境新建/编辑/归档恢复、批量标签和代理编辑、批量启动/停止、
@@ -45,7 +66,7 @@ WebDriver 只用于 Windows CI，匹配实际 WebView2 的构建版本并验证 
 [Microsoft WebView2 WebDriver 文档](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/webdriver)。
 
 真实代理、SeedableNoise 设置、其他错误分支和完整桌面流程分别验收。
-只有对应提交的工作流成功且两份验收 JSON 均存在，才算本次安装及所列 UI 流程通过。
+只有对应提交的工作流成功且安装、客户端和 UI 验收 JSON 均通过，才算本次所列流程通过。
 
 ## 长稳和故障恢复验收
 

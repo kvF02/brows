@@ -15,6 +15,17 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - name: Validate client collector with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tools/test-client-acceptance.ps1
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/brows-tauri-downloads
+          key: windows-tauri-2.12.4-nsis-3.13-utils-0.5.3-v1
+      - name: Prepare pinned bundler tools before compilation
+        timeout-minutes: 3
+        shell: pwsh
+        run: ./tools/windows-bundler-tools.ps1
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -43,6 +54,7 @@ jobs:
           if (-not $installer) { throw 'No NSIS installer produced' }
           ./tools/windows-beta-smoke.ps1 -Installer $installer.FullName -Report target/beta-package-acceptance.json
       - name: Record hashes and unsigned beta status
+        timeout-minutes: 2
         shell: pwsh
         run: |
           $files = @(Get-Item target/release/brows-desktop.exe) + @(Get-ChildItem target/release/bundle/nsis/*-setup.exe)
@@ -51,8 +63,15 @@ jobs:
           if (-not $acceptance.assertionsPassed -or $acceptance.installedApplicationSha256 -notmatch '^[a-f0-9]{64}$') { throw 'Missing installed application hash' }
           $hashes += "$($acceptance.installedApplicationSha256)  installed/brows-desktop.exe"
           $hashes | Set-Content target/SHA256SUMS.txt
-          $signature = Get-AuthenticodeSignature target/release/brows-desktop.exe
-          @{ commit = '${{ github.sha }}'; channel = 'internal-beta'; authenticode = "$($signature.Status)"; autoUpdate = $false } | ConvertTo-Json | Set-Content target/beta-build.json
+          ./tools/windows-beta-build-info.ps1 -Application target/release/brows-desktop.exe -Commit '${{ github.sha }}' -Report target/beta-build.json
+      - name: Assemble verified client acceptance kit
+        shell: pwsh
+        run: ./tools/package-client-acceptance.ps1 -ArtifactRoot target -Destination target/brows-windows-client-kit.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: brows-windows-client-kit-${{ github.sha }}
+          path: target/brows-windows-client-kit.zip
+          if-no-files-found: error
       - uses: actions/cache/save@v4
         if: ${{ !cancelled() && steps.package_build.outcome == 'success' && steps.release_cache.outputs.cache-hit != 'true' }}
         with:
@@ -68,6 +87,33 @@ jobs:
             target/SHA256SUMS.txt
             target/beta-build.json
             target/beta-package-acceptance.json
+          if-no-files-found: warn
+  windows11-arm:
+    needs: package
+    # A desktop client OS, running the same x64 package under emulation.
+    # Keep this evidence separate from x64 hardware and the Server UI job.
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: brows-windows-client-kit-${{ github.sha }}
+          path: target/download
+      - name: Extract the client kit
+        shell: pwsh
+        run: Expand-Archive -LiteralPath target/download/brows-windows-client-kit.zip -DestinationPath target/client-kit
+      - name: Install, open, upgrade and uninstall the x64 package on Windows 11 ARM64
+        shell: pwsh
+        run: ./tools/windows-client-smoke.ps1 -KitDirectory target/client-kit -Report target/windows11-arm-acceptance.json
+      - name: Preserve client OS evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: brows-windows11-arm-${{ github.sha }}
+          path: |
+            target/windows11-arm-acceptance.json
+            target/windows11-arm-acceptance.json.package.json
           if-no-files-found: warn
   ui:
     needs: package

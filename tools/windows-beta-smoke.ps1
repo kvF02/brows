@@ -1,5 +1,8 @@
 param([Parameter(Mandatory)][string]$Installer, [Parameter(Mandatory)][string]$Report)
 $ErrorActionPreference = 'Stop'
+if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or $env:OS -ne 'Windows_NT') {
+    throw 'Disposable hosted Windows fixture only; do not run this installer/uninstaller on a user PC'
+}
 . "$PSScriptRoot/windows-close-probe.ps1"
 $installRoot = Join-Path $env:RUNNER_TEMP 'BrowsBetaInstall'
 $appRoot = Join-Path $env:LOCALAPPDATA 'local-brows-desktop'
@@ -11,6 +14,7 @@ $result = [ordered]@{
     schemaVersion = 1
     assertionsPassed = $false
     complete = $false
+    packageChecksComplete = $false
     checks = $checks
     launches = $launches
     installedApplicationSha256 = $null
@@ -33,6 +37,7 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
         exitCode = $null
         windowVisibleAtTimeout = $null
         lifecycle = @()
+        webview2Version = $null
     }
     $launches.Add($launch)
     $process = $null
@@ -42,6 +47,9 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
         $process = Start-BrowsProbe -Executable $Executable -TracePath $tracePath
         Wait-BrowsWindow -Process $process
         $launch.windowReadyMs = $startup.ElapsedMilliseconds
+        $webview = Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe' AND ParentProcessId=$($process.Id)" | Select-Object -First 1
+        if (-not $webview -or -not $webview.ExecutablePath) { throw 'Actual application WebView2 process missing' }
+        $launch.webview2Version = [Diagnostics.FileVersionInfo]::GetVersionInfo($webview.ExecutablePath).FileVersion
         if (-not (Test-Path (Join-Path $appRoot 'profiles.sqlite3'))) { throw 'Application did not initialize its database' }
 
         $shutdown = [Diagnostics.Stopwatch]::StartNew()
@@ -104,6 +112,7 @@ try {
     if ([IO.File]::ReadAllText($sentinel) -ne 'preserve-user-data') { throw 'Uninstall removed application data' }
     $checks.Add('uninstall-preserves-data')
     $result.assertionsPassed = $true
+    $result.packageChecksComplete = $true
 } catch {
     $result.failure = @{ phase = $phase; message = $_.Exception.Message }
     throw
