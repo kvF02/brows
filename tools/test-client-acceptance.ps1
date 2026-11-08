@@ -14,6 +14,7 @@ try {
         Get-Item "$PSScriptRoot/package-client-acceptance.ps1"
         Get-Item "$PSScriptRoot/windows-client-smoke.ps1"
         Get-Item "$PSScriptRoot/windows-beta-smoke.ps1"
+        Get-Item "$PSScriptRoot/windows-beta-build-info.ps1"
     )
     foreach ($file in $files) {
         $parseErrors = $null; $tokens = $null
