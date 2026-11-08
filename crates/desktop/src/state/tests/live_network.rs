@@ -352,7 +352,7 @@ fn live_browser_network_acceptance() {
     let mut report = json!({
         "schemaVersion": 2, "complete": false, "productCommit": env::var("BROWS_PRODUCT_COMMIT").ok(),
         "browserVersion": edge.version, "runtimeId": edge.id.as_str(), "runtimeSha256": edge.sha256,
-        "runtimeTrust": "verified", "direct": [], "cases": [],
+        "runtimeTrust": "verified", "requestedEndpoints": endpoints.len(), "direct": [], "cases": [],
         "dnsAcceptance": {"status": "not_checked", "reason": "expected_proxy_resolver_ranges_not_configured", "method": "fresh_operator_owned_dns4_and_dns6_names"},
         "webrtcScope": "Google and Cloudflare public STUN; both direct positive controls required; TURN separate",
         "notChecked": ["authoritative DNS resolver allowlist", "all WebRTC/STUN/TURN transports", "Windows 10/11 client matrix", "arbitrary site compatibility"]
