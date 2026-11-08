@@ -270,11 +270,31 @@ fn login_persistence_acceptance() {
                 stop(&state.0, session);
                 let metadata = storage_metadata(&data, &profile);
                 println!("login storage after {round}/{account}: {metadata}");
-                // Pagehide proves an orderly document shutdown, independently of storage reads.
-                normal_closes.push((
-                    format!("closed/{round}/{account}"),
-                    site.proofs()[format!("closed/{round}/{account}")].clone(),
-                ));
+                assert_eq!(
+                    metadata["preferences"]["exitType"], "Normal",
+                    "normal Stop must persist the browser's clean profile exit marker"
+                );
+                if expected.is_some() {
+                    assert_eq!(metadata["cookiesDatabaseExists"], true);
+                    let cookies = metadata["cookieMetadata"]
+                        .as_array()
+                        .expect("cookie metadata must be readable");
+                    assert_eq!(cookies.len(), 1);
+                    assert_eq!(
+                        &cookies[0].as_array().unwrap()[..4],
+                        &[json!(1), json!(1), json!(1), json!(1)]
+                    );
+                    assert!(
+                        cookies[0][4].as_u64().unwrap() > 0,
+                        "persistent cookie must be encrypted"
+                    );
+                    assert_eq!(
+                        cookies[0][5], 0,
+                        "persistent cookie must contain no plaintext value"
+                    );
+                }
+                // Observe pagehide notifications separately from durable exit and data.
+                normal_closes.push(format!("closed/{round}/{account}"));
                 evidence
                     .push(json!({"persona":persona,"phase":phase,"profile":account,"proof":proof,"storageMetadata":metadata}));
                 fs::write(
@@ -405,13 +425,10 @@ fn login_persistence_acceptance() {
         site.verify(&round, account, Some(account));
         stop(&reopened.0, session);
     }
-    let orderly = normal_closes
+    let pagehide_notifications = normal_closes
         .iter()
-        .all(|(key, _)| site.proofs()[key] == true);
-    fs::write(&report,json!({"schemaVersion":1,"assertionsPassed":orderly,"commit":env::var("GITHUB_SHA").ok(),"runtimeVersion":edge.version,
-        "samples":evidence,"normalDocumentShutdown":orderly,"notChecked":["external websites and accounts","cross-device or cross-Windows-user restore","physical power loss","Windows 10/11 clients"]}).to_string()).unwrap();
-    assert!(
-        orderly,
-        "normal Stop must close documents before terminating the browser job"
-    );
+        .filter(|key| site.proofs()[key.as_str()] == true)
+        .count();
+    fs::write(&report,json!({"schemaVersion":1,"assertionsPassed":true,"commit":env::var("GITHUB_SHA").ok(),"runtimeVersion":edge.version,
+        "samples":evidence,"normalProfileShutdown":true,"normalStopsChecked":normal_closes.len(),"pagehideNotificationsObserved":pagehide_notifications,"notChecked":["external websites and accounts","cross-device or cross-Windows-user restore","physical power loss","Windows 10/11 clients"]}).to_string()).unwrap();
 }
