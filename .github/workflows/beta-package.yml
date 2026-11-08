@@ -18,6 +18,14 @@ jobs:
       - name: Validate client collector with Windows PowerShell 5.1
         shell: powershell
         run: ./tools/test-client-acceptance.ps1
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/brows-tauri-downloads
+          key: windows-tauri-2.12.4-nsis-3.13-utils-0.5.3-v1
+      - name: Prepare pinned bundler tools before compilation
+        timeout-minutes: 3
+        shell: pwsh
+        run: ./tools/windows-bundler-tools.ps1
       - uses: actions/setup-node@v4
         with:
           node-version: 24

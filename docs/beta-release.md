@@ -13,6 +13,10 @@ npm run desktop:package
 ```
 
 命令固定 Tauri CLI 2.12.4，先构建嵌入式前端，再生成当前用户 NSIS 安装包。
+CI 在编译前准备该版本固定的 NSIS 3.13 和 Tauri 插件 0.5.3；缓存只保存下载文件，
+每次重新核对官方固定 SHA256，再核对 Tauri 使用的可执行文件/插件摘要后解压使用。
+GitHub Release 下载失败时尝试官方 Release asset API（NSIS 另有官方 SourceForge 源），
+每个端点等待最多 20 秒，整个准备步骤最多 3 分钟；所有来源均不跳过摘要校验。
 WebView2 未安装时，安装器需要联网取得 Microsoft WebView2 引导程序。
 设计依据：[Tauri 官方 Windows 安装包文档](https://v2.tauri.app/distribute/windows-installer/)。
 
