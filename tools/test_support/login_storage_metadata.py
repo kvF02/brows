@@ -21,9 +21,14 @@ for filename, label in [("Default/Preferences", "preferences"), ("Local State", 
                           "hasAppBoundEncryptedKey": bool(value.get("os_crypt", {}).get("app_bound_encrypted_key"))})
     except Exception as error:
         result[label] = {"error": type(error).__name__}
-database = root / "Default/Network/Cookies"
-result["cookiesDatabaseExists"] = database.is_file()
-if database.is_file():
+result["cookiesDatabaseExists"] = False
+result["stores"] = {}
+for relative in ["Default/Network/Cookies", "Default/Cookies", "Default/History", "Default/Login Data"]:
+    database = root / relative
+    result["stores"][relative] = database.is_file()
+    if not database.is_file() or not relative.endswith("Cookies"):
+        continue
+    result["cookiesDatabaseExists"] = True
     try:
         with sqlite3.connect(database.resolve().as_uri() + "?mode=ro", uri=True) as connection:
             result["cookieMetadata"] = connection.execute(

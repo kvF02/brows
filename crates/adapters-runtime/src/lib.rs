@@ -386,15 +386,17 @@ impl ManagedChromiumRuntime {
     fn prepare_profile(&self, plan: &ResolvedLaunchPlan) -> PortResult<PathBuf> {
         let user_data_dir = create_confined_directory(&self.profile_root, &plan.user_data_dir)?;
         write_preferences(&user_data_dir, plan)?;
-        Ok(user_data_dir)
+        browser_compatible_directory(&user_data_dir)
     }
 
     fn render_arguments(
         plan: &ResolvedLaunchPlan,
         user_data_dir: &Path,
     ) -> PortResult<Vec<OsString>> {
+        let mut directory_argument = OsString::from("--user-data-dir=");
+        directory_argument.push(user_data_dir.as_os_str());
         let mut rendered = vec![
-            OsString::from(format!("--user-data-dir={}", user_data_dir.display())),
+            directory_argument,
             OsString::from("--no-first-run"),
             OsString::from("--no-default-browser-check"),
         ];
@@ -853,6 +855,48 @@ fn write_preferences(user_data_dir: &Path, plan: &ResolvedLaunchPlan) -> PortRes
     Ok(())
 }
 
+fn browser_compatible_directory(canonical: &Path) -> PortResult<PathBuf> {
+    #[cfg(windows)]
+    {
+        use std::os::windows::ffi::{OsStrExt, OsStringExt};
+        let wide: Vec<u16> = canonical.as_os_str().encode_wide().collect();
+        // Keep canonical/device paths for confinement and filesystem work,
+        // but pass conventional Win32 paths to Chromium's storage libraries.
+        let plain = if wide.starts_with(&[92, 92, 63, 92]) {
+            if wide.len() >= 7 && matches!(wide[4], 65..=90 | 97..=122) && wide[5..7] == [58, 92] {
+                wide[4..].to_vec()
+            } else if wide.starts_with(&[92, 92, 63, 92, 85, 78, 67, 92]) {
+                [vec![92, 92], wide[8..].to_vec()].concat()
+            } else {
+                return Err(invalid_data(
+                    "browser profile uses an unsupported Windows device path",
+                ));
+            }
+        } else if wide.starts_with(&[92, 92, 46, 92]) {
+            return Err(invalid_data(
+                "browser profile uses a Windows device namespace",
+            ));
+        } else {
+            wide
+        };
+        let plain = PathBuf::from(OsString::from_wide(&plain));
+        if plain
+            .canonicalize()
+            .map_err(|_| invalid_data("browser profile path cannot be represented for Chromium"))?
+            != canonical
+        {
+            return Err(invalid_data(
+                "browser profile path normalization changed the directory",
+            ));
+        }
+        Ok(plain)
+    }
+    #[cfg(not(windows))]
+    {
+        Ok(canonical.to_path_buf())
+    }
+}
+
 fn create_and_canonicalize(path: PathBuf, label: &str) -> PortResult<PathBuf> {
     if path.as_os_str().is_empty() {
         return Err(invalid_data(format!("{label} cannot be empty")));
@@ -1016,6 +1060,23 @@ mod tests {
         ));
         fs::create_dir_all(&path).unwrap();
         path
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn browser_profile_paths_preserve_identity_without_a_verbatim_prefix() {
+        let root = temp_root("browser-path");
+        let directory = root.join("指纹 data");
+        fs::create_dir(&directory).unwrap();
+        let canonical = directory.canonicalize().unwrap();
+        let presented = browser_compatible_directory(&canonical).unwrap();
+        assert!(!presented.as_os_str().to_string_lossy().starts_with(r"\\?\"));
+        assert_eq!(presented.canonicalize().unwrap(), canonical);
+        assert!(
+            browser_compatible_directory(Path::new(r"\\?\GLOBALROOT\Device\HarddiskVolume1"))
+                .is_err()
+        );
+        fs::remove_dir_all(root).unwrap();
     }
 
     fn sample_plan(executable: PathBuf, profile_root: &Path) -> ResolvedLaunchPlan {
