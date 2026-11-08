@@ -67,6 +67,8 @@
     return proto && {
       proto, second: name === 'WebGL2RenderingContext', get: proto.getParameter,
       read: descriptorOf(proto, 'readPixels'), lost: proto.isContextLost, status: proto.checkFramebufferStatus,
+      attachment: proto.getFramebufferAttachmentParameter, renderbuffer: proto.getRenderbufferParameter,
+      bindRenderbuffer: proto.bindRenderbuffer, isRenderbuffer: proto.isRenderbuffer,
       width: descriptorOf(proto, 'drawingBufferWidth')?.get,
       height: descriptorOf(proto, 'drawingBufferHeight')?.get,
       colorSpace: descriptorOf(proto, 'drawingBufferColorSpace')?.get,
@@ -127,23 +129,51 @@
                 arrayTag.call(output) !== 'Uint8Array' || api.lost.call(this)) return result;
             // Shared-memory reads and unsupported representations stay native.
             bufferLength.call(arrayBuffer.call(output));
-            const bufferWidth = api.width.call(this), bufferHeight = api.height.call(this);
-            if (x < 0 || y < 0 || width <= 0 || height <= 0 ||
-                x + width > bufferWidth || y + height > bufferHeight) return result;
             const get = key => api.get.call(this, key);
-            if (get(api.second ? 36010 : 36006) !== null) return result; // default read framebuffer
-            if (api.second && (get(35053) !== null || get(3074) !== 1029 ||
-                get(3330) !== 0 || get(3331) !== 0 || get(3332) !== 0)) return result;
+            const framebuffer = get(api.second ? 36010 : 36006);
+            const readBuffer = api.second ? get(3074) : 1029;
+            if (api.second && get(35053) !== null) return result;
             if (api.status.call(this, api.second ? 36008 : 36160) !== 36053) return result;
-            if (api.colorSpace && api.colorSpace.call(this) !== 'srgb') return result;
-            if (get(35738) !== 5121 || get(35739) !== 6408) return result;
+            let bufferWidth, bufferHeight;
+            if (framebuffer === null) {
+              if (readBuffer !== 1029 || (api.colorSpace && api.colorSpace.call(this) !== 'srgb')) return result;
+              if (get(35738) !== 5121 || get(35739) !== 6408) return result;
+              bufferWidth = api.width.call(this); bufferHeight = api.height.call(this);
+            } else {
+              // Texture dimensions cannot be queried through WebGL. Only native
+              // WebGL2 RGBA8 renderbuffer attachments have a verified extent.
+              if (!api.second || ![api.attachment, api.renderbuffer, api.bindRenderbuffer, api.isRenderbuffer].every(v => typeof v === 'function') ||
+                  readBuffer < 0x8ce0 || readBuffer >= 0x8ce0 + get(0x8cdf) ||
+                  api.attachment.call(this, 0x8ca8, readBuffer, 0x8cd0) !== 0x8d41) return result;
+              const buffer = api.attachment.call(this, 0x8ca8, readBuffer, 0x8cd1);
+              if (!api.isRenderbuffer.call(this, buffer)) return result;
+              const previous = get(0x8ca7);
+              try {
+                if (previous !== buffer) api.bindRenderbuffer.call(this, 0x8d41, buffer);
+                if (api.renderbuffer.call(this, 0x8d41, 0x8d44) !== 0x8058 ||
+                    api.renderbuffer.call(this, 0x8d41, 0x8cab) !== 0) return result;
+                bufferWidth = api.renderbuffer.call(this, 0x8d41, 0x8d42);
+                bufferHeight = api.renderbuffer.call(this, 0x8d41, 0x8d43);
+              } finally {
+                if (previous !== buffer) api.bindRenderbuffer.call(this, 0x8d41, previous);
+              }
+            }
+            if (!integer(bufferWidth) || !integer(bufferHeight) ||
+                x < 0 || y < 0 || width <= 0 || height <= 0 ||
+                x + width > bufferWidth || y + height > bufferHeight) return result;
             const alignment = get(3333);
             if (![1, 2, 4, 8].includes(alignment)) return result;
-            const stride = Math.ceil(width * 4 / alignment) * alignment;
-            const required = offset + (height - 1) * stride + width * 4;
+            const rowLength = api.second ? get(3330) : 0;
+            const skipRows = api.second ? get(3331) : 0, skipPixels = api.second ? get(3332) : 0;
+            if (![rowLength, skipRows, skipPixels].every(v => integer(v) && v >= 0)) return result;
+            const storeWidth = rowLength || width;
+            if (skipPixels + width > storeWidth) return result; // native INVALID_OPERATION
+            const stride = Math.ceil(storeWidth * 4 / alignment) * alignment;
+            const first = offset + skipRows * stride + skipPixels * 4;
+            const required = first + (height - 1) * stride + width * 4;
             if (!integer(required) || required > arrayLength.call(output)) return result;
             for (let row = 0; row < height; row++) for (let col = 0; col < width; col++) {
-              const start = offset + row * stride + col * 4;
+              const start = first + row * stride + col * 4;
               // Opaque pixels avoid native premultiplication/color conversion
               // ambiguities. Alpha, transparent pixels and padding are intact.
               if (output[start + 3] !== 255) continue;

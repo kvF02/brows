@@ -39,7 +39,7 @@ Brows 的当前基础能力是多环境数据隔离；`SeedableNoise` 是可选�
 | Screen | Screen getter | 声明宽高、色深；可用区按声明尺寸返回，不模拟系统任务栏 |
 | 窗口与比例 | Chromium 参数 | 不是物理显示器替换；缩放和最大化影响实际视口 |
 | WebGL vendor/renderer | WebGL1/2 `getParameter` | 仅有效的 unmasked 字符串；GPU 像素、扩展、能力仍真实 |
-| Canvas / 部分 WebGL 像素 | 2D `getImageData`、HTML `toDataURL/toBlob`、Offscreen `convertToBlob`；默认 WebGL1/2 缓冲区 RGBA8 CPU 读取 | 稳定 RGB 低位扰动，导出用副本；WebGL 仅支持 sRGB、不透明像素、`Uint8Array` 和标准行布局，保留 PACK 对齐及 WebGL2 目标偏移 |
+| Canvas / 部分 WebGL 像素 | 2D `getImageData`、HTML `toDataURL/toBlob`、Offscreen `convertToBlob`；默认 WebGL1/2 缓冲区与 WebGL2 RGBA8 renderbuffer 的 CPU 读取 | 稳定 RGB 低位扰动，导出用副本；覆盖不透明 `Uint8Array` 读取、PACK 对齐及 WebGL2 行长度、跳行、跳像素和目标偏移；默认缓冲区限 sRGB |
 | Audio | `OfflineAudioContext.startRendering` 与完成事件 buffer | 离线输出稀疏微扰；实时播放、设备采样率保持真实 |
 | 时区 | 原生 Emulation 与 Worker 读取核对 | 不支持或不一致时关闭会话 |
 | Worker | 私有 target 暂停与配置，共用完整 hook | UA、语言、平台、CPU、Memory、时区、OffscreenCanvas 读取/导出和 WebGL 声明；缺失 API 保持缺失 |
@@ -48,11 +48,17 @@ Brows 的当前基础能力是多环境数据隔离；`SeedableNoise` 是可选�
 Canvas 的扰动由 seed 与绝对像素坐标确定，使普通数值参数的局部读取与整幅读取一致。
 不改变 alpha 或透明黑，不累计扰动，不改原画布；Float16/HDR 读取保留原值。
 不支持的输入形式或 API 保留原生行为。WebGL `readPixels` 先执行原生读取，保留 receiver、
-异常及参数转换，不调用会消耗错误状态的 `getError`。仅在已知默认读取缓冲区、RGBA /
-UNSIGNED_BYTE、sRGB、标准 PACK 行布局、完整范围和足够目标空间时扰动不透明 RGB；
-用 drawingBufferHeight 转换到 Canvas 左上坐标，使普通局部读取、整图和导出的坐标噪声一致。
-不改 GPU 缓冲区、alpha、半透明像素、行填充或目标范围外的字节。自定义 FBO、浮点格式、
-PBO、非默认行长度/跳行、共享内存、P3/HDR、越界读取及 `createImageBitmap` 等路径仍未覆盖。
+异常及参数转换，不调用会消耗错误状态的 `getError`。仅在已知读取缓冲区尺寸、RGBA /
+UNSIGNED_BYTE、完整范围和足够目标空间时扰动不透明 RGB。默认缓冲区限 sRGB，使用
+drawingBufferHeight 转换到 Canvas 左上坐标。WebGL2 另支持完整、单采样 RGBA8
+renderbuffer FBO：按实际 READ_BUFFER 选择颜色附件，原生查询该 renderbuffer 的尺寸，
+查询后在 finally 中恢复原 RENDERBUFFER_BINDING，不改读写 framebuffer、附件或绘制内容。
+纹理附件没有可查询的完整尺寸，不能以画布尺寸或历史 texImage 调用猜测；继续保留原生结果。
+WebGL2 的 PACK_ROW_LENGTH、PACK_SKIP_ROWS、PACK_SKIP_PIXELS 与 dstOffset 共同确定
+实际目的范围；每行填充、跳过区域、TypedArray view 之外的字节不变。非法跨行布局或不足
+空间保持原生错误和目标内容。两类受支持缓冲区均按自己的高度转换像素坐标。
+不改 GPU 缓冲区、alpha 或半透明像素。纹理 FBO、WebGL1 FBO、非 RGBA8 renderbuffer、
+多采样直接读取、浮点格式、PBO、共享内存、默认 P3/HDR、越界读取及 `createImageBitmap` 等路径仍未覆盖。
 这些原生路径可用于读取未扰动内容，不能声称 GPU 像素已全面隔离。
 跨源污染画布仍由原生 API 抛出安全错误，
 不绕过浏览器同源限制。
@@ -134,11 +140,34 @@ P2：原生时区、Worker 核对、别名规范化及 Intl/Date 冬夏偏移验
 P3：如需内核级字体、GPU、Audio、网络栈一致性，评估受控 Chromium 内核路线及
 安全更新成本。Canvas 输出扰动可以继续改进，但不能替代这项工作。
 
-`private_webgl_pixel_acceptance` 在签名 Edge 上分别验证关闭扰动、启用扰动、相同种子重启、
+### 受控内核接入还缺什么
+
+目前 `BrowserBuild` 的摘要、发行者与信任状态解决运行时准入；
+`FingerprintSupport::Supported` 只表示局部探针通过。`session_control::configure`
+使用现有 Emulation 命令和页面/Worker 脚本，尚无本项目的 Chromium 原生实现。
+下一阶段应沿现有边界接入，不能把这个枚举直接解释成原生指纹能力：
+
+| 接入点 | 必须补齐的实现与证据 |
+|---|---|
+| 可信运行时登记 | 发布可复现的内核源码版本、补丁集和构建产物；继续校验摘要、发行者与受信任目录，配套安全更新和回退验证 |
+| 能力探针 | 单独协商原生策略协议及版本、逐项返回实测能力；脚本读取覆盖与原生能力分别记录，不接受内核自己声明即通过 |
+| 会话启动与目标创建 | 在网页、frame、Worker 首脚本之前从受保护的会话通道设置策略；原生实现不支持请求字段时明确拒绝，不能静默降级 |
+| 字体 | 同时覆盖 CSS 字体匹配、文字度量与渲染、字体加载/查询等可观察路径；伪造字体列表不能证明渲染隔离 |
+| GPU | 渲染、纹理/多采样 FBO、PBO、ImageBitmap 与导出使用一致策略；扩展、限制、shader 精度与设备声明一起验收 |
+| 音频与网络 | 将离线读取、真实音频设备/采样率以及浏览器网络行为分别验收；页面返回值不能替代设备或网络证据 |
+| 跨设备验收 | 同种子跨进程、profile 重开及不同主机核对；保留原生基线和不同种子对照，在真实 Win10/Win11 x64 上验证 |
+
+上表是尚未实现的内核接入要求。本仓库当前没有对应 Chromium 补丁和原生产物，
+本轮 WebGL 扩展不会改变这个状态，也不能将 `complete` 置为 true。
+
+`private_webgl_pixel_acceptance` 在签名 Edge 上分别验证关闭扰动、启用扰动、相同种子的新进程、
 不同种子四组真实浏览器，并覆盖九类页面/Worker 首脚本。页面 WebGL1 和 WebGL2 必须有
 正向可用控制；其他上下文的原生可用性不能被覆盖层改变。比较 CPU 读取与 2D 读取的
-像素、重复/局部读取和实际 PNG 解码结果；再用未覆盖的 FBO 副本读取原生绘制结果，
-确认源缓冲区没有被改写，并验证目标过小的原生错误。未通过对应提交的原生验收前不能
+像素、重复/局部读取和实际 PNG 解码结果。WebGL2 另验五组 PACK 布局、非零 view/dstOffset、
+边界字节及既有错误；用 9x7 的 RGBA8 renderbuffer 与独立的 READ/DRAW 绑定、COLOR_ATTACHMENT1
+核对坐标和绑定恢复，再用未覆盖的纹理 FBO 副本确认源缓冲区没有被改写。RGBA4 保持原生，
+多采样和不完整 FBO 的失败不改调用方字节或新增错误。相同种子的检查使用新目录与新进程，
+不替代持久化 profile 重开的验收。未通过对应提交的原生验收前不能
 把本地 mock 成功换算成 GPU 覆盖已生效；`complete` 继续为 false。
 
 

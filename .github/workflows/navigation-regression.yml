@@ -48,6 +48,9 @@ jobs:
           key: windows-rust-v2-1.97.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
           restore-keys: |
             windows-rust-v2-1.97.1-
+      - name: Verify native, seeded, reopened and different-seed GPU pixel paths
+        timeout-minutes: 3
+        run: cargo +1.97.1 test -p brows-adapters-runtime private_webgl_pixel_acceptance --locked -- --ignored --nocapture
       - name: Repeat real first-navigation and lifecycle checks without retries
         timeout-minutes: 10
         shell: pwsh
@@ -59,9 +62,6 @@ jobs:
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
           }
-      - name: Verify native, seeded, reopened and different-seed GPU pixel paths
-        timeout-minutes: 3
-        run: cargo +1.97.1 test -p brows-adapters-runtime private_webgl_pixel_acceptance --locked -- --ignored --nocapture
       - name: Keep document network errors separate from session-control failure
         timeout-minutes: 1
         run: cargo +1.97.1 test -p brows-adapters-runtime private_navigation_error_result_acceptance --locked -- --ignored --nocapture
