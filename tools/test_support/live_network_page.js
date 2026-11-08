@@ -1,6 +1,6 @@
 // Test-only page. Fixed public services, no credentials, permissions or remote code.
 void (async () => {
-  const report = {kind: 'network', schemaVersion: 1};
+  const report = {kind: 'network', schemaVersion: 2};
   const json = async url => {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), 10000);
@@ -33,6 +33,9 @@ void (async () => {
   const ip = json('https://api.ipify.org/?format=json')
     .then(value => ({status: 'observed', ip: typeof value.ip === 'string' ? value.ip.slice(0, 64) : null}))
     .catch(error => ({status: 'not_checked', reason: failure(error)}));
+  const ipv6 = json('https://api6.ipify.org/?format=json')
+    .then(value => ({status: 'observed', ip: typeof value.ip === 'string' ? value.ip.slice(0, 64) : null}))
+    .catch(error => ({status: 'not_checked', reason: failure(error)}));
   const dns = Promise.all(['dns4', 'dns6'].map(async family => {
     const nonce = Array.from(crypto.getRandomValues(new Uint8Array(6)), n => n.toString(16).padStart(2, '0')).join('');
     try {
@@ -42,7 +45,7 @@ void (async () => {
       return {family, status: resolvers.length ? 'observed' : 'not_checked', resolvers: resolvers.slice(0, 32)};
     } catch (error) { return {family, status: 'not_checked', reason: failure(error), resolvers: []}; }
   }));
-  const rtc = new Promise(resolve => {
+  const gather = url => new Promise(resolve => {
     let peer, timer, finished = false;
     const types = new Set(), protocols = new Set(), srflx = new Set();
     const finish = status => {
@@ -52,7 +55,7 @@ void (async () => {
     };
     if (typeof RTCPeerConnection !== 'function') { finish('unavailable'); return; }
     try {
-      peer = new RTCPeerConnection({iceServers: [{urls: 'stun:stun.l.google.com:19302'}]});
+      peer = new RTCPeerConnection({iceServers: [{urls: url}]});
       timer = setTimeout(() => finish('timeout'), 7000);
       peer.onicecandidate = event => {
         if (!event.candidate) { finish('complete'); return; }
@@ -75,7 +78,13 @@ void (async () => {
       timezone: Intl.DateTimeFormat().resolvedOptions().timeZone, canvas: read(), repeat: read(),
     };
   } catch { report.fingerprint = {status: 'error'}; }
-  [report.https, report.dns, report.webrtc] = await Promise.all([ip, dns, rtc]);
+  const [https, https6, dnsSamples, google, cloudflare] = await Promise.all([
+    ip, ipv6, dns, gather('stun:stun.l.google.com:19302'), gather('stun:stun.cloudflare.com:3478'),
+  ]);
+  Object.assign(report, {https, https6, dns: dnsSamples, webrtc: google,
+    stun: [{service: 'google', ...google}, {service: 'cloudflare', ...cloudflare}],
+    turn: {status: 'not_checked', reason: 'authenticated_relay_positive_control_required'},
+  });
   await fetch(location.pathname.replace(/page$/, 'proof'), {
     method: 'POST', body: JSON.stringify(report), credentials: 'omit',
   });

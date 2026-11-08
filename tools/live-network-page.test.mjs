@@ -24,6 +24,7 @@ async function run({ip = {ip: '203.0.113.9'}, dns = {'192.0.2.53': []}, rtc = 'c
       requests.push({url, options});
       if (url.startsWith('/live-network/')) { receive(JSON.parse(options.body)); return new Response('ok'); }
       if (options.signal.aborted) throw new Error('aborted');
+      if (url.includes('api6.ipify')) return new Response(JSON.stringify({ip: '2001:db8::9'}));
       if (url.includes('ipify')) return new Response(oversized ? 'x'.repeat(8193) : JSON.stringify(ip));
       return new Response(JSON.stringify(dns));
     },
@@ -40,6 +41,10 @@ async function run({ip = {ip: '203.0.113.9'}, dns = {'192.0.2.53': []}, rtc = 'c
 test('collects actual exit, fresh DNS names and positive STUN evidence without credentials', async () => {
   const {report, requests, peers} = await run({rtc: 'srflx'});
   assert.equal(report.https.ip, '203.0.113.9');
+  assert.equal(report.https6.ip, '2001:db8::9');
+  assert.deepEqual(report.stun.map(v => v.service), ['google', 'cloudflare']);
+  assert.equal(peers.length, 2);
+  assert.equal(report.turn.status, 'not_checked');
   assert.deepEqual(report.dns.map(v => v.status), ['observed', 'observed']);
   const names = requests.filter(v => v.url.includes('browserleaks.net')).map(v => new URL(v.url).hostname);
   assert.equal(names.length, 2);

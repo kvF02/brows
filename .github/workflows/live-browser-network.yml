@@ -71,10 +71,20 @@ jobs:
             & $env:BROWS_LIVE_TEST_EXE live_browser_network_acceptance --ignored --nocapture
             if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           } finally { Pop-Location }
+      - name: Recompute scoped conclusions from raw observations
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path target/live-browser-network-acceptance.json) {
+            node tools/analyze-live-network.mjs target/live-browser-network-acceptance.json target/live-network-analysis.json
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: live-browser-network-acceptance-${{ github.run_id }}
-          path: target/live-browser-network-acceptance.json
+          path: |
+            target/live-browser-network-acceptance.json
+            target/live-network-analysis.json
           if-no-files-found: warn
           retention-days: 7
