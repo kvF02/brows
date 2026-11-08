@@ -887,6 +887,17 @@ pub(crate) fn profile_update(
     state: State<'_, AppState>,
     request: ProfileUpdateRequest,
 ) -> IpcResult<ProfileDto> {
+    update_stopped_profile(&state, request)
+}
+
+fn update_stopped_profile(
+    state: &AppState,
+    request: ProfileUpdateRequest,
+) -> IpcResult<ProfileDto> {
+    let _lease = state
+        .sessions
+        .reserve_stopped_profile(profile_id(&request.profile_id)?)
+        .map_err(|error| error.to_contract())?;
     ipc(state.profiles.update(request))
 }
 
@@ -1460,5 +1471,113 @@ mod tests {
         }))
         .unwrap_err();
         assert_eq!(error.code, ErrorCode::ValidationFailed);
+    }
+    #[test]
+    fn profile_edits_require_a_stopped_unreserved_profile_and_current_revision() {
+        let root = std::env::temp_dir().join(format!("brows-edit-lease-{}", uuid::Uuid::new_v4()));
+        let state = AppState::prototype_with_capacity(root.clone(), 1).unwrap();
+        let draft = |name: &str| ProfileDraftDto {
+            name: name.to_owned(),
+            tags: vec![],
+            preset_id: PresetIdDto::new("system-native").unwrap(),
+            preset_version: 1,
+            proxy_id: None,
+            browser: BrowserSelectorDto::Channel {
+                channel: brows_contracts::BrowserChannelDto::Stable,
+            },
+            persona: PersonaDto::default(),
+            locale: LocaleDto {
+                accept_languages: vec!["en-US".to_owned()],
+                timezone: None,
+            },
+            window: WindowDto {
+                width: 1280,
+                height: 800,
+                start_maximized: false,
+            },
+            startup_urls: vec![],
+        };
+        let first = state
+            .profiles
+            .create(ProfileCreateRequest {
+                profile: draft("first"),
+            })
+            .unwrap();
+        let second = state
+            .profiles
+            .create(ProfileCreateRequest {
+                profile: draft("second"),
+            })
+            .unwrap();
+        let started = state
+            .sessions
+            .launch(SessionLaunchRequest {
+                profile_id: first.id.clone(),
+            })
+            .unwrap();
+        let queued = state
+            .sessions
+            .launch(SessionLaunchRequest {
+                profile_id: second.id.clone(),
+            })
+            .unwrap();
+        let edit = |profile: &ProfileDto| ProfileUpdateRequest {
+            profile_id: profile.id.clone(),
+            expected_revision: profile.revision,
+            profile: draft("edited"),
+        };
+        assert_eq!(
+            update_stopped_profile(&state, edit(&first))
+                .unwrap_err()
+                .code,
+            ErrorCode::ProfileLocked
+        );
+        assert_eq!(
+            update_stopped_profile(&state, edit(&second))
+                .unwrap_err()
+                .code,
+            ErrorCode::ProfileLocked
+        );
+        let queued = match queued {
+            SessionLaunchOutcome::Queued { session, .. } => session,
+            _ => panic!("queued fixture"),
+        };
+        state
+            .sessions
+            .stop(SessionStopRequest {
+                session_id: queued.id,
+            })
+            .unwrap();
+        let lease = state
+            .sessions
+            .reserve_stopped_profile(profile_id(&second.id).unwrap())
+            .unwrap();
+        assert_eq!(
+            update_stopped_profile(&state, edit(&second))
+                .unwrap_err()
+                .code,
+            ErrorCode::ProfileLocked
+        );
+        drop(lease);
+        let updated = update_stopped_profile(&state, edit(&second)).unwrap();
+        assert_eq!(updated.revision, second.revision + 1);
+        assert_eq!(
+            update_stopped_profile(&state, edit(&second))
+                .unwrap_err()
+                .code,
+            ErrorCode::RevisionConflict
+        );
+        let started = match started {
+            SessionLaunchOutcome::Started { session, .. } => session,
+            _ => panic!("started fixture"),
+        };
+        state
+            .sessions
+            .stop(SessionStopRequest {
+                session_id: started.id,
+            })
+            .unwrap();
+        drop(state);
+        let _ = std::fs::remove_dir_all(root);
     }
 }

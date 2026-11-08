@@ -30,7 +30,8 @@ CI 在独立 Windows runner 上执行真实静默安装、打开打包后的主�
 正常关闭、覆盖安装以及卸载，并检查应用数据标记保留。
 随后在 Windows Server 2022 runner 用同一 NSIS 安装器安装并核对应用 SHA256，使用
 Microsoft Edge WebDriver 驱动**已安装应用**的 WebView2，确认内嵌资源和真实 Tauri
-适配器，再操作并发保存、环境新建/编辑/归档恢复、SystemNative 浏览器启动/停止、
+适配器，再操作并发保存、环境新建/编辑/归档恢复、批量标签和代理编辑、批量启动/停止、
+十个运行加一个排队，以及 SystemNative 浏览器启动/停止、
 加密备份和恢复到新环境，并核对 UI 重载后的持久数据。测试通过 DOM 输入/点击，
 不直接调用应用 IPC 或写数据库；单独生成 `packaged-ui-acceptance.json` 与截图。
 同一流程从界面配置测试代理，验证本地 HTTP 代理认证、可信 TLS 成功、不可信证书拒绝和
