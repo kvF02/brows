@@ -1,0 +1,13 @@
+[package]
+name = "brows-adapters-profile-data"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Confined profile-data intents and exclusive application-data leases"
+
+[dependencies]
+brows-application = { path = "../application" }
+brows-domain = { path = "../domain" }
+serde.workspace = true
+serde_json.workspace = true
+sha2 = "0.10"

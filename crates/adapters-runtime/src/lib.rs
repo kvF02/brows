@@ -125,6 +125,7 @@ pub struct ManagedChromiumRuntime {
     snapshot_store: RwLock<Option<snapshots::SnapshotStore>>,
     snapshot_operations: Mutex<()>,
     snapshot_inventories: RwLock<HashMap<BrowserBuildId, snapshots::SnapshotManifest>>,
+    _data_lease: Option<brows_adapters_profile_data::DataRootLease>,
 }
 
 impl ManagedChromiumRuntime {
@@ -158,7 +159,13 @@ impl ManagedChromiumRuntime {
             snapshot_store: RwLock::new(None),
             snapshot_operations: Mutex::new(()),
             snapshot_inventories: RwLock::new(HashMap::new()),
+            _data_lease: None,
         })
+    }
+
+    pub fn with_data_lease(mut self, lease: brows_adapters_profile_data::DataRootLease) -> Self {
+        self._data_lease = Some(lease);
+        self
     }
 
     pub fn set_network_probe_config(
@@ -551,6 +558,7 @@ impl BrowserRuntime for ManagedChromiumRuntime {
                 "所选运行时未通过指纹首脚本检测；可使用系统原生模式，不能启动 SeedableNoise",
             ));
         }
+        brows_adapters_profile_data::ensure_profile_available(&plan.user_data_dir)?;
         let admitted_directory =
             create_confined_directory(&self.profile_root, &plan.user_data_dir)?;
         profile_floor::admit(&admitted_directory, &build)?;

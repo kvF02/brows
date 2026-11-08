@@ -1,6 +1,7 @@
 use brows_adapters_backup::EncryptedBackupService;
 use brows_adapters_diagnostic::LocalNetworkDiagnosticRunner;
 use brows_adapters_morelogin::MoreLoginProfileDataMigrator;
+use brows_adapters_profile_data::{DataRootLease, ProfileDataJournal};
 use brows_adapters_proxy::{StoredProxyRuntime, TcpProxyConnectivityTester};
 use brows_adapters_runtime::{verify_authenticode_publisher, ManagedChromiumRuntime};
 use brows_adapters_secret_windows::WindowsCredentialStore;
@@ -49,6 +50,7 @@ pub(crate) struct AppState {
     pub(crate) proxy_management: Option<Arc<ProxyApplicationService>>,
     pub(crate) diagnostics: Option<Arc<LocalNetworkDiagnosticRunner>>,
     pub(crate) backups: Option<Arc<EncryptedBackupService>>,
+    _data_lease: Option<DataRootLease>,
 }
 
 impl AppState {
@@ -61,6 +63,7 @@ impl AppState {
             )
         })?;
 
+        let data_lease = DataRootLease::acquire(&data_root)?;
         let clock = Arc::new(SystemClock);
         let database_path = data_root.join("profiles.sqlite3");
         let settings_store = Arc::new(SqliteSettingsStore::open(&database_path)?);
@@ -99,10 +102,29 @@ impl AppState {
                 format!("failed to canonicalize profile data directory: {error}"),
             )
         })?;
-        let backup_service = Arc::new(EncryptedBackupService::new(
-            data_root.join("backups"),
+        let journal = Arc::new(ProfileDataJournal::new(
             profile_root.clone(),
+            Some(data_lease.clone()),
         )?);
+        let backup_service = Arc::new(
+            EncryptedBackupService::new(data_root.join("backups"), profile_root.clone())?
+                .with_journal(journal.clone())?,
+        );
+        let migrator = Arc::new(
+            MoreLoginProfileDataMigrator::new(
+                default_morelogin_cache_root(),
+                profile_root.clone(),
+            )?
+            .with_journal(journal.clone())?,
+        );
+        crate::data_recovery::recover(
+            &journal,
+            &backup_service,
+            &migrator,
+            profiles.as_ref(),
+            migration_records.as_ref(),
+            clock.now_ms(),
+        )?;
         let managed_root = data_root.join("runtimes");
         std::fs::create_dir_all(&managed_root).map_err(|_| {
             PortError::new(
@@ -116,10 +138,10 @@ impl AppState {
             .cloned()
             .collect();
         roots.push(managed_root.clone());
-        let browsers = Arc::new(ManagedChromiumRuntime::with_runtime_roots(
-            roots,
-            &profile_root,
-        )?);
+        let browsers = Arc::new(
+            ManagedChromiumRuntime::with_runtime_roots(roots, &profile_root)?
+                .with_data_lease(data_lease.clone()),
+        );
         let probe_settings = data_root.join("network-probe.json");
         if probe_settings.is_file() {
             let mut bytes = Vec::new();
@@ -216,10 +238,7 @@ impl AppState {
         let migration_service = Arc::new(MigrationApplicationService::new(
             profiles.clone(),
             session_service.clone(),
-            Arc::new(MoreLoginProfileDataMigrator::new(
-                default_morelogin_cache_root(),
-                profile_root,
-            )?),
+            migrator,
             migration_records,
             clock,
         ));
@@ -250,6 +269,7 @@ impl AppState {
             proxy_management: Some(proxy_management),
             diagnostics: Some(diagnostics),
             backups: Some(backup_service),
+            _data_lease: Some(data_lease),
         })
     }
 
@@ -316,6 +336,7 @@ impl AppState {
             proxy_management: None,
             diagnostics: None,
             backups: None,
+            _data_lease: None,
         })
     }
 }

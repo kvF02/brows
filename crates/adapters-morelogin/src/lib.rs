@@ -1,6 +1,10 @@
 #![forbid(unsafe_code)]
 #![deny(missing_debug_implementations)]
 
+use brows_adapters_profile_data::{
+    ordinary, remove_confined_tree, sync_directory, sync_tree, DataOperation, OperationKind,
+    ProfileDataJournal,
+};
 use brows_application::{
     LegacyMigrationArtifact, LegacyProfileDataMigrator, LegacyProfileDataSummary, PortError,
     PortErrorKind, PortResult,
@@ -12,6 +16,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Component, Path, PathBuf};
+use std::sync::Arc;
 
 const MAX_EXPORT_BYTES: u64 = 32 * 1024 * 1024;
 const MAX_MIGRATION_FILES: u64 = 500_000;
@@ -192,6 +197,7 @@ fn resolve_export_path(path: &str) -> PathBuf {
 pub struct MoreLoginProfileDataMigrator {
     source_root: PathBuf,
     target_root: PathBuf,
+    journal: Arc<ProfileDataJournal>,
 }
 
 impl MoreLoginProfileDataMigrator {
@@ -207,10 +213,100 @@ impl MoreLoginProfileDataMigrator {
             ));
         }
         let target_root = create_and_canonicalize(target_root.into(), "Brows profile root")?;
+        let journal = Arc::new(ProfileDataJournal::new(target_root.clone(), None)?);
         Ok(Self {
             source_root,
             target_root,
+            journal,
         })
+    }
+
+    pub fn with_journal(mut self, journal: Arc<ProfileDataJournal>) -> PortResult<Self> {
+        if journal.root() != self.target_root {
+            return Err(PortError::new(
+                PortErrorKind::InvalidData,
+                "migration journal root mismatch",
+            ));
+        }
+        self.journal = journal;
+        Ok(self)
+    }
+
+    /// Reconcile rename boundaries without deleting either complete data generation.
+    pub fn recover_operation(&self, operation: &DataOperation, committed: bool) -> PortResult<()> {
+        let profile = operation.profile()?;
+        let root = self.journal.profile_dir(&profile);
+        ordinary(&root, true)?;
+        let target = root.join("userdata");
+        let stage = root.join(format!("userdata.staging-{}", operation.operation_key));
+        let backup = root.join(format!("userdata.backup-{}", operation.operation_key));
+        let after = root.join(format!(
+            "userdata.after-rollback-{}",
+            operation.operation_key
+        ));
+        for path in [&target, &stage, &backup, &after] {
+            ensure_confined_child(path, &root)?;
+            if path.symlink_metadata().is_ok() {
+                inspect_tree(path)?;
+            }
+        }
+        match operation.kind {
+            OperationKind::Migration => {
+                if committed {
+                    ordinary(&target, true)?;
+                } else if backup.exists() {
+                    if target.exists() {
+                        if after.exists() {
+                            return Err(PortError::new(
+                                PortErrorKind::InvalidData,
+                                "ambiguous interrupted migration; both generations preserved",
+                            ));
+                        }
+                        fs::rename(&target, &after)
+                            .map_err(|e| io_error("preserve interrupted migration data", e))?;
+                    }
+                    fs::rename(&backup, &target)
+                        .map_err(|e| io_error("recover original profile data", e))?;
+                }
+                remove_confined_tree(&stage, &root)?;
+            }
+            OperationKind::Rollback => {
+                if !committed {
+                    if backup.exists() {
+                        if target.exists() {
+                            if after.exists() {
+                                return Err(PortError::new(
+                                    PortErrorKind::InvalidData,
+                                    "ambiguous rollback; data preserved",
+                                ));
+                            }
+                            fs::rename(&target, &after)
+                                .map_err(|e| io_error("preserve rollback data", e))?;
+                        } else if !after.exists() {
+                            return Err(PortError::new(
+                                PortErrorKind::InvalidData,
+                                "rollback generation missing",
+                            ));
+                        }
+                        fs::rename(&backup, &target)
+                            .map_err(|e| io_error("finish interrupted rollback", e))?;
+                    } else if !after.exists() {
+                        return Err(PortError::new(
+                            PortErrorKind::InvalidData,
+                            "rollback backup missing",
+                        ));
+                    }
+                }
+                ordinary(&target, true)?;
+            }
+            OperationKind::Restore => {
+                return Err(PortError::new(
+                    PortErrorKind::InvalidData,
+                    "unexpected migration recovery kind",
+                ))
+            }
+        }
+        Ok(())
     }
 
     fn source_dir(&self, source_profile_id: &str) -> PortResult<PathBuf> {
@@ -285,35 +381,46 @@ impl LegacyProfileDataMigrator for MoreLoginProfileDataMigrator {
                 "migration staging or backup already exists",
             ));
         }
-        if !target.exists() {
-            fs::create_dir_all(&target)
-                .map_err(|error| io_error("create empty target profile", error))?;
+        let operation = DataOperation::new(OperationKind::Migration, profile_id, operation_key)?;
+        self.journal.begin(&operation)?;
+        let result = (|| {
+            if !target.exists() {
+                fs::create_dir_all(&target)
+                    .map_err(|error| io_error("create empty target profile", error))?;
+            }
+            let source_summary = inspect_tree(&source)?;
+            if let Err(error) = copy_tree(&source, &staging) {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(error);
+            }
+            let copied_summary = inspect_tree(&staging)?;
+            if copied_summary != source_summary {
+                let _ = fs::remove_dir_all(&staging);
+                return Err(PortError::new(
+                    PortErrorKind::Tampered,
+                    "staged profile copy did not match source size",
+                ));
+            }
+            remove_transient_locks(&staging)?;
+            sync_tree(&staging)?;
+            sync_tree(&target)?;
+            fs::rename(&target, &backup)
+                .map_err(|error| io_error("move existing profile to backup", error))?;
+            if let Err(error) = fs::rename(&staging, &target) {
+                let _ = fs::rename(&backup, &target);
+                return Err(io_error("activate staged profile", error));
+            }
+            sync_directory(&profile_dir)?;
+            Ok(LegacyMigrationArtifact {
+                backup_key: backup_name,
+                copied_files: source_summary.0,
+                copied_bytes: source_summary.1,
+            })
+        })();
+        if result.is_err() && self.recover_operation(&operation, false).is_ok() {
+            let _ = self.journal.finish(profile_id);
         }
-        let source_summary = inspect_tree(&source)?;
-        if let Err(error) = copy_tree(&source, &staging) {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(error);
-        }
-        let copied_summary = inspect_tree(&staging)?;
-        if copied_summary != source_summary {
-            let _ = fs::remove_dir_all(&staging);
-            return Err(PortError::new(
-                PortErrorKind::Tampered,
-                "staged profile copy did not match source size",
-            ));
-        }
-        remove_transient_locks(&staging)?;
-        fs::rename(&target, &backup)
-            .map_err(|error| io_error("move existing profile to backup", error))?;
-        if let Err(error) = fs::rename(&staging, &target) {
-            let _ = fs::rename(&backup, &target);
-            return Err(io_error("activate staged profile", error));
-        }
-        Ok(LegacyMigrationArtifact {
-            backup_key: backup_name,
-            copied_files: source_summary.0,
-            copied_bytes: source_summary.1,
-        })
+        result
     }
 
     fn rollback(&self, profile_id: &ProfileId, backup_key: &str) -> PortResult<()> {
@@ -330,13 +437,23 @@ impl LegacyProfileDataMigrator for MoreLoginProfileDataMigrator {
                 "rollback directories are unavailable",
             ));
         }
+        self.journal.begin(&DataOperation::new(
+            OperationKind::Rollback,
+            profile_id,
+            &backup_key[16..],
+        )?)?;
         fs::rename(&target, &after)
             .map_err(|error| io_error("preserve migrated profile", error))?;
         if let Err(error) = fs::rename(&backup, &target) {
             let _ = fs::rename(&after, &target);
             return Err(io_error("restore migration backup", error));
         }
+        sync_directory(&profile_dir)?;
         Ok(())
+    }
+
+    fn finish_operation(&self, profile_id: &ProfileId) -> PortResult<()> {
+        self.journal.finish(profile_id)
     }
 }
 
@@ -575,7 +692,9 @@ mod tests {
             fs::read(profile_dir.join("userdata/Default/History")).unwrap(),
             b"history"
         );
+        migrator.finish_operation(&profile).unwrap();
         migrator.rollback(&profile, &artifact.backup_key).unwrap();
+        migrator.finish_operation(&profile).unwrap();
         assert_eq!(
             fs::read(profile_dir.join("userdata/Default/History")).unwrap(),
             b"original"
@@ -603,5 +722,83 @@ mod tests {
             resolve_export_path(r"D:\exports\profile.xlsx"),
             PathBuf::from(r"D:\exports\profile.xlsx")
         );
+    }
+    #[test]
+    fn interrupted_migration_recovers_every_directory_swap_boundary_idempotently() {
+        for phase in 0..3 {
+            let root = temp_root("recovery");
+            fs::create_dir_all(root.join("profiles")).unwrap();
+            let migrator =
+                MoreLoginProfileDataMigrator::new(root.join("source"), root.join("profiles"))
+                    .unwrap();
+            let profile = ProfileId::new("recover-profile").unwrap();
+            let dir = migrator.profile_dir(&profile).unwrap();
+            let target = dir.join("userdata");
+            let stage = dir.join("userdata.staging-migration-7");
+            let backup = dir.join("userdata.backup-migration-7");
+            fs::create_dir(&target).unwrap();
+            fs::write(target.join("identity"), b"old").unwrap();
+            fs::create_dir(&stage).unwrap();
+            fs::write(stage.join("identity"), b"new").unwrap();
+            let op = DataOperation::new(OperationKind::Migration, &profile, "migration-7").unwrap();
+            migrator.journal.begin(&op).unwrap();
+            if phase > 0 {
+                fs::rename(&target, &backup).unwrap();
+            }
+            if phase > 1 {
+                fs::rename(&stage, &target).unwrap();
+            }
+            migrator.recover_operation(&op, false).unwrap();
+            migrator.recover_operation(&op, false).unwrap();
+            assert_eq!(fs::read(target.join("identity")).unwrap(), b"old");
+            assert!(!stage.exists());
+            if phase == 2 {
+                assert_eq!(
+                    fs::read(dir.join("userdata.after-rollback-migration-7/identity")).unwrap(),
+                    b"new"
+                );
+            }
+            migrator.finish_operation(&profile).unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn committed_migration_is_preserved_and_interrupted_rollback_finishes() {
+        for phase in 0..3 {
+            let root = temp_root("rollback-recovery");
+            fs::create_dir_all(root.join("profiles")).unwrap();
+            let migrator =
+                MoreLoginProfileDataMigrator::new(root.join("source"), root.join("profiles"))
+                    .unwrap();
+            let profile = ProfileId::new("recover-profile").unwrap();
+            let dir = migrator.profile_dir(&profile).unwrap();
+            let target = dir.join("userdata");
+            let backup = dir.join("userdata.backup-migration-8");
+            let after = dir.join("userdata.after-rollback-migration-8");
+            fs::create_dir(&target).unwrap();
+            fs::write(target.join("identity"), b"new").unwrap();
+            fs::create_dir(&backup).unwrap();
+            fs::write(backup.join("identity"), b"old").unwrap();
+            let committed =
+                DataOperation::new(OperationKind::Migration, &profile, "migration-8").unwrap();
+            migrator.recover_operation(&committed, true).unwrap();
+            assert_eq!(fs::read(target.join("identity")).unwrap(), b"new");
+            let rollback =
+                DataOperation::new(OperationKind::Rollback, &profile, "migration-8").unwrap();
+            migrator.journal.begin(&rollback).unwrap();
+            if phase > 0 {
+                fs::rename(&target, &after).unwrap();
+            }
+            if phase > 1 {
+                fs::rename(&backup, &target).unwrap();
+            }
+            migrator.recover_operation(&rollback, false).unwrap();
+            migrator.recover_operation(&rollback, false).unwrap();
+            assert_eq!(fs::read(target.join("identity")).unwrap(), b"old");
+            assert_eq!(fs::read(after.join("identity")).unwrap(), b"new");
+            migrator.finish_operation(&profile).unwrap();
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 }

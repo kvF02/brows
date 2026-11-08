@@ -56,7 +56,7 @@ impl SqliteProfileRepository {
             .pragma_update(None, "journal_mode", "WAL")
             .map_err(|error| sqlite_error("enable WAL journal mode", error))?;
         connection
-            .pragma_update(None, "synchronous", "NORMAL")
+            .pragma_update(None, "synchronous", "FULL")
             .map_err(|error| sqlite_error("configure synchronous mode", error))?;
         connection
             .pragma_update(None, "trusted_schema", "OFF")
@@ -776,4 +776,16 @@ impl ProfileIdLike for ProxyId {
     fn as_id_str(&self) -> &str {
         self.as_str()
     }
+}
+
+#[cfg(test)]
+#[test]
+fn profile_publication_uses_full_synchronous_wal_commits() {
+    let repo = SqliteProfileRepository::open(":memory:").unwrap();
+    let mode: i64 = repo
+        .lock()
+        .unwrap()
+        .pragma_query_value(None, "synchronous", |row| row.get(0))
+        .unwrap();
+    assert_eq!(mode, 2);
 }

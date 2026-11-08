@@ -6,6 +6,7 @@ license.workspace = true
 description = "Verified Chromium process adapter for Brows"
 
 [dependencies]
+brows-adapters-profile-data = { path = "../adapters-profile-data" }
 brows-application = { path = "../application" }
 brows-domain = { path = "../domain" }
 serde_json.workspace = true
