@@ -31,6 +31,7 @@ struct Wire {
     process: Arc<win_pipe::Process>,
     next: AtomicU64,
     closing: AtomicBool,
+    orderly_shutdown: AtomicBool,
     version: Mutex<String>,
     policy_failure: Mutex<Option<String>>,
     writer: mpsc::SyncSender<Vec<u8>>,
@@ -62,6 +63,18 @@ impl Drop for PendingReply {
     }
 }
 impl Wire {
+    fn transport_closed(&self) {
+        if !self.orderly_shutdown.load(Ordering::Acquire) {
+            self.fail();
+            return;
+        }
+        // Browser.close can disconnect CDP before the final storage process
+        // exits. Keep the owned Job alive until bounded shutdown drains it.
+        self.closing.store(true, Ordering::Release);
+        if let Ok(mut pending) = self.pending.lock() {
+            pending.clear();
+        }
+    }
     fn fail(&self) {
         self.closing.store(true, Ordering::Release);
         let _ = self.process.kill();
@@ -248,6 +261,7 @@ impl Controller {
             process: Arc::new(process),
             next: AtomicU64::new(1),
             closing: AtomicBool::new(false),
+            orderly_shutdown: AtomicBool::new(false),
             version: Mutex::new(String::new()),
             policy_failure: Mutex::new(None),
             writer,
@@ -262,7 +276,7 @@ impl Controller {
                 match write_receive.recv_timeout(Duration::from_millis(200)) {
                     Ok(frame) => {
                         if output.write_all(&frame).is_err() {
-                            w.fail();
+                            w.transport_closed();
                             break;
                         }
                     }
@@ -324,7 +338,7 @@ impl Controller {
                     }
                 }
             }
-            w.fail();
+            w.transport_closed();
         });
         // A service-worker startup can depend on another paused target. Keep
         // event dispatch independent of bounded, concurrent policy jobs.
@@ -668,6 +682,19 @@ impl Controller {
     pub(super) fn kill(&self) -> std::io::Result<()> {
         self.wire.fail();
         Ok(())
+    }
+    pub(super) fn request_close(&self) -> std::io::Result<bool> {
+        self.wire.orderly_shutdown.store(true, Ordering::Release);
+        match self.wire.begin("Browser.close", json!({}), None) {
+            Ok(_) => Ok(true),
+            Err(_) => {
+                self.wire.orderly_shutdown.store(false, Ordering::Release);
+                Err(std::io::Error::other("browser close request unavailable"))
+            }
+        }
+    }
+    pub(super) fn tree_exited(&self) -> std::io::Result<bool> {
+        self.wire.process.tree_exited()
     }
     pub(super) fn wait(&self) -> std::io::Result<()> {
         self.wire.process.wait()

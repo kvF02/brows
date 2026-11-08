@@ -535,6 +535,9 @@ mod tests {
     #[cfg(windows)]
     mod live_network;
 
+    #[cfg(windows)]
+    mod login_persistence;
+
     fn draft(name: &str) -> ProfileDraftDto {
         ProfileDraftDto {
             name: name.to_owned(),
