@@ -2,9 +2,11 @@ param([Parameter(Mandatory)][uint32]$OwnerId, [Parameter(Mandatory)][string]$Pro
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or -not $IsWindows) { throw 'Hosted Windows fixture only' }
 . "$PSScriptRoot/windows-process-fixture.ps1"
-$root = (Resolve-Path -LiteralPath $ProfileRoot).Path.Replace('\\?\', '')
-$temp = [IO.Path]::GetTempPath().TrimEnd('\') + '\'
-if (-not $root.StartsWith($temp, [StringComparison]::OrdinalIgnoreCase) -or $root -notmatch '\\brows-login-[a-f0-9-]{36}\\data\\profiles$') { throw 'Expected the isolated login fixture' }
+$root = (Resolve-Path -LiteralPath $ProfileRoot).ProviderPath.Replace('\\?\', '')
+$directory = [IO.DirectoryInfo]::new($root)
+if ($directory.Name -ne 'profiles' -or $directory.Parent.Name -ne 'data' -or $directory.Parent.Parent.Name -notmatch '^brows-login-[a-f0-9-]{36}$') { throw 'Expected the isolated login fixture' }
+$marker = Join-Path $directory.Parent.Parent.FullName 'login-fixture-owner.json'
+if (-not (Test-Path -LiteralPath $marker) -or (Get-Content -LiteralPath $marker -Raw | ConvertFrom-Json).ownerId -ne $OwnerId) { throw 'Missing the matching fixture ownership marker' }
 $snapshot = @(Read-ProcessSnapshot)
 $owner = @($snapshot | Where-Object { $_.ProcessId -eq $OwnerId -and $_.Name -match '^brows_desktop-[a-f0-9]+\.exe$' })
 if ($owner.Count -ne 1) { throw 'Missing owned Rust test host' }

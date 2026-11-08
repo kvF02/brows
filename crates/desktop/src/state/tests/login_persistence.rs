@@ -188,6 +188,11 @@ fn login_persistence_acceptance() {
     );
     let owned = NativeAcceptanceRoot::new("login");
     fs::create_dir_all(&owned.0).unwrap();
+    fs::write(
+        owned.0.join("login-fixture-owner.json"),
+        json!({"ownerId":std::process::id()}).to_string(),
+    )
+    .unwrap();
     let site = Site::start(&owned.0);
     let data = owned.0.join("data");
     let state = OwnedState(AppState::production(data.clone()).unwrap());
