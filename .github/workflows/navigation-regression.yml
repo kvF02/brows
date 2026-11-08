@@ -51,9 +51,19 @@ jobs:
         shell: pwsh
         run: |
           foreach ($round in 1..6) {
-            foreach ($test in @('private_worker_lifecycle_acceptance', 'private_renderer_crash_acceptance', 'private_module_worker_acceptance')) {
+            foreach ($test in @('private_pending_navigation_acceptance', 'private_worker_lifecycle_acceptance', 'private_renderer_crash_acceptance', 'private_module_worker_acceptance')) {
               Write-Output "Lifecycle regression round $round / $test"
               cargo +1.97.1 test -p brows-adapters-runtime $test --locked -- --ignored --nocapture
               if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
             }
           }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: navigation-lifecycle-evidence
+          path: |
+            target/fingerprint-pending-navigation-acceptance.json
+            target/fingerprint-worker-lifecycle-acceptance.json
+            target/fingerprint-renderer-crash-acceptance.json
+            target/fingerprint-module-worker-acceptance.json
+          if-no-files-found: ignore

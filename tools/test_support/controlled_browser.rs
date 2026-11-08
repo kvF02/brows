@@ -3,6 +3,42 @@ use std::sync::Arc;
 
 pub(crate) type CapturedProof = (String, String, serde_json::Value);
 
+#[derive(Debug, Default)]
+struct DocumentGate {
+    state: std::sync::Mutex<(bool, bool)>,
+    changed: std::sync::Condvar,
+}
+impl DocumentGate {
+    fn hold(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        state.0 = true;
+        self.changed.notify_all();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        while !state.1 {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                return false;
+            };
+            state = self.changed.wait_timeout(state, remaining).unwrap().0;
+        }
+        true
+    }
+    fn wait_requested(&self) -> bool {
+        let mut state = self.state.lock().unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while !state.0 {
+            let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now()) else {
+                return false;
+            };
+            state = self.changed.wait_timeout(state, remaining).unwrap().0;
+        }
+        true
+    }
+    fn release(&self) {
+        self.state.lock().unwrap().1 = true;
+        self.changed.notify_all();
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ControlFixture {
     pub(crate) url: String,
@@ -11,8 +47,15 @@ pub(crate) struct ControlFixture {
     thread: Option<std::thread::JoinHandle<()>>,
     service_version: Arc<std::sync::atomic::AtomicUsize>,
     modules: bool,
+    document_gate: Arc<DocumentGate>,
 }
 impl ControlFixture {
+    pub(crate) fn wait_held_document(&self) -> bool {
+        self.document_gate.wait_requested()
+    }
+    pub(crate) fn release_document(&self) {
+        self.document_gate.release();
+    }
     pub(crate) fn bump_service_version(&self) {
         self.service_version
             .fetch_add(1, std::sync::atomic::Ordering::AcqRel);
@@ -84,6 +127,7 @@ impl ControlFixture {
         cross_origin: &str,
         service_version: &std::sync::atomic::AtomicUsize,
         modules: bool,
+        document_gate: &DocumentGate,
     ) {
         use std::io::{Read, Write};
         // Accepted sockets inherit FIONBIO on Windows. Switch only this
@@ -124,6 +168,9 @@ impl ControlFixture {
             return;
         };
         let path = headers.split_whitespace().nth(1).unwrap_or("/").to_owned();
+        if path == "/held/page" && !document_gate.hold() {
+            return;
+        }
         if let Some(route) = path.strip_prefix("/soak/") {
             let (index, heartbeat) = route
                 .strip_suffix("/heartbeat")
@@ -291,6 +338,8 @@ impl ControlFixture {
         let output = proofs.clone();
         let service_version = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let version = service_version.clone();
+        let document_gate = Arc::new(DocumentGate::default());
+        let gate = document_gate.clone();
         let thread = std::thread::spawn(move || {
             // Browsers preconnect before sending headers. One idle socket
             // must not block or prematurely close unrelated script loads.
@@ -303,6 +352,7 @@ impl ControlFixture {
                     let halt = halt.clone();
                     let cross_origin = &cross_origin;
                     let version = version.clone();
+                    let gate = gate.clone();
                     scope.spawn(move || {
                         while !halt.load(std::sync::atomic::Ordering::Acquire) {
                             let next = receive
@@ -310,9 +360,14 @@ impl ControlFixture {
                                 .unwrap()
                                 .recv_timeout(std::time::Duration::from_millis(100));
                             match next {
-                                Ok(stream) => {
-                                    Self::serve(stream, &output, cross_origin, &version, modules)
-                                }
+                                Ok(stream) => Self::serve(
+                                    stream,
+                                    &output,
+                                    cross_origin,
+                                    &version,
+                                    modules,
+                                    &gate,
+                                ),
                                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                                 Err(_) => break,
                             }
@@ -344,11 +399,13 @@ impl ControlFixture {
             thread: Some(thread),
             service_version,
             modules,
+            document_gate,
         }
     }
 }
 impl Drop for ControlFixture {
     fn drop(&mut self) {
+        self.document_gate.release();
         self.stop.store(true, std::sync::atomic::Ordering::Release);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
@@ -365,6 +422,28 @@ mod tests {
     use std::time::Duration;
 
     #[test]
+    fn held_document_waits_for_explicit_release() {
+        let fixture = ControlFixture::start(false);
+        let address = fixture.url.strip_prefix("http://").unwrap().to_owned();
+        let client = std::thread::spawn(move || {
+            let mut client = TcpStream::connect(address).unwrap();
+            client
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            client
+                .write_all(b"GET /held/page HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            let mut response = String::new();
+            client.read_to_string(&mut response).unwrap();
+            response
+        });
+        assert!(fixture.wait_held_document());
+        assert!(fixture.proofs.lock().unwrap().is_empty());
+        fixture.release_document();
+        assert!(client.join().unwrap().starts_with("HTTP/1.1 200 OK\r\n"));
+    }
+
+    #[test]
     fn fixture_accepts_delayed_headers_on_a_nonblocking_accepted_socket() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
         let address = listener.local_addr().unwrap();
@@ -379,6 +458,7 @@ mod tests {
                 "http://localhost",
                 &AtomicUsize::new(0),
                 false,
+                &DocumentGate::default(),
             );
         });
         let mut client = TcpStream::connect(address).unwrap();

@@ -1293,6 +1293,36 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "holds only a local test response until the controlled session has started"]
+    fn private_pending_navigation_acceptance() {
+        let fixture = browser_fixture::ControlFixture::start(false);
+        let browser = acceptance_browser(&fixture, "held");
+        assert!(
+            fixture.wait_held_document(),
+            "startup must request the document"
+        );
+        assert!(
+            fixture.proofs.lock().unwrap().is_empty(),
+            "the document response is still held"
+        );
+        assert!(browser.controller.try_wait().unwrap().is_none());
+        fixture.release_document();
+        let proofs = fixture.wait_proofs("/held/");
+        assert_eq!(
+            proofs
+                .iter()
+                .map(|(_, _, v)| v["kind"].as_str().unwrap())
+                .collect::<BTreeSet<_>>()
+                .len(),
+            6
+        );
+        for (_, _, first) in &proofs {
+            browser.assert_signals(first);
+        }
+        browser.write_report("pending-navigation", json!({"startedBeforeDocumentResponse":true,"observations":proofs.iter().map(|(_, _, value)| value).collect::<Vec<_>>()}));
+    }
+
+    #[test]
     #[ignore = "requires an explicitly supplied signed Edge and uses isolated data"]
     fn private_worker_lifecycle_acceptance() {
         let fixture = browser_fixture::ControlFixture::start(false);
