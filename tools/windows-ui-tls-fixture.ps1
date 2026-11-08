@@ -1,4 +1,7 @@
-param([Parameter(Mandatory)][string] $Directory)
+param(
+    [Parameter(Mandatory)][string] $Directory,
+    [ValidateSet('checkip.amazonaws.com', 'localhost')][string] $DnsName = 'checkip.amazonaws.com'
+)
 $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -ne 'true' -or $env:RUNNER_ENVIRONMENT -ne 'github-hosted' -or -not $IsWindows) { throw 'Hosted Windows CI only' }
 $directoryPath = [IO.Path]::GetFullPath($Directory)
@@ -18,10 +21,10 @@ $certificates += $root
 $rootThumbprint = $root.Thumbprint
 Save-Manifest
 Write-Output 'Creating the trusted and untrusted server identities'
-$valid = New-SelfSignedCertificate -Type SSLServerAuthentication -DnsName 'checkip.amazonaws.com' -Signer $root -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy Exportable -NotAfter (Get-Date).AddHours(1)
+$valid = New-SelfSignedCertificate -Type SSLServerAuthentication -DnsName $DnsName -Signer $root -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy Exportable -NotAfter (Get-Date).AddHours(1)
 $certificates += $valid
 Save-Manifest
-$untrusted = New-SelfSignedCertificate -Type SSLServerAuthentication -DnsName 'checkip.amazonaws.com' -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy Exportable -NotAfter (Get-Date).AddHours(1)
+$untrusted = New-SelfSignedCertificate -Type SSLServerAuthentication -DnsName $DnsName -CertStoreLocation Cert:\CurrentUser\My -KeyExportPolicy Exportable -NotAfter (Get-Date).AddHours(1)
 $certificates += $untrusted
 Save-Manifest
 Write-Output 'Exporting test identities without interactive key protection'

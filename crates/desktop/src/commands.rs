@@ -39,7 +39,7 @@ pub(crate) struct BackupJobDto {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BackupImportResultDto {
-    profile: ProfileDto,
+    pub(crate) profile: ProfileDto,
     note: String,
 }
 
@@ -102,7 +102,7 @@ fn owned_backup_service(
     })
 }
 
-fn export_backup(
+pub(crate) fn export_backup(
     profiles: &brows_application::ProfileApplicationService,
     sessions: &brows_application::SessionApplicationService,
     backups: &brows_adapters_backup::EncryptedBackupService,
@@ -166,7 +166,7 @@ pub(crate) async fn backup_import(
         })?
 }
 
-fn import_backup(
+pub(crate) fn import_backup(
     profiles: &brows_application::ProfileApplicationService,
     backups: &brows_adapters_backup::EncryptedBackupService,
     request: BackupImportRequest,

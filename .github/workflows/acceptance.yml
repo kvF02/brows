@@ -121,6 +121,11 @@ jobs:
         if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
         timeout-minutes: 4
         run: cargo +1.97.1 test -p brows-desktop desktop_capacity_acceptance -- --ignored --nocapture
+      - name: HTTPS login storage and backup recovery acceptance
+        if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' }}
+        timeout-minutes: 7
+        shell: pwsh
+        run: ./tools/windows-login-acceptance.ps1
       - uses: actions/cache/save@v4
         if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' && steps.rust_cache.outputs.cache-hit != 'true' }}
         with:
@@ -139,4 +144,5 @@ jobs:
             target/fingerprint-renderer-crash-acceptance.json
             target/managed-runtime-acceptance.json
             target/desktop-capacity-acceptance.json
+            target/login-persistence-acceptance.json
           if-no-files-found: ignore
