@@ -1330,16 +1330,47 @@ mod tests {
                     "{} {kind} exported PNG/readPixels",
                     value["kind"]
                 );
+                if kind == "webgl2" {
+                    assert_pack_signals(&sample["pack"]);
+                    let renderbuffer = &sample["renderbuffer"];
+                    assert!(renderbuffer.is_object());
+                    for check in [
+                        "repeatStable",
+                        "cropConsistent",
+                        "sourceUnchanged",
+                        "bindingsRestored",
+                        "errorsPreserved",
+                    ] {
+                        assert_eq!(
+                            renderbuffer[check], true,
+                            "{} renderbuffer {check}",
+                            value["kind"]
+                        );
+                    }
+                    assert_eq!(renderbuffer["pixels"], renderbuffer["referencePixels"]);
+                    assert_eq!(renderbuffer["pixels"].as_str().unwrap().len(), 9 * 7 * 8);
+                    assert_pack_signals(&renderbuffer["pack"]);
+                }
             }
         }
         fn write_report(&self, name: &str, observations: Value) {
+            self.write_report_status(name, observations, true);
+        }
+        fn write_report_status(&self, name: &str, observations: Value, passed: bool) {
             let version = self.controller.wire.version.lock().unwrap().clone();
             let report = json!({"scope":"isolated signed Edge private controller", "runtimeVersion":version,
-                "assertionsPassed":true,"complete":false,"observations":observations,
+                "assertionsPassed":passed,"complete":false,"observations":observations,
                 "uncovered":["public DNS/ICE", "fonts/GPU/network stack", "other lifecycle scenarios"]});
             let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
                 .join(format!("../../target/fingerprint-{name}-acceptance.json"));
             std::fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        }
+    }
+
+    fn assert_pack_signals(value: &Value) {
+        assert_eq!(value["layoutsChecked"], 5);
+        for check in ["pixelsMatch", "outsidePreserved", "errorsPreserved"] {
+            assert_eq!(value[check], true, "pack {check}");
         }
     }
 
@@ -1487,6 +1518,7 @@ mod tests {
         let mut modes = Vec::new();
         let mut first_samples: Option<Vec<Value>> = None;
         let mut native_availability = std::collections::BTreeMap::new();
+        let mut native_rgba4 = std::collections::BTreeMap::new();
         for (route, noise, seed) in [
             ("gpu-native", false, "pixel-seed"),
             ("gpu-seeded", true, "pixel-seed"),
@@ -1504,6 +1536,10 @@ mod tests {
                 9
             );
             let samples: Vec<Value> = proofs.into_iter().map(|(_, _, v)| v).collect();
+            modes.push(json!({"mode":route,"observations":&samples}));
+            // Preserve owned raw observations on assertion failure without
+            // turning an incomplete matrix into a successful report.
+            browser.write_report_status("webgl-pixels", json!(&modes), false);
             let page = samples.iter().find(|v| v["kind"] == "page").unwrap();
             for kind in ["webgl", "webgl2"] {
                 assert!(
@@ -1537,6 +1573,21 @@ mod tests {
                                 json!("a42367ff".repeat(256))
                             );
                         }
+                        if kind == "webgl2" {
+                            let renderbuffer = &sample["gpuPixels"][kind]["renderbuffer"];
+                            let key = sample["kind"].as_str().unwrap().to_owned();
+                            if noise {
+                                assert_ne!(renderbuffer["pixels"], json!("a42367ff".repeat(63)));
+                                assert_eq!(
+                                    Some(&renderbuffer["nativeRgba4Pixels"]),
+                                    native_rgba4.get(&key),
+                                    "unsupported RGBA4 must preserve native pixels"
+                                );
+                            } else {
+                                assert_eq!(renderbuffer["pixels"], json!("a42367ff".repeat(63)));
+                                native_rgba4.insert(key, renderbuffer["nativeRgba4Pixels"].clone());
+                            }
+                        }
                     }
                 }
             }
@@ -1557,11 +1608,23 @@ mod tests {
                                 sample["gpuPixels"][kind]["pixels"],
                                 previous["gpuPixels"][kind]["pixels"]
                             );
+                            if kind == "webgl2" {
+                                assert_eq!(
+                                    sample["gpuPixels"][kind]["renderbuffer"]["pixels"],
+                                    previous["gpuPixels"][kind]["renderbuffer"]["pixels"]
+                                );
+                            }
                         } else {
                             assert_ne!(
                                 sample["gpuPixels"][kind]["pixels"],
                                 previous["gpuPixels"][kind]["pixels"]
                             );
+                            if kind == "webgl2" {
+                                assert_ne!(
+                                    sample["gpuPixels"][kind]["renderbuffer"]["pixels"],
+                                    previous["gpuPixels"][kind]["renderbuffer"]["pixels"]
+                                );
+                            }
                         }
                     }
                 }
@@ -1569,7 +1632,6 @@ mod tests {
             if route == "gpu-seeded" {
                 first_samples = Some(samples.clone());
             }
-            modes.push(json!({"mode":route,"observations":samples}));
             if route == "gpu-other" {
                 browser.write_report("webgl-pixels", json!(modes));
             }

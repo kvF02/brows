@@ -16,7 +16,7 @@ const defaults = {
 function environment(overrides = {}, missing = [], worker = false) {
   const persona = { ...defaults, ...overrides };
   const brands = Object.fromEntries(['navigator', 'screen', 'canvas', 'context', 'gl', 'audio', 'offline', 'event'].map(key => [key, new WeakSet()]));
-  const calls = { reads: [], exports: [], audio: [], realtime: [], glReads: [], glErrors: 0 };
+  const calls = { reads: [], exports: [], audio: [], realtime: [], glReads: [], glErrors: 0, renderbufferBinds: [] };
   function branded(key, value) { if (!brands[key].has(value)) throw new TypeError('Illegal invocation'); }
   class Navigator { constructor() { brands.navigator.add(this); } }
   class Screen { constructor() { brands.screen.add(this); } }
@@ -30,7 +30,7 @@ function environment(overrides = {}, missing = [], worker = false) {
     constructor(canvas, second = false) {
       brands.gl.add(this); this.extensionAvailable = true; this.canvas = canvas;
       this.second = second; this.errors = new Set(); this.lost = false; this.colorSpace = 'srgb';
-      this.parameters = new Map([[36006,null],[36010,null],[35053,null],[3074,1029],
+      this.parameters = new Map([[36006,null],[36010,null],[36007,null],[36063,8],[35053,null],[3074,1029],
         [3330,0],[3331,0],[3332,0],[3333,4],[35738,5121],[35739,6408]]);
     }
     get drawingBufferWidth() { branded('gl', this); return this.canvas?.width ?? 6; }
@@ -41,6 +41,24 @@ function environment(overrides = {}, missing = [], worker = false) {
     set error(value) { if (value) this.errors.add(value); }
     getError() { branded('gl', this); calls.glErrors++; const error = this.error; this.errors.delete(error); return error; }
     checkFramebufferStatus() { branded('gl', this); return this.incomplete ? 0x8cd6 : 0x8cd5; }
+    getFramebufferAttachmentParameter(target, attachment, pname) {
+      branded('gl', this);
+      const entry = this.parameters.get(target === 0x8ca8 ? 36010 : 36006)?.attachments?.get(attachment);
+      return pname === 0x8cd0 ? (entry?.type ?? 0) : entry?.buffer ?? null;
+    }
+    isRenderbuffer(buffer) { branded('gl', this); return buffer?.kind === 'renderbuffer' && !buffer.deleted; }
+    bindRenderbuffer(target, buffer) {
+      branded('gl', this);
+      if (target !== 0x8d41 || (buffer !== null && !this.isRenderbuffer(buffer))) { this.error=0x0502; return; }
+      calls.renderbufferBinds.push(buffer); this.parameters.set(36007, buffer);
+    }
+    getRenderbufferParameter(target, pname) {
+      branded('gl', this);
+      const buffer = this.parameters.get(36007);
+      if (target !== 0x8d41 || !buffer) { this.error=0x0502; return null; }
+      if (buffer.queryThrows) throw new Error('native renderbuffer query failed');
+      return ({[0x8d42]:buffer.width,[0x8d43]:buffer.height,[0x8d44]:buffer.format,[0x8cab]:buffer.samples})[pname];
+    }
     getParameter(...args) {
       branded('gl', this);
       if (this.incomplete && [35738,35739].includes(args[0])) { this.error=0x0502; return null; }
@@ -55,17 +73,26 @@ function environment(overrides = {}, missing = [], worker = false) {
       const output = args[6], offset = this.second ? Number(args[7] ?? 0) : 0;
       if (this.lost) return;
       if (this.incomplete) { this.error=0x0506; return; }
-      const stride = Math.ceil(width * 4 / this.parameters.get(3333)) * this.parameters.get(3333);
+      const framebuffer = this.parameters.get(this.second ? 36010 : 36006);
+      const entry = framebuffer?.attachments?.get(this.second ? this.parameters.get(3074) : 0x8ce0);
+      const source = entry?.buffer ?? this.canvas;
+      const rowLength = this.second ? this.parameters.get(3330) : 0;
+      const skipRows = this.second ? this.parameters.get(3331) : 0;
+      const skipPixels = this.second ? this.parameters.get(3332) : 0;
+      const storeWidth = rowLength || width;
+      const stride = Math.ceil(storeWidth * 4 / this.parameters.get(3333)) * this.parameters.get(3333);
+      const first = offset + skipRows * stride + skipPixels * 4;
       if (args[4] !== 6408 || args[5] !== 5121 || Object.prototype.toString.call(output) !== '[object Uint8Array]' ||
           this.parameters.get(35053) || this.parameters.get(3074) === 0 || this.parameters.get(35738) !== 5121 ||
-          width < 0 || height < 0 || offset < 0 || offset + (height - 1) * stride + width * 4 > output.length) {
+          source?.samples > 0 || skipPixels + width > storeWidth ||
+          width < 0 || height < 0 || offset < 0 || first + (height - 1) * stride + width * 4 > output.length) {
         this.error = 0x0502; return;
       }
       for (let row = 0; row < height; row++) for (let col = 0; col < width; col++) {
-        const sx = x + col, sy = this.drawingBufferHeight - y - row - 1;
-        const dest = offset + row * stride + col * 4;
-        if (sx < 0 || sy < 0 || sx >= this.drawingBufferWidth || sy >= this.drawingBufferHeight) continue;
-        else output.set(this.canvas.pixels.subarray((sy*this.drawingBufferWidth+sx)*4,(sy*this.drawingBufferWidth+sx)*4+4),dest);
+        const sx = x + col, sy = source.height - y - row - 1;
+        const dest = first + row * stride + col * 4;
+        if (sx < 0 || sy < 0 || sx >= source.width || sy >= source.height) continue;
+        else output.set(source.pixels.subarray((sy*source.width+sx)*4,(sy*source.width+sx)*4+4),dest);
       }
     }
   }
@@ -409,6 +436,80 @@ test('WebGL2 preserves pack padding, destination offsets and bytes outside the r
   assert.equal(env.calls.glErrors,0);
 });
 
+test('WebGL2 row length and skipped rows/pixels match ordinary reads and preserve view boundaries', () => {
+  for (const worker of [false,true]) for (const [alignment,rowLength,skipRows,skipPixels,stride,first] of [
+    [1,7,2,2,28,69], [2,7,2,2,28,69], [4,7,2,2,28,69], [8,7,2,2,32,77], [8,0,1,0,16,21],
+  ]) {
+    const env = environment({},[],worker), canvas = populatedCanvas(env,true), gl = canvas.getContext('webgl2');
+    const expected = topRows(readGl(gl,2,1,3,2),3,2);
+    for (const [key,value] of [[3333,alignment],[3330,rowLength],[3331,skipRows],[3332,skipPixels]]) gl.parameters.set(key,value);
+    const backing = new Uint8Array(180).fill(211), output = new Uint8Array(backing.buffer,7,160);
+    gl.error = 0x0500;
+    gl.readPixels(2,1,3,2,6408,5121,output,5);
+    assert.deepEqual(topRows(output,3,2,stride,first),expected);
+    const touched = new Set(Array.from({length:2},(_,row)=>Array.from({length:12},(_,i)=>7+first+row*stride+i)).flat());
+    for (let i=0;i<backing.length;i++) if (!touched.has(i)) assert.equal(backing[i],211);
+    assert.equal(env.calls.glErrors,0);
+    assert.equal(gl.getError(),0x0500); assert.equal(gl.getError(),0);
+  }
+});
+
+test('WebGL2 invalid pack subregions and insufficient skipped destinations retain native errors and bytes', () => {
+  const env = environment(), gl = populatedCanvas(env).getContext('webgl2');
+  for (const [rowLength,skipRows,skipPixels,size,offset] of [[4,0,2,96,0],[7,2,2,80,5],[0,0,1,96,0]]) {
+    for (const [key,value] of [[3330,rowLength],[3331,skipRows],[3332,skipPixels]]) gl.parameters.set(key,value);
+    const output = new Uint8Array(size).fill(255);
+    gl.readPixels(2,1,3,2,6408,5121,output,offset);
+    assert.ok(output.every(v=>v===255)); assert.equal(gl.getError(),0x0502); assert.equal(gl.getError(),0);
+  }
+});
+
+function renderbufferFixture(env, attachment = 0x8ce0) {
+  const canvas = populatedCanvas(env), gl = canvas.getContext('webgl2');
+  const reference = new env.HTMLCanvasElement(5,3);
+  for (let i=0;i<reference.pixels.length;i+=4) reference.pixels.set([50+i,100,180,255],i);
+  const buffer = {kind:'renderbuffer',width:5,height:3,format:0x8058,samples:0,pixels:reference.pixels};
+  const framebuffer = {attachments:new Map([[attachment,{type:0x8d41,buffer}]])};
+  gl.parameters.set(36010,framebuffer); gl.parameters.set(3074,attachment);
+  return {gl,buffer,framebuffer,reference};
+}
+
+test('WebGL2 RGBA8 renderbuffer reads use the selected read attachment extent and restore unrelated bindings', () => {
+  for (const attachment of [0x8ce0,0x8ce1]) for (const bound of ['null','other','same']) {
+    const env = environment(), {gl,buffer,framebuffer,reference} = renderbufferFixture(env,attachment);
+    const native = [...buffer.pixels], expected = JSON.parse(reference.toDataURL()).data;
+    const previous = bound==='null' ? null : bound==='same' ? buffer : {kind:'renderbuffer',width:1,height:1};
+    gl.parameters.set(36007,previous); gl.parameters.set(36006,{}); // distinct draw framebuffer
+    const full = readGl(gl,0,0,5,3);
+    assert.deepEqual(topRows(full,5,3),expected);
+    assert.deepEqual(topRows(readGl(gl,1,1,3,2),3,2),crop({width:5,data:Uint8Array.from(expected)},1,0,3,2));
+    gl.parameters.set(3330,7); gl.parameters.set(3331,1); gl.parameters.set(3332,2); gl.parameters.set(3333,8);
+    const packed = new Uint8Array(100).fill(203);
+    gl.readPixels(1,1,3,2,6408,5121,packed,3);
+    assert.deepEqual(topRows(packed,3,2,32,43),topRows(readGlWithDefaultPack(gl,1,1,3,2),3,2));
+    assert.equal(gl.parameters.get(36007),previous); assert.equal(gl.parameters.get(36010),framebuffer);
+    assert.deepEqual([...buffer.pixels],native);
+    assert.equal(env.calls.glErrors,0); assert.equal(gl.getError(),0);
+  }
+});
+
+function readGlWithDefaultPack(gl,x,y,width,height) {
+  for (const key of [3330,3331,3332]) gl.parameters.set(key,0);
+  gl.parameters.set(3333,4); return readGl(gl,x,y,width,height);
+}
+
+test('WebGL2 unsupported renderbuffer formats and multisampling preserve native results, errors and bindings', () => {
+  const env = environment(), {gl,buffer} = renderbufferFixture(env);
+  buffer.format = 0x8056;
+  assert.deepEqual(topRows(readGl(gl,0,0,5,3),5,3),[...buffer.pixels]);
+  assert.equal(gl.parameters.get(36007),null); assert.equal(gl.getError(),0);
+  buffer.format = 0x8058; buffer.samples = 4;
+  const output = new Uint8Array(60).fill(255);
+  gl.readPixels(0,0,5,3,6408,5121,output);
+  assert.ok(output.every(v=>v===255)); assert.equal(gl.parameters.get(36007),null);
+  assert.equal(gl.getError(),0x0502); assert.equal(gl.getError(),0);
+});
+
 test('WebGL invalid/no-op reads, native errors, receiver checks, coercion and security exceptions are preserved', () => {
   const env = environment(), canvas = populatedCanvas(env), gl = canvas.getContext('webgl2');
   assert.throws(()=>env.WebGLRenderingContext.prototype.readPixels.call({},0,0,1,1,6408,5121,new Uint8Array(4)),TypeError);
@@ -441,11 +542,10 @@ test('WebGL unsupported buffers/states and disabled noise keep native pixel resu
   for (const worker of [false,true]) {
     const env = environment({},[],worker), canvas = populatedCanvas(env,true), gl = canvas.getContext('webgl2');
     const native = [...canvas.pixels];
-    for (const [key,value] of [[36010,{}],[3330,16],[3331,1],[3332,1]]) {
-      gl.parameters.set(key,value);
-      assert.deepEqual(topRows(readGl(gl,0,0,6,4),6,4),native);
-      gl.parameters.set(key,key===36010?null:0);
-    }
+    gl.parameters.set(36010,{attachments:new Map([[0x8ce0,{type:0x1702,buffer:canvas}]])});
+    gl.parameters.set(3074,0x8ce0);
+    assert.deepEqual(topRows(readGl(gl,0,0,6,4),6,4),native);
+    gl.parameters.set(36010,null); gl.parameters.set(3074,1029);
     gl.colorSpace = 'display-p3';
     assert.deepEqual(topRows(readGl(gl,0,0,6,4),6,4),native);
     gl.colorSpace = 'srgb'; gl.lost = true;
