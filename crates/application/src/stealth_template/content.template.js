@@ -54,14 +54,30 @@
     ]) overrideGetter(Screen.prototype, name, value);
   }
 
+  // Capture both interfaces before wrapping either (some hosts share methods).
+  const descriptorOf = (proto, name) => {
+    while (proto) {
+      const descriptor = Object.getOwnPropertyDescriptor(proto, name);
+      if (descriptor) return descriptor;
+      proto = Object.getPrototypeOf(proto);
+    }
+  };
+  const glApis = ['WebGLRenderingContext', 'WebGL2RenderingContext'].map(name => {
+    const proto = globalThis[name]?.prototype;
+    return proto && {
+      proto, second: name === 'WebGL2RenderingContext', get: proto.getParameter,
+      read: descriptorOf(proto, 'readPixels'), lost: proto.isContextLost,
+      width: descriptorOf(proto, 'drawingBufferWidth')?.get,
+      height: descriptorOf(proto, 'drawingBufferHeight')?.get,
+      colorSpace: descriptorOf(proto, 'drawingBufferColorSpace')?.get,
+    };
+  }).filter(Boolean);
   // WebGL1 remains covered even when WebGL2 is absent. Only valid unmasked
   // reads are overridden; invalid enum/receiver behavior remains native.
-  for (const name of ['WebGLRenderingContext', 'WebGL2RenderingContext']) {
+  for (const api of glApis) {
     try {
-      const proto = globalThis[name]?.prototype;
-      if (!proto) continue;
-      const original = proto.getParameter;
-      proto.getParameter = function (...args) {
+      const original = api.get;
+      api.proto.getParameter = function (...args) {
         const value = Reflect.apply(original, this, args);
         if (value === null || value === undefined) return value;
         if (args[0] === 37445) return persona.webgl_vendor;
@@ -87,6 +103,58 @@
   };
   const canvasApis = [];
   if (persona.spoof_canvas) {
+    // Native read first: it owns receiver validation, coercion, GL errors and
+    // security exceptions. Never call getError (which would consume errors).
+    const typedArray = Object.getPrototypeOf(Uint8Array.prototype);
+    const arrayTag = Object.getOwnPropertyDescriptor(typedArray, Symbol.toStringTag)?.get;
+    const arrayLength = Object.getOwnPropertyDescriptor(typedArray, 'length')?.get;
+    const arrayBuffer = Object.getOwnPropertyDescriptor(typedArray, 'buffer')?.get;
+    const bufferLength = Object.getOwnPropertyDescriptor(ArrayBuffer.prototype, 'byteLength')?.get;
+    const integer = Number.isSafeInteger;
+    for (const api of glApis) {
+      try {
+        if (typeof api.read?.value !== 'function' || !api.width || !api.height || !api.lost || !arrayTag || !arrayLength || !arrayBuffer || !bufferLength) continue;
+        const original = api.read.value;
+        Object.defineProperty(api.proto, 'readPixels', { ...api.read, value: function (...args) {
+          const result = Reflect.apply(original, this, args);
+          if ((args.length !== 7 && !(api.second && args.length === 8)) ||
+              !args.slice(0, 4).every(v => typeof v === 'number' && integer(v)) ||
+              args[4] !== 6408 || args[5] !== 5121) return result; // RGBA / UNSIGNED_BYTE
+          try {
+            const [x, y, width, height] = args;
+            const output = args[6], offset = args.length === 8 ? args[7] : 0;
+            if (typeof offset !== 'number' || !integer(offset) || offset < 0 ||
+                arrayTag.call(output) !== 'Uint8Array' || api.lost.call(this)) return result;
+            // Shared-memory reads and unsupported representations stay native.
+            bufferLength.call(arrayBuffer.call(output));
+            const bufferWidth = api.width.call(this), bufferHeight = api.height.call(this);
+            if (x < 0 || y < 0 || width <= 0 || height <= 0 ||
+                x + width > bufferWidth || y + height > bufferHeight) return result;
+            const get = key => api.get.call(this, key);
+            if (get(api.second ? 36010 : 36006) !== null) return result; // default read framebuffer
+            if (api.second && (get(35053) !== null || get(3074) !== 1029 ||
+                get(3330) !== 0 || get(3331) !== 0 || get(3332) !== 0)) return result;
+            if (api.colorSpace && api.colorSpace.call(this) !== 'srgb') return result;
+            if (get(35738) !== 5121 || get(35739) !== 6408) return result;
+            const alignment = get(3333);
+            if (![1, 2, 4, 8].includes(alignment)) return result;
+            const stride = Math.ceil(width * 4 / alignment) * alignment;
+            const required = offset + (height - 1) * stride + width * 4;
+            if (!integer(required) || required > arrayLength.call(output)) return result;
+            for (let row = 0; row < height; row++) for (let col = 0; col < width; col++) {
+              const start = offset + row * stride + col * 4;
+              // Opaque pixels avoid native premultiplication/color conversion
+              // ambiguities. Alpha, transparent pixels and padding are intact.
+              if (output[start + 3] !== 255) continue;
+              for (let channel = 0; channel < 3; channel++) {
+                output[start + channel] ^= hash(x + col, bufferHeight - y - row - 1, channel) & 1;
+              }
+            }
+          } catch (_) { /* Preserve native behavior for unsupported buffers/state. */ }
+          return result;
+        }});
+      } catch (_) {}
+    }
     for (const name of ['CanvasRenderingContext2D', 'OffscreenCanvasRenderingContext2D']) {
       try {
         const proto = globalThis[name]?.prototype;

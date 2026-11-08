@@ -31,7 +31,8 @@ first.webgl = extension ? {
   renderer: gl.getParameter(extension.UNMASKED_RENDERER_WEBGL),
 } : null;
 gl?.getExtension('WEBGL_lose_context')?.loseContext();
-const send = () => fetch('./' + first.kind + '/proof', {
+__BROWS_GPU_OBSERVATION__
+const send = () => gpuProof.then(() => fetch('./' + first.kind + '/proof', {
   method: 'POST', body: JSON.stringify(first), keepalive: typeof document !== 'undefined',
-});
+}));
 const proof = send().catch(() => send());

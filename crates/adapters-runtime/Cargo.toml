@@ -14,3 +14,7 @@ serde.workspace = true
 sha2 = "0.10"
 url = "2"
 
+[dev-dependencies]
+base64 = "0.22"
+png = "0.18"
+

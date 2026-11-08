@@ -218,6 +218,13 @@ impl ControlFixture {
         ))
         .replace("__BROWS_FIXTURE_VERSION__", &revision.to_string())
         .replace(
+            "__BROWS_GPU_OBSERVATION__",
+            include_str!(concat!(
+                env!("CARGO_MANIFEST_DIR"),
+                "/../../tools/test_support/webgl_observation.js"
+            )),
+        )
+        .replace(
             "__BROWS_FIXTURE_PHASE__",
             if path.ends_with("dependency.mjs") {
                 "module_dependency"
