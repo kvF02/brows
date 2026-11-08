@@ -15,6 +15,9 @@ jobs:
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
+      - name: Validate client collector with Windows PowerShell 5.1
+        shell: powershell
+        run: ./tools/test-client-acceptance.ps1
       - uses: actions/setup-node@v4
         with:
           node-version: 24
@@ -53,6 +56,14 @@ jobs:
           $hashes | Set-Content target/SHA256SUMS.txt
           $signature = Get-AuthenticodeSignature target/release/brows-desktop.exe
           @{ commit = '${{ github.sha }}'; channel = 'internal-beta'; authenticode = "$($signature.Status)"; autoUpdate = $false } | ConvertTo-Json | Set-Content target/beta-build.json
+      - name: Assemble verified client acceptance kit
+        shell: pwsh
+        run: ./tools/package-client-acceptance.ps1 -ArtifactRoot target -Destination target/brows-windows-client-kit.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: brows-windows-client-kit-${{ github.sha }}
+          path: target/brows-windows-client-kit.zip
+          if-no-files-found: error
       - uses: actions/cache/save@v4
         if: ${{ !cancelled() && steps.package_build.outcome == 'success' && steps.release_cache.outputs.cache-hit != 'true' }}
         with:
@@ -68,6 +79,33 @@ jobs:
             target/SHA256SUMS.txt
             target/beta-build.json
             target/beta-package-acceptance.json
+          if-no-files-found: warn
+  windows11-arm:
+    needs: package
+    # A desktop client OS, running the same x64 package under emulation.
+    # Keep this evidence separate from x64 hardware and the Server UI job.
+    runs-on: windows-11-arm
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: brows-windows-client-kit-${{ github.sha }}
+          path: target/download
+      - name: Extract the client kit
+        shell: pwsh
+        run: Expand-Archive -LiteralPath target/download/brows-windows-client-kit.zip -DestinationPath target/client-kit
+      - name: Install, open, upgrade and uninstall the x64 package on Windows 11 ARM64
+        shell: pwsh
+        run: ./tools/windows-client-smoke.ps1 -KitDirectory target/client-kit -Report target/windows11-arm-acceptance.json
+      - name: Preserve client OS evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: brows-windows11-arm-${{ github.sha }}
+          path: |
+            target/windows11-arm-acceptance.json
+            target/windows11-arm-acceptance.json.package.json
           if-no-files-found: warn
   ui:
     needs: package

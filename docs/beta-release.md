@@ -21,6 +21,12 @@ SHA256SUMS、构建提交号、实际 Authenticode 状态以及安装验收报�
 `installed/brows-desktop.exe` 是安装器实际落盘的程序摘要，单文件应用有独立记录。
 CI 不自动发布 GitHub Release，不自动升级用户机器上的应用。
 
+同一次工作流另附 `brows-windows-client-kit-<commit>`，包含同一安装器、便携程序、摘要、
+构建标识和 Windows PowerShell 5.1/7 验收脚本。下载并完整解压后按其中的
+[本机验收说明](../tools/client-acceptance/README.md)操作。脚本只校验包及已安装程序、
+记录系统版本和逐项人工结果，不自动安装/卸载、不读 Cookie 或凭据、不上传数据。
+跳过项目保留 incomplete，人工记录标为 operator-attestation，不能当作自动化网站证据。
+
 仓库没有配置产品代码签名证书或更新签名密钥。当前包应作为**未签名内测包**处理；
 浏览器运行时的 Google/Microsoft 签名校验和 Brows 安装包自身签名是两回事。
 
@@ -28,6 +34,11 @@ CI 不自动发布 GitHub Release，不自动升级用户机器上的应用。
 
 CI 在独立 Windows runner 上执行真实静默安装、打开打包后的主窗口、初始化数据库、
 正常关闭、覆盖安装以及卸载，并检查应用数据标记保留。
+另外在 `windows-11-arm` 桌面客户端运行器上，下载同一 x64 内测包，核对摘要、PE 架构、
+Windows ProductType/构建号和 ARM64 本机架构，再执行安装、三次窗口启动/正常退出、
+覆盖安装及卸载数据保留。`windows11-arm-acceptance.json` 单独记录 x64 模拟运行和每次
+实际使用的 WebView2 版本。它不覆盖 Windows 10、x64 真机、ARM64 原生应用、ARM64
+SeedableNoise 能力或完整 UI 流程。此项成功后才能声称对应提交通过该客户端冒烟验收。
 随后在 Windows Server 2022 runner 用同一 NSIS 安装器安装并核对应用 SHA256，使用
 Microsoft Edge WebDriver 驱动**已安装应用**的 WebView2，确认内嵌资源和真实 Tauri
 适配器，再操作并发保存、环境新建/编辑/归档恢复、批量标签和代理编辑、批量启动/停止、
@@ -45,7 +56,7 @@ WebDriver 只用于 Windows CI，匹配实际 WebView2 的构建版本并验证 
 [Microsoft WebView2 WebDriver 文档](https://learn.microsoft.com/en-us/microsoft-edge/webview2/how-to/webdriver)。
 
 真实代理、SeedableNoise 设置、其他错误分支和完整桌面流程分别验收。
-只有对应提交的工作流成功且两份验收 JSON 均存在，才算本次安装及所列 UI 流程通过。
+只有对应提交的工作流成功且安装、客户端和 UI 验收 JSON 均通过，才算本次所列流程通过。
 
 ## 长稳和故障恢复验收
 
