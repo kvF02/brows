@@ -4,6 +4,10 @@
 //! Authenticated, streaming local `.browsbak` archives.
 
 use argon2::{Algorithm, Argon2, Params, Version};
+use brows_adapters_profile_data::{
+    ordinary, remove_confined_tree, sync_directory, sync_tree, DataOperation, OperationKind,
+    ProfileDataJournal,
+};
 use brows_application::{
     BackupExportSpec, BackupImportPayload, BackupImportSpec, BackupInspection, BackupService,
     PortError, PortErrorKind, PortResult,
@@ -18,6 +22,7 @@ use chacha20poly1305::{
 };
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::sync::Arc;
 use std::{
     ffi::OsStr,
     fs::{self, File, OpenOptions},
@@ -56,6 +61,7 @@ type HeaderKeyNonce = (Vec<u8>, DerivedKey, [u8; STREAM_NONCE_BYTES]);
 pub struct EncryptedBackupService {
     backup_root: PathBuf,
     profile_root: PathBuf,
+    journal: Arc<ProfileDataJournal>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,10 +78,74 @@ impl EncryptedBackupService {
     ) -> PortResult<Self> {
         let backup_root = create_and_canonicalize(backup_root.into(), "backup root")?;
         let profile_root = create_and_canonicalize(profile_root.into(), "profile root")?;
+        let journal = Arc::new(ProfileDataJournal::new(profile_root.clone(), None)?);
         Ok(Self {
             backup_root,
             profile_root,
+            journal,
         })
+    }
+
+    pub fn with_journal(mut self, journal: Arc<ProfileDataJournal>) -> PortResult<Self> {
+        if journal.root() != self.profile_root {
+            return Err(invalid("restore journal root mismatch"));
+        }
+        self.journal = journal;
+        Ok(self)
+    }
+
+    pub fn finish_restore(&self, profile: &brows_domain::ProfileId) -> PortResult<()> {
+        self.journal.finish(profile)
+    }
+
+    /// Called only at exclusive startup, after consulting persisted metadata.
+    pub fn recover_restore(&self, operation: &DataOperation, published: bool) -> PortResult<()> {
+        if operation.kind != OperationKind::Restore {
+            return Err(invalid("unexpected restore recovery kind"));
+        }
+        let profile = operation.profile()?;
+        if published {
+            ordinary(&self.profile_data_path(profile.as_str()), true)?;
+        } else {
+            let target = self.profile_data_path(profile.as_str());
+            remove_confined_tree(&target, &self.profile_root)?;
+        }
+        self.journal.finish(&profile)
+    }
+
+    /// Remove only adapter-owned partial archives and generated extraction roots.
+    /// An exclusive application-data lease must be held by the caller.
+    pub fn cleanup_interrupted_staging(&self) -> PortResult<usize> {
+        let mut removed = 0;
+        for item in
+            fs::read_dir(&self.backup_root).map_err(|e| io_error("list interrupted backups", e))?
+        {
+            let item = item.map_err(|e| io_error("read interrupted backup", e))?;
+            let name = item.file_name().to_string_lossy().into_owned();
+            if name
+                .strip_suffix(".partial")
+                .is_some_and(|base| validate_archive_name(base).is_ok())
+            {
+                ordinary(&item.path(), false)?;
+                fs::remove_file(item.path()).map_err(|e| io_error("remove partial archive", e))?;
+                removed += 1;
+            }
+        }
+        let root = self.backup_root.join("restore-staging");
+        if root.symlink_metadata().is_ok() {
+            ordinary(&root, true)?;
+            for item in
+                fs::read_dir(&root).map_err(|e| io_error("list interrupted extraction", e))?
+            {
+                let item = item.map_err(|e| io_error("read interrupted extraction", e))?;
+                let name = item.file_name().to_string_lossy().into_owned();
+                if name.len() == 32 && name.bytes().all(|b| b.is_ascii_hexdigit()) {
+                    remove_confined_tree(&item.path(), &root)?;
+                    removed += 1;
+                }
+            }
+        }
+        Ok(removed)
     }
 
     pub fn archive_size(&self, name: &str) -> PortResult<u64> {
@@ -171,8 +241,16 @@ impl EncryptedBackupService {
                 "profile data parent is not a confined ordinary directory",
             ));
         }
-        fs::rename(&staging, &target)
-            .map_err(|error| io_error("install restored profile data", error))?;
+        let id = brows_domain::ProfileId::new(profile_id.to_owned())
+            .map_err(|_| invalid("invalid restore identity"))?;
+        sync_tree(&staging)?;
+        self.journal
+            .begin(&DataOperation::new(OperationKind::Restore, &id, "restore")?)?;
+        if let Err(error) = fs::rename(&staging, &target) {
+            let _ = self.journal.finish(&id);
+            return Err(io_error("install restored profile data", error));
+        }
+        sync_directory(&canonical_parent)?;
         let staging_parent = restored_data_dir
             .parent()
             .ok_or_else(|| invalid("restored profile data has no staging parent"))?;
@@ -193,7 +271,9 @@ impl EncryptedBackupService {
             .map_err(|_| invalid("invalid new profile id"))?;
         let target = self.profile_data_path(profile_id);
         if !target.exists() {
-            return Ok(());
+            let id = brows_domain::ProfileId::new(profile_id.to_owned())
+                .map_err(|_| invalid("invalid restore identity"))?;
+            return self.journal.finish(&id);
         }
         let canonical = target
             .canonicalize()
@@ -202,7 +282,10 @@ impl EncryptedBackupService {
             return Err(invalid("unpublished data path contains a link"));
         }
         inspect_source_tree(&canonical, &self.profile_root)?;
-        fs::remove_dir_all(canonical).map_err(|error| io_error("remove unpublished data", error))
+        remove_confined_tree(&canonical, &self.profile_root)?;
+        let id = brows_domain::ProfileId::new(profile_id.to_owned())
+            .map_err(|_| invalid("invalid restore identity"))?;
+        self.journal.finish(&id)
     }
 
     fn archive_path(&self, name: &str) -> PortResult<PathBuf> {
@@ -1172,5 +1255,41 @@ mod tests {
         service.remove_unpublished_data("fresh-profile").unwrap();
         assert!(!installed.exists());
         fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn startup_restore_cleanup_uses_publication_and_preserves_complete_archives() {
+        for published in [false, true] {
+            let (service, root) = service("restart-restore");
+            let stage =
+                root.join("backups/restore-staging/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa/userdata");
+            fs::create_dir_all(&stage).unwrap();
+            fs::write(stage.join("Cookies"), b"kept-or-unpublished").unwrap();
+            service
+                .install_restored_data("recovered-profile", &stage)
+                .unwrap();
+            let target = service.profile_data_path("recovered-profile");
+            let op = service.journal.pending().unwrap().pop().unwrap();
+            assert!(brows_adapters_profile_data::ensure_profile_available(&target).is_err());
+            service.recover_restore(&op, published).unwrap();
+            assert_eq!(target.exists(), published);
+            assert!(service.journal.pending().unwrap().is_empty());
+            fs::write(root.join("backups/keep.browsbak"), b"completed").unwrap();
+            fs::write(
+                root.join("backups/interrupted.browsbak.partial"),
+                b"partial",
+            )
+            .unwrap();
+            fs::write(root.join("backups/unrelated.partial"), b"unrelated").unwrap();
+            let stage = root.join("backups/restore-staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb");
+            fs::create_dir_all(&stage).unwrap();
+            fs::write(stage.join("temporary"), b"incomplete").unwrap();
+            assert_eq!(service.cleanup_interrupted_staging().unwrap(), 2);
+            assert_eq!(
+                fs::read(root.join("backups/keep.browsbak")).unwrap(),
+                b"completed"
+            );
+            assert!(root.join("backups/unrelated.partial").exists());
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 }

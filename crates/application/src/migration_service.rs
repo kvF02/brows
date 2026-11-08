@@ -73,9 +73,12 @@ impl MigrationApplicationService {
             .migrate(&profile_id, &source_profile_id, &operation_key)
         {
             Ok(artifact) => {
-                Ok(self
+                let record = self
                     .records
-                    .complete(running.id, self.clock.now_ms(), &artifact)?)
+                    .complete(running.id, self.clock.now_ms(), &artifact)?;
+                // A pending marker keeps the profile blocked if this cleanup cannot finish.
+                let _ = self.migrator.finish_operation(&profile_id);
+                Ok(record)
             }
             Err(error) => {
                 let summary = public_failure_summary(error.kind);
@@ -101,7 +104,9 @@ impl MigrationApplicationService {
             ApplicationError::new(ErrorCode::InvalidProfileState, "migration has no backup")
         })?;
         self.migrator.rollback(&record.profile_id, backup_key)?;
-        Ok(self.records.mark_rolled_back(id, self.clock.now_ms())?)
+        let completed = self.records.mark_rolled_back(id, self.clock.now_ms())?;
+        let _ = self.migrator.finish_operation(&record.profile_id);
+        Ok(completed)
     }
 
     pub fn list(&self, limit: usize) -> ApplicationResult<Vec<MigrationRecord>> {

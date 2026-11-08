@@ -186,6 +186,8 @@ fn import_backup(
     );
     backups.discard_restored_data(&payload.restored_data_dir);
     let imported = result.map_err(|error| error.to_contract())?;
+    // Publication has committed. Cleanup failure remains recoverable, never a failed import.
+    let _ = backups.finish_restore(&profile_id(&imported.id)?);
     Ok(BackupImportResultDto {
         profile: imported,
         note: "已恢复为新的环境 UUID，数据就绪后才发布环境，未覆盖现有环境".to_owned(),

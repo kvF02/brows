@@ -383,6 +383,10 @@ pub trait LegacyProfileDataMigrator: fmt::Debug + Send + Sync {
         operation_key: &str,
     ) -> PortResult<LegacyMigrationArtifact>;
     fn rollback(&self, profile_id: &ProfileId, backup_key: &str) -> PortResult<()>;
+    /// Clear an adapter-owned intent only after the metadata transaction commits.
+    fn finish_operation(&self, _profile_id: &ProfileId) -> PortResult<()> {
+        Ok(())
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

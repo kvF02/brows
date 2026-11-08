@@ -6,6 +6,7 @@ license.workspace = true
 description = "Streaming encrypted local backup adapter for Brows"
 
 [dependencies]
+brows-adapters-profile-data = { path = "../adapters-profile-data" }
 argon2 = "0.5.3"
 brows-application = { path = "../application" }
 brows-contracts = { path = "../contracts" }

@@ -235,6 +235,7 @@ name = "brows-adapters-backup"
 version = "0.1.0"
 dependencies = [
  "argon2",
+ "brows-adapters-profile-data",
  "brows-application",
  "brows-contracts",
  "brows-domain",
@@ -261,10 +262,22 @@ dependencies = [
 name = "brows-adapters-morelogin"
 version = "0.1.0"
 dependencies = [
+ "brows-adapters-profile-data",
  "brows-application",
  "brows-domain",
  "calamine",
  "serde",
+ "sha2",
+]
+
+[[package]]
+name = "brows-adapters-profile-data"
+version = "0.1.0"
+dependencies = [
+ "brows-application",
+ "brows-domain",
+ "serde",
+ "serde_json",
  "sha2",
 ]
 
@@ -282,6 +295,7 @@ dependencies = [
 name = "brows-adapters-runtime"
 version = "0.1.0"
 dependencies = [
+ "brows-adapters-profile-data",
  "brows-application",
  "brows-domain",
  "serde",
@@ -332,6 +346,7 @@ dependencies = [
  "brows-adapters-backup",
  "brows-adapters-diagnostic",
  "brows-adapters-morelogin",
+ "brows-adapters-profile-data",
  "brows-adapters-proxy",
  "brows-adapters-runtime",
  "brows-adapters-secret-windows",

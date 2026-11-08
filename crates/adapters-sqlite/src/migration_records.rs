@@ -33,12 +33,34 @@ impl SqliteMigrationRecordRepository {
             .pragma_update(None, "journal_mode", "WAL")
             .map_err(|error| sqlite_error("enable migration WAL", error))?;
         connection
+            .pragma_update(None, "synchronous", "FULL")
+            .map_err(|e| sqlite_error("configure durable migration commits", e))?;
+        connection
             .pragma_update(None, "trusted_schema", "OFF")
             .map_err(|error| sqlite_error("disable trusted migration schema", error))?;
         migrate(&mut connection)?;
         Ok(Self {
             connection: Mutex::new(connection),
         })
+    }
+
+    pub fn interrupted(&self) -> PortResult<Vec<MigrationRecord>> {
+        let connection = self.lock()?;
+        let mut query = connection.prepare("SELECT id, profile_id, source_kind, source_profile_id, status, started_at_ms, completed_at_ms, copied_files, copied_bytes, backup_key, error_summary FROM migration_records WHERE status='running' ORDER BY id LIMIT 10001")
+            .map_err(|e| sqlite_error("prepare interrupted migrations", e))?;
+        let rows = query
+            .query_map([], from_row)
+            .map_err(|e| sqlite_error("query interrupted migrations", e))?;
+        let records = rows
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|e| sqlite_error("read interrupted migrations", e))?;
+        if records.len() > 10000 {
+            return Err(PortError::new(
+                PortErrorKind::InvalidData,
+                "interrupted migration limit exceeded",
+            ));
+        }
+        Ok(records)
     }
 
     fn lock(&self) -> PortResult<MutexGuard<'_, Connection>> {

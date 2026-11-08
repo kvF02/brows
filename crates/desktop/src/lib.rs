@@ -2,6 +2,7 @@
 #![deny(missing_debug_implementations)]
 
 mod commands;
+mod data_recovery;
 mod runtime_management;
 mod settings;
 mod state;
