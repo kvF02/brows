@@ -1,0 +1,59 @@
+name: Windows navigation lifecycle regression
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/navigation-regression.yml'
+      - 'crates/adapters-runtime/src/**'
+      - 'crates/application/src/**'
+      - 'tools/test_support/controlled_browser.rs'
+      - 'tools/test_support/first_observation.js'
+      - 'tools/test_support/fixture_page.js'
+  push:
+    branches: [master]
+    paths:
+      - '.github/workflows/navigation-regression.yml'
+      - 'crates/adapters-runtime/src/**'
+      - 'crates/application/src/**'
+      - 'tools/test_support/controlled_browser.rs'
+      - 'tools/test_support/first_observation.js'
+      - 'tools/test_support/fixture_page.js'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: navigation-regression-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  lifecycle:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select signature-admitted Edge
+        shell: pwsh
+        run: |
+          $edge = Join-Path ${env:ProgramFiles(x86)} 'Microsoft/Edge/Application/msedge.exe'
+          $signature = Get-AuthenticodeSignature -LiteralPath $edge
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) -ne 'Microsoft Corporation') { throw 'Edge signature admission failed' }
+          "BROWS_ACCEPTANCE_BROWSER=$edge" >> $env:GITHUB_ENV
+          $v = [Diagnostics.FileVersionInfo]::GetVersionInfo($edge)
+          "BROWS_ACCEPTANCE_VERSION=$($v.ProductMajorPart).$($v.ProductMinorPart).$($v.ProductBuildPart).$($v.ProductPrivatePart)" >> $env:GITHUB_ENV
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - uses: actions/cache/restore@v4
+        with:
+          path: target/debug
+          key: windows-rust-v2-1.97.1-${{ hashFiles('Cargo.lock', 'Cargo.toml') }}
+          restore-keys: |
+            windows-rust-v2-1.97.1-
+      - name: Repeat real first-navigation and lifecycle checks without retries
+        timeout-minutes: 10
+        shell: pwsh
+        run: |
+          foreach ($round in 1..6) {
+            foreach ($test in @('private_worker_lifecycle_acceptance', 'private_renderer_crash_acceptance', 'private_module_worker_acceptance')) {
+              Write-Output "Lifecycle regression round $round / $test"
+              cargo +1.97.1 test -p brows-adapters-runtime $test --locked -- --ignored --nocapture
+              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            }
+          }

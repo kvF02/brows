@@ -28,6 +28,10 @@ const POLICY_WORKERS: usize = 8;
 const TARGET_EXECUTION_ENDED: &str = "browser target execution ended";
 #[derive(Debug)]
 struct Wire {
+    #[cfg(test)]
+    trace: Mutex<std::collections::VecDeque<String>>,
+    #[cfg(test)]
+    trace_started: Instant,
     process: Arc<win_pipe::Process>,
     next: AtomicU64,
     closing: AtomicBool,
@@ -63,7 +67,39 @@ impl Drop for PendingReply {
     }
 }
 impl Wire {
+    #[cfg(test)]
+    fn trace(&self, phase: &str, method: &str, session: Option<&str>) {
+        use std::hash::{Hash, Hasher};
+        let mut hash = std::collections::hash_map::DefaultHasher::new();
+        session.hash(&mut hash);
+        if let Ok(mut trace) = self.trace.lock() {
+            if trace.len() == 128 {
+                trace.pop_front();
+            }
+            trace.push_back(format!(
+                "{}ms {phase} {method} target={:x}",
+                self.trace_started.elapsed().as_millis(),
+                hash.finish()
+            ));
+        }
+    }
+    #[cfg(test)]
+    fn trace_failure(&self) {
+        if let Ok(trace) = self.trace.lock() {
+            eprintln!(
+                "bounded control trace (methods only):\n{}",
+                trace.iter().cloned().collect::<Vec<_>>().join("\n")
+            );
+        }
+        eprintln!(
+            "control policy failure: {:?}; process exit: {:?}",
+            self.policy_failure.lock().ok().as_deref(),
+            self.process.try_wait().ok()
+        );
+    }
     fn transport_closed(&self) {
+        #[cfg(test)]
+        self.trace("transport", "closed", None);
         if !self.orderly_shutdown.load(Ordering::Acquire) {
             self.fail();
             return;
@@ -127,6 +163,8 @@ impl Wire {
             self.fail();
             return Err(internal("session control writer unavailable"));
         }
+        #[cfg(test)]
+        self.trace("send", &format!("{id} {method}"), session);
         Ok(PendingReply {
             id,
             method: method.to_owned(),
@@ -141,13 +179,20 @@ impl Wire {
     fn finish_until(&self, reply: PendingReply, deadline: Instant) -> PortResult<Value> {
         let method = &reply.method;
         let result = reply.receive_until(deadline);
-        let value = result.map_err(|_| {
+        let value = result.map_err(|error| {
+            #[cfg(test)]
+            self.trace_failure();
+            let failure = self
+                .policy_failure
+                .lock()
+                .ok()
+                .and_then(|reason| reason.clone());
             if reply.session.is_none() {
                 self.fail();
             }
             PortError::new(
                 PortErrorKind::Unavailable,
-                format!("session control response timeout: {method}"),
+                reply_failure_message(method, error, failure.as_deref()),
             )
         })?;
         if let Some(error) = value.get("error") {
@@ -258,6 +303,10 @@ impl Controller {
         let (writer, write_receive) = mpsc::sync_channel::<Vec<u8>>(64);
         let (events, event_receive) = mpsc::sync_channel::<Value>(128);
         let wire = Arc::new(Wire {
+            #[cfg(test)]
+            trace: Mutex::new(std::collections::VecDeque::new()),
+            #[cfg(test)]
+            trace_started: Instant::now(),
             process: Arc::new(process),
             next: AtomicU64::new(1),
             closing: AtomicBool::new(false),
@@ -302,12 +351,16 @@ impl Controller {
                         };
                         frame.clear();
                         if let Some(id) = value["id"].as_u64() {
+                            #[cfg(test)]
+                            w.trace("reply", &id.to_string(), value["sessionId"].as_str());
                             if let Ok(mut pending) = w.pending.lock() {
                                 if let Some(sender) = pending.remove(&id) {
                                     let _ = sender.send(value);
                                 }
                             }
                         } else if value["method"] == "Debugger.paused" {
+                            #[cfg(test)]
+                            w.trace("event", "Debugger.paused", value["sessionId"].as_str());
                             if let Some(session) = value["sessionId"].as_str() {
                                 if let Ok(mut paused) = w.paused.lock() {
                                     if paused.len() >= MAX_TARGETS {
@@ -326,9 +379,18 @@ impl Controller {
                                     | "Inspector.targetCrashed"
                                     | "Inspector.targetReloadedAfterCrash"
                             )
-                        ) && events.try_send(value).is_err()
-                        {
-                            break 'read;
+                        ) {
+                            #[cfg(test)]
+                            w.trace(
+                                "event",
+                                value["method"].as_str().unwrap_or(""),
+                                value["params"]["sessionId"]
+                                    .as_str()
+                                    .or(value["sessionId"].as_str()),
+                            );
+                            if events.try_send(value).is_err() {
+                                break 'read;
+                            }
                         }
                     } else {
                         frame.push(*byte);
@@ -378,6 +440,8 @@ impl Controller {
                         continue;
                     }
                     let session = &job.target.session;
+                    #[cfg(test)]
+                    w.trace("policy-begin", &job.target.kind, Some(session));
                     let result: PortResult<()> = (|| {
                         if !job.extension {
                             if job.target.kind == "service_worker" {
@@ -408,6 +472,8 @@ impl Controller {
                         Ok(())
                     })();
                     if let Err(error) = result {
+                        #[cfg(test)]
+                        w.trace("policy-error", &job.target.kind, Some(session));
                         let Ok(mut state) = t.0.lock() else {
                             w.fail();
                             break;
@@ -450,6 +516,8 @@ impl Controller {
                         break;
                     };
                     if !job.extension && state.ready(&job) {
+                        #[cfg(test)]
+                        w.trace("policy-ready", &job.target.kind, Some(session));
                         t.1.notify_all();
                     }
                 }
@@ -867,6 +935,20 @@ impl Controller {
         })
     }
 }
+fn reply_failure_message(
+    method: &str,
+    error: mpsc::RecvTimeoutError,
+    policy: Option<&str>,
+) -> String {
+    if let Some(policy) = policy {
+        return policy.to_owned();
+    }
+    let condition = match error {
+        mpsc::RecvTimeoutError::Timeout => "response timeout",
+        mpsc::RecvTimeoutError::Disconnected => "disconnected while waiting",
+    };
+    format!("session control {condition}: {method}")
+}
 impl Drop for Controller {
     fn drop(&mut self) {
         self.wire.fail();
@@ -1015,6 +1097,25 @@ const OBSERVE:&str="(()=>({userAgent:navigator.userAgent,platform:navigator.plat
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn reply_errors_preserve_policy_failure_and_distinguish_disconnect_from_timeout() {
+        assert_eq!(
+            reply_failure_message(
+                "Page.navigate",
+                mpsc::RecvTimeoutError::Disconnected,
+                Some("worker policy failed")
+            ),
+            "worker policy failed"
+        );
+        assert_eq!(
+            reply_failure_message("Page.navigate", mpsc::RecvTimeoutError::Disconnected, None),
+            "session control disconnected while waiting: Page.navigate"
+        );
+        assert_eq!(
+            reply_failure_message("Page.navigate", mpsc::RecvTimeoutError::Timeout, None),
+            "session control response timeout: Page.navigate"
+        );
+    }
     mod browser_fixture {
         include!(concat!(
             env!("CARGO_MANIFEST_DIR"),
