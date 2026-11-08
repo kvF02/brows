@@ -147,22 +147,31 @@ fn resolvers(sample: &Value) -> BTreeSet<std::net::IpAddr> {
         .filter_map(|ip| ip.as_str()?.parse().ok())
         .collect()
 }
+fn stun_results(sample: &Value) -> Vec<&Value> {
+    sample["stun"]
+        .as_array()
+        .map_or_else(|| vec![&sample["webrtc"]], |values| values.iter().collect())
+}
 fn positive_stun(sample: &Value) -> bool {
-    sample["webrtc"]["srflx"].as_array().is_some_and(|ips| {
-        ips.iter().any(|ip| {
-            ip.as_str()
-                .and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
-                .is_some()
+    let probes = stun_results(sample);
+    !probes.is_empty()
+        && probes.iter().all(|probe| {
+            probe["srflx"].as_array().is_some_and(|ips| {
+                ips.iter().any(|ip| {
+                    ip.as_str()
+                        .and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
+                        .is_some()
+                })
+            }) && matches!(probe["status"].as_str(), Some("complete" | "timeout"))
         })
-    }) && matches!(
-        sample["webrtc"]["status"].as_str(),
-        Some("complete" | "timeout")
-    )
 }
 fn udp_candidate(sample: &Value) -> bool {
-    sample["webrtc"]["protocols"]
-        .as_array()
-        .is_some_and(|values| values.iter().any(|v| v == "udp"))
+    stun_results(sample).iter().any(|probe| {
+        probe["protocols"]
+            .as_array()
+            .is_some_and(|values| values.iter().any(|v| v == "udp"))
+            || probe["srflx"].as_array().is_some_and(|ips| !ips.is_empty())
+    })
 }
 
 #[test]
@@ -179,6 +188,12 @@ fn missing_or_malformed_control_addresses_are_not_positive_evidence() {
     ));
     assert!(udp_candidate(&json!({"webrtc": {"protocols": ["udp"]}})));
     assert!(!udp_candidate(&json!({"webrtc": {"protocols": []}})));
+    assert!(udp_candidate(&json!({"stun": [
+        {"protocols": [], "srflx": []}, {"protocols": ["udp"], "srflx": []}
+    ]})));
+    assert!(!positive_stun(&json!({"stun": [
+        {"status": "complete", "srflx": ["198.51.100.1"]}, {"status": "error", "srflx": []}
+    ]})));
 }
 
 #[test]
@@ -236,7 +251,7 @@ fn live_browser_network_acceptance() {
         .probe_fingerprint_support(&edge.id)
         .unwrap();
     write_report(&json!({
-        "schemaVersion": 1, "complete": false, "phase": "capability_probe",
+        "schemaVersion": 2, "complete": false, "phase": "capability_probe",
         "productCommit": env::var("BROWS_PRODUCT_COMMIT").ok(),
         "browserVersion": support.build.version,
         "fingerprintSupport": format!("{:?}", support.build.capabilities.fingerprint_support),
@@ -335,11 +350,11 @@ fn live_browser_network_acceptance() {
     drop(username);
     drop(password);
     let mut report = json!({
-        "schemaVersion": 1, "complete": false, "productCommit": env::var("BROWS_PRODUCT_COMMIT").ok(),
+        "schemaVersion": 2, "complete": false, "productCommit": env::var("BROWS_PRODUCT_COMMIT").ok(),
         "browserVersion": edge.version, "runtimeId": edge.id.as_str(), "runtimeSha256": edge.sha256,
-        "runtimeTrust": "verified", "direct": [], "cases": [],
+        "runtimeTrust": "verified", "requestedEndpoints": endpoints.len(), "direct": [], "cases": [],
         "dnsAcceptance": {"status": "not_checked", "reason": "expected_proxy_resolver_ranges_not_configured", "method": "fresh_operator_owned_dns4_and_dns6_names"},
-        "webrtcScope": "Google public STUN; no media permissions; direct positive control required",
+        "webrtcScope": "Google and Cloudflare public STUN; both direct positive controls required; TURN separate",
         "notChecked": ["authoritative DNS resolver allowlist", "all WebRTC/STUN/TURN transports", "Windows 10/11 client matrix", "arbitrary site compatibility"]
     });
     write_report(&report);
@@ -379,6 +394,12 @@ fn live_browser_network_acceptance() {
                 "profile metadata changed across application restart"
             );
             let sample = observe(harness.state(), &fixture, &saved);
+            assert_eq!(sample["schemaVersion"], 2, "current page evidence required");
+            assert_eq!(
+                stun_results(&sample).len(),
+                2,
+                "both STUN services required"
+            );
             let exit_ok = exit(&sample) == Some(std::net::IpAddr::V4(*expected_ip))
                 && exit(&sample) != exit(&baseline);
             let signal = &sample["fingerprint"];
@@ -394,7 +415,7 @@ fn live_browser_network_acceptance() {
                 .map(ToString::to_string)
                 .collect();
             report["cases"].as_array_mut().unwrap().push(json!({
-                "label": label, "round": round, "reopened": round == 1, "exitPassed": exit_ok,
+                "label": label, "expectedExit": expected_ip.to_string(), "round": round, "reopened": round == 1, "exitPassed": exit_ok,
                 "canvasRepeatPassed": canvas_ok, "personaPassed": persona_ok,
                 "baselineResolverOverlap": dns_overlap, "sample": sample,
             }));
@@ -431,10 +452,9 @@ fn live_browser_network_acceptance() {
         .all(positive_stun);
     let leaked_udp = observations.iter().any(|c| udp_candidate(&c["sample"]));
     let rtc_ran = observations.iter().all(|c| {
-        matches!(
-            c["sample"]["webrtc"]["status"].as_str(),
-            Some("complete" | "timeout")
-        )
+        stun_results(&c["sample"])
+            .iter()
+            .all(|probe| matches!(probe["status"].as_str(), Some("complete" | "timeout")))
     });
     let rtc_status = if leaked_udp {
         "fail"
@@ -443,6 +463,26 @@ fn live_browser_network_acceptance() {
     } else {
         "not_checked"
     };
+    let ipv6_controls = report["direct"].as_array().unwrap().iter().all(|sample| {
+        sample["https6"]["ip"]
+            .as_str()
+            .and_then(|ip| ip.parse::<std::net::Ipv6Addr>().ok())
+            .is_some()
+    });
+    let ipv6_observed = observations
+        .iter()
+        .filter(|case| {
+            case["sample"]["https6"]["ip"]
+                .as_str()
+                .and_then(|ip| ip.parse::<std::net::Ipv6Addr>().ok())
+                .is_some()
+        })
+        .count();
+    report["ipv6Coverage"] = json!({
+        "status": "not_checked", "directHttpsPositiveControl": ipv6_controls,
+        "proxiedHttpsObservations": ipv6_observed,
+        "reason": if ipv6_controls { "expected_proxy_ipv6_ranges_not_configured" } else { "no_direct_ipv6_positive_control" }
+    });
     report["webrtcUdpPolicy"] = json!({"status": rtc_status, "directStunPositiveControl": control, "udpCandidateObservedThroughProxy": leaked_udp});
     let direct_https = report["direct"]
         .as_array()
