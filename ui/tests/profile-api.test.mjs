@@ -132,6 +132,29 @@ test("partial updates preserve fields from the requested revision even after ext
   await api.updateProfile(stored.id, 2, { name: "Renamed" });
 });
 
+test("proxy clearing serializes absence instead of an invalid empty proxy ID", async () => {
+  for (const changes of [{ proxyId: "" }, { proxyId: undefined }, { proxyId: "proxy-new" }, { name: "Renamed" }]) {
+    const current = profile({ proxyId: "proxy-original", tags: ["preserved"] });
+    let sent;
+    const api = new TauriApiClient({ invoke: async (handler, args) => {
+      if (handler === "profile_get") return plain(current);
+      if (handler === "session_list") return [];
+      if (handler === "profile_update") {
+        sent = plain(args.request.profile); // The actual JSON IPC boundary.
+        assert.notEqual(sent.proxyId, "", "Rust ProxyId rejects empty strings");
+        return { ...sent, id: current.id, revision: 2, archived: false };
+      }
+      throw new Error(`Unexpected handler: ${handler}`);
+    } });
+    const updated = await api.updateProfile(current.id, 1, changes);
+    const expected = Object.hasOwn(changes, "proxyId") ? changes.proxyId || undefined : current.proxyId;
+    assert.equal(sent.proxyId, expected);
+    assert.equal(updated.proxyId, expected);
+    assert.deepEqual(sent.persona, plain(current.persona));
+    assert.deepEqual(sent.tags, current.tags);
+  }
+});
+
 test("stale edit revisions still fail optimistic concurrency instead of retrying silently", async () => {
   const api = new TauriApiClient({ invoke: async (handler, args) => {
     if (handler === "profile_get") return profile({ revision: 2 });

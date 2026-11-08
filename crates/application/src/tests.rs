@@ -180,6 +180,58 @@ fn profile_data_reservation_blocks_only_the_reserved_profile() {
 }
 
 #[test]
+fn queued_profiles_stay_occupied_until_the_ticket_is_cancelled() {
+    let harness = Harness::new(1);
+    let first = harness.create_profile("running");
+    let second = harness.create_profile("queued");
+    let active = match harness
+        .session_service
+        .launch(SessionLaunchRequest {
+            profile_id: first.id,
+        })
+        .unwrap()
+    {
+        SessionLaunchOutcome::Started { session, .. } => session,
+        _ => panic!("first profile must start"),
+    };
+    let queued = match harness
+        .session_service
+        .launch(SessionLaunchRequest {
+            profile_id: second.id.clone(),
+        })
+        .unwrap()
+    {
+        SessionLaunchOutcome::Queued { session, .. } => session,
+        _ => panic!("second profile must queue"),
+    };
+    let id: ProfileId = second.id.try_into().unwrap();
+    assert!(harness.session_service.has_active_profile(&id).unwrap());
+    assert_eq!(
+        harness
+            .session_service
+            .reserve_stopped_profile(id.clone())
+            .unwrap_err()
+            .code(),
+        &ErrorCode::ProfileLocked
+    );
+    harness
+        .session_service
+        .stop(SessionStopRequest {
+            session_id: queued.id,
+        })
+        .unwrap();
+    assert!(!harness.session_service.has_active_profile(&id).unwrap());
+    let lease = harness.session_service.reserve_stopped_profile(id).unwrap();
+    harness
+        .session_service
+        .stop(SessionStopRequest {
+            session_id: active.id,
+        })
+        .unwrap();
+    drop(lease);
+}
+
+#[test]
 fn restored_profile_is_published_only_after_data_install_and_cleans_failed_publication() {
     let harness = Harness::new(1);
     let original = harness.create_profile("source");

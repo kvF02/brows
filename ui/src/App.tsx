@@ -1,6 +1,7 @@
 import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { createApiClient } from "./api/client";
+import { ProfileBatchControls, useProfileBatch } from "./components/ProfileBatch";
 import { isTauriRuntime } from "./api/tauri";
 import {
   ApiError,
@@ -154,7 +155,7 @@ function App() {
   const refreshGeneration = useRef(0);
   const refresh = useCallback(async (quiet = false) => {
     const generation = ++refreshGeneration.current;
-    if (!quiet) { setLoading(true); setError(""); }
+    if (!quiet) setError("");
     const results = await Promise.allSettled([
       apiRef.current.listProfiles(true),
       apiRef.current.listProxies(),
@@ -204,7 +205,7 @@ function App() {
     let disposed = false;
     let unlisten: (() => void) | undefined;
     void listen("brows://session", () => {
-      if (!disposed) void refresh();
+      if (!disposed) void refresh(true);
     }).then((cleanup) => {
       if (disposed) cleanup();
       else unlisten = cleanup;
@@ -568,6 +569,7 @@ function ProfilesView({
   onError(message: string): void;
   onNotice(message: string): void;
 }) {
+  const batch = useProfileBatch({ api, profiles, onRefresh, onError });
   const presetById = useMemo(() => new Map(presets.map((preset) => [preset.id, preset])), [presets]);
   const proxyById = useMemo(() => new Map(proxies.map((proxy) => [proxy.id, proxy])), [proxies]);
   const runtimeById = useMemo(() => new Map(runtimes.map((runtime) => [runtime.id, runtime])), [runtimes]);
@@ -591,8 +593,8 @@ function ProfilesView({
           <p>每个环境都有独立的 Cookie、缓存、代理和登录状态，可安全地同时运行。</p>
         </div>
         <div className="heading-actions">
-          <button className="secondary-button" type="button" onClick={onImport}>从 MoreLogin 导入</button>
-          <button className="primary-button" type="button" onClick={onCreate}>
+          <button className="secondary-button" type="button" disabled={batch.busy} onClick={onImport}>从 MoreLogin 导入</button>
+          <button className="primary-button" type="button" disabled={batch.busy} onClick={onCreate}>
             <span aria-hidden="true">＋</span> 新建环境
           </button>
         </div>
@@ -614,13 +616,14 @@ function ProfilesView({
           <span aria-hidden="true">⌕</span>
           <input
             type="search"
+            disabled={batch.busy}
             value={search}
             onChange={(event) => onSearch(event.target.value)}
             placeholder="搜索名称或标签"
             aria-label="搜索环境"
           />
           {search && (
-            <button type="button" className="clear-search" aria-label="清除搜索" onClick={() => onSearch("")}>
+            <button type="button" className="clear-search" disabled={batch.busy} aria-label="清除搜索" onClick={() => onSearch("")}>
               ×
             </button>
           )}
@@ -629,23 +632,23 @@ function ProfilesView({
         <label className="archive-filter">
           <input
             type="checkbox"
+            disabled={batch.busy}
             checked={showArchived}
             onChange={(event) => onShowArchived(event.target.checked)}
           />
           <span>显示已归档</span>
         </label>
         <span className="result-count">显示 {profiles.length} / {allProfiles.length}</span>
-        <button className="secondary-button" type="button" onClick={() => onNotice("批量启动将在调度器模块中提供。")}>
-          批量操作 <span aria-hidden="true">⌄</span>
-        </button>
+
       </div>
 
+      <ProfileBatchControls batch={batch} proxies={proxies} />
       {profiles.length === 0 ? (
         <div className="empty-state">
           <div className="empty-icon" aria-hidden="true">⌘</div>
           <strong>{search ? "没有匹配的环境" : "还没有浏览器环境"}</strong>
           <span>{search ? "尝试更换名称或标签。" : "创建第一个环境，开始隔离多开。"}</span>
-          {!search && <button className="primary-button small" type="button" onClick={onCreate}>新建环境</button>}
+          {!search && <button className="primary-button small" type="button" disabled={batch.busy} onClick={onCreate}>新建环境</button>}
         </div>
       ) : (
         <div className="profile-grid">
@@ -657,6 +660,9 @@ function ProfilesView({
               <ProfileCard
                 key={profile.id}
                 profile={profile}
+                selected={batch.selected.has(profile.id)}
+                onSelect={() => batch.toggle(profile.id)}
+                busy={batch.busy}
                 preset={preset}
                 proxy={proxy}
                 runtime={runtime}
@@ -677,6 +683,7 @@ function ProfilesView({
 
 function ProfileCard({
   profile,
+  selected, onSelect, busy,
   preset,
   proxy,
   runtime,
@@ -688,6 +695,7 @@ function ProfileCard({
   onRestore,
 }: {
   profile: Profile;
+  selected: boolean; onSelect(): void; busy: boolean;
   preset?: EnvironmentPreset;
   proxy?: ProxySummary;
   runtime?: BrowserRuntime;
@@ -708,8 +716,9 @@ function ProfileCard({
   const scope = scopeMeta[isSeedable ? "configurable" : preset?.fingerprintScope ?? "host-shared"];
 
   return (
-    <article className={`profile-card status-${status.tone}`}>
+    <article className={`profile-card status-${status.tone}${selected ? " selected" : ""}`}>
       <div className="profile-card-head">
+        <input className="profile-selection" type="checkbox" aria-label={`选择环境 ${profile.name}`} checked={selected} disabled={busy} onChange={onSelect} />
         <div className="profile-avatar" aria-hidden="true">{profile.name.trim().charAt(0).toUpperCase() || "B"}</div>
         <div className="profile-title-wrap">
           <h2 title={profile.name}>{profile.name}</h2>
@@ -736,12 +745,12 @@ function ProfileCard({
           {profile.diagnostic.overall === "not-run" ? "未诊断" : `诊断 ${profile.diagnostic.issueCount ? `${profile.diagnostic.issueCount} 项提示` : "通过"}`}
         </span>
         <div className="card-actions">
-          {profile.status === "archived" && <button className="card-action primary" type="button" onClick={onRestore}>恢复</button>}
-          {canLaunch && <button className="card-action primary" type="button" disabled={fingerprintBlocked} title={fingerprintBlocked ? "SeedableNoise 需要运行时指纹加载检测通过。请到设置执行检测，或编辑为系统原生。" : undefined} onClick={onLaunch}>启动</button>}
-          {canStop && <button className="card-action stop" type="button" onClick={onStop}>停止</button>}
-          {canEdit && <button className="card-action" type="button" onClick={onEdit}>编辑</button>}
-          <button className="card-action" type="button" onClick={onClone}>克隆</button>
-          {canArchive && <button className="card-action" type="button" onClick={onArchive}>归档</button>}
+          {profile.status === "archived" && <button className="card-action primary" type="button" disabled={busy} onClick={onRestore}>恢复</button>}
+          {canLaunch && <button className="card-action primary" type="button" disabled={busy || fingerprintBlocked} title={fingerprintBlocked ? "SeedableNoise 需要运行时指纹加载检测通过。请到设置执行检测，或编辑为系统原生。" : undefined} onClick={onLaunch}>启动</button>}
+          {canStop && <button className="card-action stop" type="button" disabled={busy} onClick={onStop}>停止</button>}
+          {canEdit && <button className="card-action" type="button" disabled={busy} onClick={onEdit}>编辑</button>}
+          <button className="card-action" type="button" disabled={busy} onClick={onClone}>克隆</button>
+          {canArchive && <button className="card-action" type="button" disabled={busy} onClick={onArchive}>归档</button>}
         </div>
       </div>
     </article>

@@ -117,4 +117,5 @@ jobs:
           path: |
             target/packaged-ui-acceptance.json
             target/packaged-ui-acceptance.png
+            target/packaged-ui-acceptance-batch.png
           if-no-files-found: warn

@@ -330,10 +330,10 @@ impl SessionApplicationService {
     ) -> ApplicationResult<bool> {
         let registry = self.lock_registry()?;
         Ok(registry.maintenance_profiles.contains(profile_id)
-            || registry
-                .sessions
-                .values()
-                .any(|session| &session.profile_id == profile_id && session.state.is_active()))
+            || registry.sessions.values().any(|session| {
+                &session.profile_id == profile_id
+                    && (session.state.is_active() || session.state == SessionState::Queued)
+            }))
     }
 
     pub fn reserve_stopped_profile(
@@ -343,10 +343,10 @@ impl SessionApplicationService {
         let _operation = self.lock_operations()?;
         let mut registry = self.lock_registry()?;
         if registry.maintenance_profiles.contains(&profile_id)
-            || registry
-                .sessions
-                .values()
-                .any(|session| session.profile_id == profile_id && session.state.is_active())
+            || registry.sessions.values().any(|session| {
+                session.profile_id == profile_id
+                    && (session.state.is_active() || session.state == SessionState::Queued)
+            })
         {
             return Err(ApplicationError::new(
                 ErrorCode::ProfileLocked,

@@ -303,11 +303,53 @@ try {
     profileIds.push(await cardText(name, "//*[contains(@class,'profile-id')]"));
   }
   assert.equal(new Set(profileIds).size, names.length);
-  for (const [index, name] of names.entries()) {
-    stage = "installed-ui-start-" + (index + 1);
-    await cardAction(name, "启动");
-    await waitCardStatus(name, index < 10 ? "运行中" : "排队中");
-  }
+  const clickVisible = async id => {
+    await command("POST", "/execute/sync", { script: "arguments[0].scrollIntoView({block:'center',inline:'center'});", args: [{[elementKey]: id}] });
+    await click(id);
+  };
+  const selectProfile = async name => clickVisible(await xpath(profileCard(name) + "//input[contains(@class,'profile-selection')]"));
+  const waitBatch = async total => {
+    await waitFor("completed batch", () => text(".batch-results > strong"), result => result.includes("批量操作完成 " + total + "/" + total), 120000);
+    assert.ok((await text(".batch-results")).includes("失败 0"), "batch must report every failure");
+  };
+  stage = "installed-ui-batch-edit";
+  for (const name of names.slice(0, 2)) await selectProfile(name);
+  await clickVisible(await button("批量编辑"));
+  await fill("#batch-tags", "bulk-ci");
+  await click(await button("应用批量修改"));
+  await waitBatch(2);
+  for (const name of names.slice(0, 2)) await waitFor("persisted batch tag", () => cardText(name, "//div[contains(@class,'tag-row')]"), value => value.includes("bulk-ci"));
+  stage = "installed-ui-batch-proxy-edit";
+  await clickVisible(await button("批量编辑"));
+  await click(await css("#batch-proxy option[value='direct']"));
+  await click(await button("应用批量修改"));
+  await waitBatch(2);
+  for (const name of names.slice(0, 2)) assert.ok((await cardText(name, "//div[contains(@class,'profile-details')]")).includes("系统网络"));
+  await clickVisible(await button("清除选择"));
+  await selectProfile(names[0]);
+  await clickVisible(await button("批量编辑"));
+  await click(await xpath("//select[@id='batch-proxy']/option[starts-with(normalize-space(.),'" + fixtureProxyName + "')]"));
+  await click(await button("应用批量修改"));
+  await waitBatch(1);
+  assert.ok((await cardText(names[0], "//div[contains(@class,'profile-details')]")).includes(fixtureProxyName));
+  checks.push("installed-ui-batch-proxy-clear-and-rebind");
+  await clickVisible(await button("清除选择"));
+  for (const name of names) await selectProfile(name);
+  stage = "installed-ui-batch-launch";
+  await clickVisible(await button("批量启动"));
+  await waitBatch(11);
+  for (const [index, name] of names.entries()) await waitCardStatus(name, index < 10 ? "运行中" : "排队中");
+  await command("POST", "/execute/sync", {script: "arguments[0].scrollIntoView({block:'center'});", args: [{[elementKey]: await css(".batch-toolbar")}]});
+  await writeFile(reportPath.replace(/\.json$/, "-batch.png"), Buffer.from(await command("GET", "/screenshot"), "base64"));
+  stage = "installed-ui-batch-stop";
+  await clickVisible(await button("批量停止"));
+  await waitBatch(11);
+  for (const name of names) await waitCardStatus(name, "已停止");
+  checks.push("installed-ui-batch-tags-launch-queue-and-stop");
+  stage = "installed-ui-batch-relaunch-for-crash";
+  await clickVisible(await button("批量启动"));
+  await waitBatch(11);
+  for (const [index, name] of names.entries()) await waitCardStatus(name, index < 10 ? "运行中" : "排队中");
   checks.push("installed-ui-ten-running-and-one-queued");
 
   stage = "installed-ui-host-crash";

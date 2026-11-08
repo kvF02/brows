@@ -205,8 +205,8 @@ export class MockApiClient implements ApiClient {
     if (profile.revision !== revision) {
       throw new ApiError("REVISION_CONFLICT", "环境已被其他操作更新，请刷新后重试");
     }
-    if (profile.status === "running" || profile.status === "starting") {
-      throw new ApiError("INVALID_PROFILE_STATE", "运行中的环境不能修改配置");
+    if (["running", "starting", "queued", "stopping"].includes(profile.status)) {
+      throw new ApiError("PROFILE_LOCKED", "请先停止运行或排队中的环境再修改配置");
     }
     Object.assign(profile, changes, { revision: profile.revision + 1 });
     if (profile.persona?.kind === "system_native") profile.timezone = undefined;
