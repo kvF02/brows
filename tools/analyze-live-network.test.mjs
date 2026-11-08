@@ -45,4 +45,7 @@ test('DNS6 observations cannot manufacture a direct IPv6 HTTPS control', () => {
   assert.equal(analyzeLiveNetwork(r,policy).ipv6Egress.status,'pass');
   r.cases[0].sample.https6.ip='2001:db8:1::9';
   assert.equal(analyzeLiveNetwork(r,policy).ipv6Egress.status,'fail');
+  policy.proxyIpv6Cidrs=['2001:db8::/32'];
+  r.cases[0].sample.https6.ip='2001:0db8:0001:0:0:0:0:9';
+  assert.equal(analyzeLiveNetwork(r,policy).ipv6Egress.status,'fail');
 });

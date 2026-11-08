@@ -4,10 +4,14 @@ import {readFile, writeFile} from 'node:fs/promises';
 import {pathToFileURL} from 'node:url';
 import {resolve} from 'node:path';
 const providers = ['google', 'cloudflare'];
+const canonicalAddress = value => {
+  if (typeof value !== 'string' || !isIP(value) || value.includes('%')) return null;
+  return isIP(value) === 6 ? new URL(`http://[${value}]/`).hostname.slice(1, -1) : value;
+};
 const checked = value => ['complete', 'timeout'].includes(value?.status);
-const addresses = values => Array.isArray(values) && values.length > 0 && values.length <= 32 && values.every(ip => typeof ip === 'string' && isIP(ip));
+const addresses = values => Array.isArray(values) && values.length > 0 && values.length <= 32 && values.every(ip => canonicalAddress(ip));
 const ipv4 = sample => sample?.https?.status === 'observed' && isIP(sample.https.ip) === 4 ? sample.https.ip : null;
-const ipv6 = sample => sample?.https6?.status === 'observed' && isIP(sample.https6.ip) === 6 ? sample.https6.ip : null;
+const ipv6 = sample => sample?.https6?.status === 'observed' && isIP(sample.https6.ip) === 6 ? canonicalAddress(sample.https6.ip) : null;
 const probe = (sample, service) => sample?.stun?.find(value => value.service === service);
 function policyRules(policy, name) {
   const cidrs = policy[name];
@@ -47,7 +51,7 @@ export function analyzeLiveNetwork(report, policy = {}) {
   });
   const resolverRule = policyRules(policy, 'dnsResolverCidrs');
   let dnsObserved = 0, dnsInvalid = 0, outside = 0;
-  const controlResolvers = new Set(report.direct.flatMap(s => s.dns ?? []).flatMap(d => Array.isArray(d.resolvers) ? d.resolvers : []).filter(ip => isIP(ip)));
+  const controlResolvers = new Set(report.direct.flatMap(s => s.dns ?? []).flatMap(d => Array.isArray(d.resolvers) ? d.resolvers : []).map(canonicalAddress).filter(Boolean));
   const overlaps = new Set();
   for (const item of cases) {
     if (!Array.isArray(item.sample.dns) || item.sample.dns.length !== 2 || ['dns4','dns6'].some(f => item.sample.dns.filter(d => d.family === f).length !== 1)) throw Error('both DNS query families required');
@@ -56,7 +60,7 @@ export function analyzeLiveNetwork(report, policy = {}) {
       if (!addresses(dns.resolvers)) { dnsInvalid++; continue; }
       dnsObserved++;
       for (const ip of dns.resolvers) {
-        if (controlResolvers.has(ip)) overlaps.add(ip);
+        if (controlResolvers.has(canonicalAddress(ip))) overlaps.add(canonicalAddress(ip));
         if (resolverRule && !resolverRule(ip)) outside++;
       }
     }
