@@ -799,7 +799,7 @@ impl SeedableNoiseFingerprintRuntime {
             LaunchArgument::DisableBlinkFeatures(vec!["AutomationControlled".to_owned()]),
         ];
 
-        if build.id.as_str().starts_with("managed-") {
+        if build.capabilities.supports_devtools_pipe || build.id.as_str().starts_with("managed-") {
             if !build.capabilities.supports_devtools_pipe {
                 return Err(PortError::new(
                     PortErrorKind::CapabilityUnsupported,
@@ -1045,7 +1045,9 @@ mod seedable_noise_tests {
         let session = crate::render_session_fingerprint(&policy, &build.version).unwrap();
         assert_eq!(
             session,
-            std::fs::read_to_string(directory.join("content.js")).unwrap()
+            std::fs::read_to_string(directory.join("content.js"))
+                .unwrap()
+                .replace("\"native_navigator\":false", "\"native_navigator\":true")
         );
         policy.user_agent = "unrelated identity".to_owned();
         assert!(crate::render_session_fingerprint(&policy, &build.version).is_err());

@@ -42,7 +42,12 @@
       ['deviceMemory', persona.device_memory], ['maxTouchPoints', persona.touch_points],
       ['platform', persona.platform === 'windows' ? 'Win32'
         : persona.platform === 'mac' ? 'MacIntel' : 'Linux x86_64'],
-    ]) overrideGetter(navigatorPrototype, name, value);
+    ]) {
+      // The private controller owns these fields through native Emulation.
+      // Leave their original getter objects and receiver semantics intact.
+      if (persona.native_navigator && name !== 'deviceMemory') continue;
+      overrideGetter(navigatorPrototype, name, value);
+    }
   }
   // devicePixelRatio stays native: the launch scale flag and browser zoom own it.
   // Do not fabricate chrome.runtime or replace WebRTC constructors.

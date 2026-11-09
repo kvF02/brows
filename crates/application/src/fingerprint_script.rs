@@ -19,13 +19,14 @@ pub fn render_session_fingerprint(
             "session identity does not match the selected runtime and persona",
         ));
     }
-    Ok(render_persona_content(
+    Ok(render_content_with_mode(
         &policy.persona,
         &fingerprint,
         &LocaleConfig {
             accept_languages: policy.languages.clone(),
             timezone: policy.timezone.clone(),
         },
+        true,
     ))
 }
 
@@ -34,7 +35,17 @@ pub(crate) fn render_persona_content(
     fp: &PersonaFingerprint,
     locale: &LocaleConfig,
 ) -> String {
+    render_content_with_mode(persona, fp, locale, false)
+}
+
+fn render_content_with_mode(
+    persona: &SeedableNoisePersona,
+    fp: &PersonaFingerprint,
+    locale: &LocaleConfig,
+    native_navigator: bool,
+) -> String {
     let data = serde_json::json!({
+        "native_navigator": native_navigator,
         "seed": persona.seed,
         "platform": match persona.platform {
             brows_domain::PlatformKind::Windows => "windows",

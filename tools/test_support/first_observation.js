@@ -17,6 +17,38 @@ const first = {
   offsetSummer: new Date('2024-07-15T12:00:00Z').getTimezoneOffset(),
   hints: navigator.userAgentData?.toJSON(),
 };
+// Inspect the real getters at the first executable statement; the controller
+// does not replace Function.prototype.toString or these getter functions.
+const navigatorPrototype = typeof document === 'undefined' ? WorkerNavigator.prototype : Navigator.prototype;
+first.nativeNavigator = Object.fromEntries(['hardwareConcurrency','platform','language','languages','maxTouchPoints']
+  .filter(name => name in navigator)
+  .map(name => {
+    const getter = Object.getOwnPropertyDescriptor(navigatorPrototype, name)?.get;
+    let brandCheck = false;
+    try { Reflect.apply(getter, {}, []); } catch (error) { brandCheck = error instanceof TypeError; }
+    const value = Reflect.apply(getter, navigator, []);
+    return [name, {nativeGetter: Function.prototype.toString.call(getter).includes('[native code]'),
+      brandCheck, value: Array.isArray(value) ? Array.from(value) : value}];
+  }));
+if (typeof document !== 'undefined') {
+  first.touch = {points:navigator.maxTouchPoints,coarse:matchMedia('(pointer: coarse)').matches,
+    hoverNone:matchMedia('(hover: none)').matches,api:'ontouchstart' in globalThis};
+  if (location.pathname === '/native-hardware/page') {
+    addEventListener('DOMContentLoaded', () => {
+      const target = document.createElement('button');
+      target.textContent = 'Owned touch target';
+      target.style.cssText = 'position:fixed;left:0;top:0;width:64px;height:64px;z-index:2147483647;touch-action:none';
+      document.body.append(target);
+    }, {once:true});
+    const captureTouch = event => {
+      if (event.touches.length !== 2) return;
+      removeEventListener('touchstart', captureTouch);
+      fetch('./touch_input/proof', {method:'POST',body:JSON.stringify({kind:'touch_input',
+        trusted:event.isTrusted,touches:event.touches.length,nativeEvent:event instanceof TouchEvent})});
+    };
+    addEventListener('touchstart', captureTouch);
+  }
+}
 if (first.capturePhase === 'module_dependency') first.kind = 'module_' + first.kind;
 const canvas = typeof document === 'undefined' ? new OffscreenCanvas(16, 16) : document.createElement('canvas');
 canvas.width = 16; canvas.height = 16;
