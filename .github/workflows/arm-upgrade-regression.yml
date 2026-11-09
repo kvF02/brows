@@ -1,0 +1,63 @@
+name: Windows ARM upgrade resource regression
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/arm-upgrade-regression.yml'
+      - 'tools/windows-beta-smoke.ps1'
+  workflow_dispatch:
+    inputs:
+      package_run:
+        description: 'Completed beta-package run in this repository containing the retained client kit'
+        required: true
+        type: string
+      package_commit:
+        description: 'Full source commit recorded in that client kit'
+        required: true
+        type: string
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: arm-upgrade-regression-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  same-kit:
+    # Historical artifacts expire. Only this investigation PR uses the pinned
+    # default; future manual investigations select a retained run and commit.
+    if: github.event_name == 'workflow_dispatch' || github.head_ref == 'codex/installer-process-resources'
+    runs-on: windows-11-arm
+    timeout-minutes: 8
+    env:
+      BROWS_REGRESSION_RUN: ${{ inputs.package_run || '42486356012' }}
+      BROWS_REGRESSION_COMMIT: ${{ inputs.package_commit || '257384ea9f387782c84366cc4b58d1c1bce8bfb5' }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate the selected source identifiers
+        shell: pwsh
+        run: |
+          if ($env:BROWS_REGRESSION_RUN -cnotmatch '^[0-9]+$' -or $env:BROWS_REGRESSION_COMMIT -cnotmatch '^[a-f0-9]{40}$') { throw 'Expected a numeric run ID and full commit SHA' }
+      - name: Download the exact kit that failed twice
+        uses: actions/download-artifact@v4
+        with:
+          name: brows-windows-client-kit-${{ env.BROWS_REGRESSION_COMMIT }}
+          run-id: ${{ env.BROWS_REGRESSION_RUN }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: target/regression-kit-download
+      - name: Check process cleanup against the unchanged installer
+        shell: pwsh
+        run: |
+          Expand-Archive -LiteralPath target/regression-kit-download/brows-windows-client-kit.zip -DestinationPath target/regression-kit
+          ./tools/windows-client-smoke.ps1 -KitDirectory target/regression-kit -Report target/arm-upgrade-resource-acceptance.json
+          $result = Get-Content -Raw target/arm-upgrade-resource-acceptance.json | ConvertFrom-Json
+          if ($result.commit -cne $env:BROWS_REGRESSION_COMMIT -or -not $result.clientPackageChecksComplete) { throw 'Pinned package acceptance mismatch' }
+          if (@($result.package.launches | Where-Object { -not $_.processResourcesReleased }).Count -ne 0) { throw 'Owned process resources were not released' }
+          if (@($result.package.launches | Where-Object { -not $_.writeAccessReady.canOpen }).Count -ne 0) { throw 'Installed image was not ready for replacement' }
+      - name: Preserve outcomes and native write-access probes
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: arm-upgrade-resource-evidence-${{ github.sha }}
+          path: |
+            target/arm-upgrade-resource-acceptance.json
+            target/arm-upgrade-resource-acceptance.json.package.json
+          if-no-files-found: warn
