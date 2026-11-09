@@ -1,0 +1,44 @@
+name: Native Worker lifecycle control
+on:
+  pull_request:
+    paths:
+      - 'tools/native-worker-lifecycle.mjs'
+      - 'tools/test_support/native_pipe.mjs'
+      - '.github/workflows/native-worker-lifecycle.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'tools/native-worker-lifecycle.mjs'
+      - 'tools/test_support/native_pipe.mjs'
+      - '.github/workflows/native-worker-lifecycle.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-worker-lifecycle-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  stock-control:
+    name: Signed Edge lifecycle without replacement getters
+    runs-on: windows-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Verify reload, stop-wake, update, process reopen and host control
+        shell: pwsh
+        run: |
+          $edge = Join-Path ${env:ProgramFiles(x86)} 'Microsoft/Edge/Application/msedge.exe'
+          $signature = Get-AuthenticodeSignature -LiteralPath $edge
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) -ne 'Microsoft Corporation') { throw 'Edge signature admission failed' }
+          $digest = (Get-FileHash -LiteralPath $edge -Algorithm SHA256).Hash.ToLowerInvariant()
+          node tools/native-worker-lifecycle.mjs --browser $edge --sha256 $digest --expect stock --report target/native-worker-lifecycle-stock.json
+          if ($LASTEXITCODE -ne 0) { throw 'Native lifecycle stock control failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-worker-lifecycle-stock
+          path: target/native-worker-lifecycle-stock.json
+          if-no-files-found: warn
