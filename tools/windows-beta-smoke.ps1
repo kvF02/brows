@@ -24,8 +24,25 @@ $result = [ordered]@{
 
 function Install-Beta {
     $setup = Start-Process -FilePath $Installer -ArgumentList @('/S', "/D=$installRoot") -PassThru
-    if (-not $setup.WaitForExit(120000)) { $setup.Kill(); throw 'Installer timed out' }
-    if ($setup.ExitCode -ne 0) { throw "Installer exited $($setup.ExitCode)" }
+    try {
+        if (-not $setup.WaitForExit(120000)) { $setup.Kill(); throw 'Installer timed out' }
+        if ($setup.ExitCode -ne 0) { throw "Installer exited $($setup.ExitCode)" }
+    } finally {
+        $setup.Dispose()
+    }
+}
+
+function Get-ExecutableWriteProbe([string]$Path) {
+    # Only opens the disposable fixture's executable; no bytes are written.
+    $stream = $null
+    try {
+        $stream = [IO.File]::Open($Path, [IO.FileMode]::Open, [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+        return @{ canOpen = $true; nativeError = $null }
+    } catch [IO.IOException], [UnauthorizedAccessException] {
+        return @{ canOpen = $false; nativeError = $_.Exception.HResult -band 0xffff }
+    } finally {
+        if ($stream) { $stream.Dispose() }
+    }
 }
 
 function Test-InstalledLaunch([string]$Executable, [int]$Round) {
@@ -38,6 +55,9 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
         windowVisibleAtTimeout = $null
         lifecycle = @()
         webview2Version = $null
+        processResourcesReleased = $false
+        writeAccessBeforeDispose = $null
+        writeAccessAfterDispose = $null
     }
     $launches.Add($launch)
     $process = $null
@@ -67,11 +87,18 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
     } finally {
         $launch.lifecycle = @(Read-BrowsLifecycleTrace -TracePath $tracePath)
         if ($process) {
-            if ($process.HasExited) {
-                $launch.exitCode = $process.ExitCode
-            } else {
-                Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            try {
+                if ($process.HasExited) {
+                    $launch.exitCode = $process.ExitCode
+                    $launch.writeAccessBeforeDispose = Get-ExecutableWriteProbe $Executable
+                } else {
+                    Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+                }
+            } finally {
+                $process.Dispose()
+                $launch.processResourcesReleased = $true
             }
+            $launch.writeAccessAfterDispose = Get-ExecutableWriteProbe $Executable
         }
     }
 }
@@ -105,8 +132,12 @@ try {
     $uninstall = Join-Path $installRoot 'uninstall.exe'
     if (-not (Test-Path $uninstall)) { throw 'Uninstaller missing' }
     $removal = Start-Process -FilePath $uninstall -ArgumentList '/S' -PassThru
-    if (-not $removal.WaitForExit(60000)) { $removal.Kill(); throw 'Uninstaller timed out' }
-    if ($removal.ExitCode -ne 0) { throw 'Uninstaller failed' }
+    try {
+        if (-not $removal.WaitForExit(60000)) { $removal.Kill(); throw 'Uninstaller timed out' }
+        if ($removal.ExitCode -ne 0) { throw 'Uninstaller failed' }
+    } finally {
+        $removal.Dispose()
+    }
     for ($attempt = 0; $attempt -lt 120 -and (Test-Path $executable); $attempt++) { Start-Sleep -Milliseconds 250 }
     if (Test-Path $executable) { throw 'Uninstaller left the installed executable' }
     if ([IO.File]::ReadAllText($sentinel) -ne 'preserve-user-data') { throw 'Uninstall removed application data' }
