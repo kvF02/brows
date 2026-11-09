@@ -138,6 +138,11 @@ async function launch(profile, overriding) {
   else report.runtimeVersion = version.product;
   async function apply(event) {
     const { sessionId, targetInfo } = event.params;
+    // A fresh Edge profile can start built-in extension Workers. They are not
+    // owned fixture contexts and must resume without receiving test overrides.
+    if (targetInfo.url && targetInfo.type !== 'page' && !targetInfo.url.startsWith(`${origin}${prefix}`)) {
+      await pipe.call('Runtime.runIfWaitingForDebugger', {}, sessionId); return;
+    }
     const target = { id: targetInfo.targetId, session: sessionId, kind: targetInfo.type, url: targetInfo.url, ready: false };
     assert(targets.size < 64, 'target limit'); targets.set(target.id, target);
     try {
@@ -164,6 +169,10 @@ async function launch(profile, overriding) {
     if (closing) return;
     if (event.method === 'Debugger.paused') paused.add(event.sessionId);
     if (event.method === 'Target.attachedToTarget') apply(event).catch(error => { failure ??= error; });
+    if (event.method === 'Target.targetInfoChanged') {
+      const info = event.params.targetInfo, target = targets.get(info.targetId);
+      if (target) target.url = info.url;
+    }
     if (event.method === 'Target.detachedFromTarget') {
       const session = event.params.sessionId; paused.delete(session);
       for (const target of targets.values()) if (target.session === session) targets.delete(target.id);
@@ -209,7 +218,7 @@ try {
   const initialServiceBoots = serviceKinds.map(kind => proofs.find(first => first.kind === kind).boot);
 
   phase = 'clear-and-restore';
-  const workerTargets = [...targets.values()].filter(target => ['worker', 'shared_worker', 'service_worker'].includes(target.kind));
+  const workerTargets = [...targets.values()].filter(target => ['worker', 'shared_worker', 'service_worker'].includes(target.kind) && target.url.startsWith(`${origin}${prefix}`));
   assert.equal(workerTargets.length, 6, 'all six live Worker targets required');
   const inspect = `(()=>{const getter=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(navigator),'platform').get;return{platform:navigator.platform,sameGetter:getter===globalThis.__originalPlatformGetter,nativeGetter:Function.prototype.toString.call(getter).includes('[native code]')}})()`;
   for (const target of workerTargets) {
@@ -227,7 +236,7 @@ try {
   await pipe.call('Page.reload', { ignoreCache: true }, pageSession);
   await checkpoint('reload-dedicated-worker-first-scripts', start, ['page', 'worker', 'module_worker'], 1);
   await waitFor(() => metadata.get(processIndex)?.registrations === 2, 'reload retains registrations');
-  const shared = [...targets.values()].filter(target => target.kind === 'shared_worker');
+  const shared = [...targets.values()].filter(target => target.kind === 'shared_worker' && target.url.startsWith(`${origin}${prefix}`));
   assert.equal(shared.length, 2, 'both Shared Workers required after reload');
   for (const target of shared) {
     const result = await pipe.call('Runtime.evaluate', { expression: inspect, returnByValue: true }, target.session);
