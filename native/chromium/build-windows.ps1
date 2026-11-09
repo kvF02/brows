@@ -15,6 +15,16 @@ $result = [ordered]@{ schemaVersion = 1; sourceRevision = $manifest.upstream.rev
 $oldPath = $env:PATH
 $oldToolchain = $env:DEPOT_TOOLS_WIN_TOOLCHAIN
 $oldUpdate = $env:DEPOT_TOOLS_UPDATE
+$gitCount = 0
+if ($env:GIT_CONFIG_COUNT -and -not [int]::TryParse($env:GIT_CONFIG_COUNT, [ref]$gitCount)) { throw 'Invalid inherited Git configuration count' }
+if ($gitCount -lt 0 -or $gitCount -gt 256) { throw 'Invalid inherited Git configuration count' }
+$gitChanges = @{}
+$gitChanges['GIT_CONFIG_COUNT'] = [string]($gitCount + 2)
+$gitChanges["GIT_CONFIG_KEY_$gitCount"] = 'core.autocrlf'
+$gitChanges["GIT_CONFIG_VALUE_$gitCount"] = 'false'
+$gitChanges["GIT_CONFIG_KEY_$($gitCount + 1)"] = 'core.longpaths'
+$gitChanges["GIT_CONFIG_VALUE_$($gitCount + 1)"] = 'true'
+$oldGitEnvironment = @{}
 
 function Assert-Exit([string]$Stage) {
     if ($LASTEXITCODE -ne 0) { throw "$Stage failed with exit $LASTEXITCODE" }
@@ -33,6 +43,12 @@ try {
     $disk = @($preflight.drives | Where-Object drive -eq $drive)
     if ($disk.Count -ne 1 -or $disk[0].filesystem -ne 'NTFS' -or $disk[0].freeGiB -lt $manifest.buildRequirements.minimumFreeDiskGiB) { throw 'Build root is not on an admitted NTFS volume' }
     New-Item -ItemType Directory -Path $root | Out-Null
+    # Preserve exact pinned bytes and long paths without changing global Git
+    # settings or discarding inherited per-process configuration entries.
+    foreach ($name in $gitChanges.Keys) {
+        $oldGitEnvironment[$name] = [Environment]::GetEnvironmentVariable($name, 'Process')
+        [Environment]::SetEnvironmentVariable($name, $gitChanges[$name], 'Process')
+    }
     $result.stage = 'depot-tools'
     $depot = Join-Path $root 'depot_tools'
     git clone --no-checkout $manifest.depotTools.repository $depot
@@ -83,6 +99,9 @@ try {
 } catch {
     $result.failure = $_.Exception.Message
 } finally {
+    foreach ($name in $oldGitEnvironment.Keys) {
+        [Environment]::SetEnvironmentVariable($name, $oldGitEnvironment[$name], 'Process')
+    }
     $env:PATH = $oldPath
     $env:DEPOT_TOOLS_WIN_TOOLCHAIN = $oldToolchain
     $env:DEPOT_TOOLS_UPDATE = $oldUpdate

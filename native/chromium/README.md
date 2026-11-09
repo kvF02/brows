@@ -24,7 +24,7 @@ different TLS/HTTP2 stack.
 
 1. **Source check:** each input is verified against its pinned Git blob;
    `git apply --check` and the upstream `make_instrumenting_probes.py` generator
-   must succeed. This does not compile or execute Chromium.
+   must succeed on both Linux and Windows. This does not compile or execute Chromium.
 2. **Stock negative control:** the signed installed Edge runs in an isolated
    profile over a private CDP pipe, with no Brows hooks. It must retain the host
    Worker platform despite the page override. A passing negative control records
@@ -75,6 +75,9 @@ Use a new root without spaces. The driver creates a pinned checkout and leaves
 it available for diagnosis; a large source/build tree is expected. The CI build
 job is skipped when prerequisites cannot be established, and the preflight
 artifact explains why. A skipped build is not a successful native build.
+Source checkout uses process-scoped Git settings for LF bytes and long paths;
+the inherited settings are restored when the driver ends. The patch itself also
+has an LF checkout attribute, so its pinned digest is portable across Git hosts.
 
 On disposable GitHub-hosted Windows runners, CI may supply
 `-PrepareHostedSdk` to the build driver. If the SDK is the only missing

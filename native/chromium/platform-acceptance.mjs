@@ -140,9 +140,10 @@ navigator.serviceWorker.register('/module-sw/sw.mjs',{scope:'/module-sw/',type:'
     const target = { id: targetInfo.targetId, session: sessionId, kind: targetInfo.type, url: targetInfo.url, ready: false };
     targets.set(target.id, target);
     if (target.kind === 'service_worker') {
-      const enabled = pipe.call('Debugger.enable', {}, sessionId), stopped = pipe.call('Debugger.pause', {}, sessionId);
-      await pipe.call('Runtime.runIfWaitingForDebugger', {}, sessionId);
-      await Promise.all([enabled, stopped]);
+      // Queue in order and observe every rejection immediately, so a protocol
+      // failure is written to the report instead of becoming unhandled.
+      await Promise.all([pipe.call('Debugger.enable', {}, sessionId), pipe.call('Debugger.pause', {}, sessionId),
+        pipe.call('Runtime.runIfWaitingForDebugger', {}, sessionId)]);
       await waitFor(() => paused.has(sessionId), 'Service Worker pause', 8000);
     }
     await pipe.call('Emulation.setUserAgentOverride', { userAgent: version.userAgent, platform: configured }, sessionId);
