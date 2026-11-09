@@ -33,6 +33,7 @@ let child, pipe, server, root, origin, failure, phase = 'initial', processIndex 
 let targets = new Map(), paused = new Set(), versions = new Map(), registrations = new Map(), metadata = new Map();
 let userAgent, pageSession, useOverride = true;
 const proofs = [], seenBoots = new Set();
+const wakeEvents = new Map();
 const scope = kind => `${origin}${prefix}${kind === 'service_worker' ? 'classic-sw/' : 'module-sw/'}`;
 
 async function waitFor(condition, label, timeout = 15000) {
@@ -143,10 +144,11 @@ async function launch(profile, overriding) {
     if (targetInfo.url && targetInfo.type !== 'page' && !targetInfo.url.startsWith(`${origin}${prefix}`)) {
       await pipe.call('Runtime.runIfWaitingForDebugger', {}, sessionId); return;
     }
-    const target = { id: targetInfo.targetId, session: sessionId, kind: targetInfo.type, url: targetInfo.url, ready: false };
+    const target = { id: targetInfo.targetId, session: sessionId, kind: targetInfo.type, url: targetInfo.url, ready: false, suspended: false };
     assert(targets.size < 64, 'target limit'); targets.set(target.id, target);
     try {
       if (target.kind === 'service_worker') {
+        paused.delete(sessionId);
         await Promise.all([pipe.call('Debugger.enable', {}, sessionId), pipe.call('Debugger.pause', {}, sessionId),
           pipe.call('Runtime.runIfWaitingForDebugger', {}, sessionId)]);
         await waitFor(() => paused.has(sessionId), 'Service Worker native policy pause', 8000);
@@ -156,7 +158,7 @@ async function launch(profile, overriding) {
         await pipe.call('Target.setAutoAttach', autoAttach(['worker', 'iframe']), sessionId);
         await pipe.call('Page.enable', {}, sessionId); await pipe.call('ServiceWorker.enable', {}, sessionId);
       }
-      if (target.kind === 'service_worker') await pipe.call('Debugger.disable', {}, sessionId);
+      if (target.kind === 'service_worker') { await pipe.call('Debugger.disable', {}, sessionId); paused.delete(sessionId); }
       else await pipe.call('Runtime.runIfWaitingForDebugger', {}, sessionId);
       target.ready = true;
     } catch (error) {
@@ -167,6 +169,7 @@ async function launch(profile, overriding) {
   }
   pipe.on('event', event => {
     if (closing) return;
+    if (phase === 'service-worker-wake') wakeEvents.set(event.method, (wakeEvents.get(event.method) ?? 0) + 1);
     if (event.method === 'Debugger.paused') paused.add(event.sessionId);
     if (event.method === 'Target.attachedToTarget') apply(event).catch(error => { failure ??= error; });
     if (event.method === 'Target.targetInfoChanged') {
@@ -176,6 +179,17 @@ async function launch(profile, overriding) {
     if (event.method === 'Target.detachedFromTarget') {
       const session = event.params.sessionId; paused.delete(session);
       for (const target of targets.values()) if (target.session === session) targets.delete(target.id);
+    }
+    if (event.method === 'Inspector.targetCrashed') {
+      const target = [...targets.values()].find(target => target.session === event.sessionId);
+      if (target) { target.ready = false; target.suspended = true; paused.delete(target.session); }
+    }
+    if (event.method === 'Inspector.targetReloadedAfterCrash') {
+      const target = [...targets.values()].find(target => target.session === event.sessionId);
+      if (target?.suspended) {
+        target.suspended = false;
+        apply({ params: { sessionId: target.session, targetInfo: { targetId: target.id, type: target.kind, url: target.url } } }).catch(error => { failure ??= error; });
+      }
     }
     if (event.method === 'ServiceWorker.workerVersionUpdated') {
       for (const item of event.params.versions) versions.set(item.versionId, item);
@@ -279,6 +293,7 @@ try {
   report.assertionsPassed = true; report.nativeLifecyclePassed = options.expect === 'native';
 } catch (error) {
   report.failure = error.message; report.failedPhase = phase;
+  report.wakeProtocolEvents = Object.fromEntries(wakeEvents);
   report.ownedWorkerState = [...targets.values()].filter(target => target.url.startsWith(`${origin}${prefix}`)).map(target => ({ kind: target.kind, ready: target.ready }));
   report.serviceWorkerState = serviceKinds.map(kind => { const item = activeVersion(kind); return { kind, status: item?.status ?? 'missing', runningStatus: item?.runningStatus ?? 'missing' }; });
 } finally {
