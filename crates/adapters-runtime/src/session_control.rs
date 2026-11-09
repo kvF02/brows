@@ -1789,17 +1789,20 @@ mod tests {
             .into_iter()
             .find(|target| target.kind == "page")
             .unwrap();
-        let blank = evaluate(
-            &browser.controller.wire,
-            &page.session,
-            "({blank:location.href==='about:blank',ready:document.readyState==='complete',historyLength:history.length})",
-        )
-        .unwrap();
+        // This command is handled by the browser. Renderer-side evaluation may
+        // legitimately be suspended until the held navigation commits.
+        let history = browser
+            .controller
+            .wire
+            .call("Page.getNavigationHistory", json!({}), Some(&page.session))
+            .unwrap();
         assert_eq!(
-            blank,
-            json!({"blank":true,"ready":true,"historyLength":1}),
-            "held first response must leave a ready blank document without extra history"
+            history["entries"].as_array().unwrap().len(),
+            1,
+            "startup initialization must not introduce an extra history entry"
         );
+        assert_eq!(history["currentIndex"], 0);
+        assert_eq!(history["entries"][0]["url"], "about:blank");
         fixture.release_document();
         let proofs = fixture.wait_proofs("/held/");
         assert_eq!(
