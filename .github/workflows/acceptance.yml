@@ -122,7 +122,17 @@ jobs:
       - name: Managed runtime capture and restart acceptance
         if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' && steps.login_storage.outcome == 'success' }}
         timeout-minutes: 7
-        run: cargo +1.97.1 test -p brows-desktop managed_runtime_acceptance -- --ignored --nocapture
+        shell: pwsh
+        run: |
+          $completed = 0
+          @{ assertionsPassed = $false; complete = $false; completedRounds = $completed; requiredRounds = 3 } | ConvertTo-Json | Set-Content target/managed-runtime-startup-rounds.json
+          foreach ($round in 1..3) {
+            Write-Output "Managed production-composition startup $round / 3"
+            cargo +1.97.1 test -p brows-desktop managed_runtime_acceptance -- --ignored --nocapture
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $completed++
+            @{ assertionsPassed = ($completed -eq 3); complete = $false; completedRounds = $completed; requiredRounds = 3 } | ConvertTo-Json | Set-Content target/managed-runtime-startup-rounds.json
+          }
       - name: Ten-profile bounded capacity acceptance
         if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' && steps.login_storage.outcome == 'success' }}
         timeout-minutes: 4
@@ -144,6 +154,7 @@ jobs:
             target/fingerprint-module-worker-acceptance.json
             target/fingerprint-renderer-crash-acceptance.json
             target/managed-runtime-acceptance.json
+            target/managed-runtime-startup-rounds.json
             target/desktop-capacity-acceptance.json
             target/login-persistence-acceptance.json
           if-no-files-found: ignore
