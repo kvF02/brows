@@ -51,6 +51,7 @@ jobs:
           $result = Get-Content -Raw target/arm-upgrade-resource-acceptance.json | ConvertFrom-Json
           if ($result.commit -cne $env:BROWS_REGRESSION_COMMIT -or -not $result.clientPackageChecksComplete) { throw 'Pinned package acceptance mismatch' }
           if (@($result.package.launches | Where-Object { -not $_.processResourcesReleased }).Count -ne 0) { throw 'Owned process resources were not released' }
+          if (@($result.package.launches | Where-Object { -not $_.writeAccessReady.canOpen }).Count -ne 0) { throw 'Installed image was not ready for replacement' }
       - name: Preserve outcomes and native write-access probes
         if: always()
         uses: actions/upload-artifact@v4

@@ -45,6 +45,25 @@ function Get-ExecutableWriteProbe([string]$Path) {
     }
 }
 
+function Wait-ExecutableWriteAccess([string]$Path) {
+    $clock = [Diagnostics.Stopwatch]::StartNew()
+    $checks = 0
+    while ($true) {
+        $checks++
+        $probe = Get-ExecutableWriteProbe $Path
+        if ($probe.canOpen) {
+            return @{ canOpen = $true; waitMs = $clock.ElapsedMilliseconds; checks = $checks }
+        }
+        if ($probe.nativeError -notin @(32, 33)) {
+            throw "Installed executable is not writable (native error $($probe.nativeError))"
+        }
+        if ($clock.ElapsedMilliseconds -ge 5000) {
+            throw "Installed executable remained locked after normal exit (native error $($probe.nativeError))"
+        }
+        Start-Sleep -Milliseconds 50
+    }
+}
+
 function Test-InstalledLaunch([string]$Executable, [int]$Round) {
     $launch = [ordered]@{
         round = $Round
@@ -58,6 +77,7 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
         processResourcesReleased = $false
         writeAccessBeforeDispose = $null
         writeAccessAfterDispose = $null
+        writeAccessReady = $null
     }
     $launches.Add($launch)
     $process = $null
@@ -99,6 +119,9 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
                 $launch.processResourcesReleased = $true
             }
             $launch.writeAccessAfterDispose = Get-ExecutableWriteProbe $Executable
+            # A signalled process is not proof that its image is replaceable.
+            # Wait on the actual file-sharing condition, never retry an installer.
+            $launch.writeAccessReady = Wait-ExecutableWriteAccess $Executable
         }
     }
 }
