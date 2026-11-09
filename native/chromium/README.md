@@ -36,7 +36,9 @@ different TLS/HTTP2 stack.
    must return the configured platform through native getters in classic/module
    Dedicated, Shared and Service Worker first scripts, and clear the override
    without changing the getter object. Only this gate can report
-   `nativeAcceptancePassed: true`.
+   `nativeAcceptancePassed: true`, after the additional
+   [native lifecycle gate](../../docs/native-worker-lifecycle.md) also passes
+   reload, stop/wake, update, clean process reopen and a fresh-profile host control.
 
 Every gate keeps `complete: false`. Runtime trust/update/signing integration,
 actual Windows app admission and full stop/wake/update acceptance remain separate
@@ -78,6 +80,17 @@ artifact explains why. A skipped build is not a successful native build.
 Source checkout uses process-scoped Git settings for LF bytes and long paths;
 the inherited settings are restored when the driver ends. The patch itself also
 has an LF checkout attribute, so its pinned digest is portable across Git hosts.
+Python and Node are resolved to single executable paths and their versions are
+executed before source checkout. CI checks this on Windows before any large build.
+
+After compilation, GN's `runtime_deps` list stages only the isolated distribution,
+with a generated third-party license file, build args, source pin and patch. Every
+file has a size and SHA-256 entry. Both native gates run from that staged
+distribution; integrity is checked again afterwards. CI may preserve this
+`experimental-headless-test-runtime` artifact for seven days, including when a
+native gate fails, so follow-up acceptance need not recompile the kernel. Its
+presence proves neither native acceptance nor application admission; read the
+separate build and acceptance reports. It is unsigned and is not a product update.
 
 On disposable GitHub-hosted Windows runners, CI may supply
 `-PrepareHostedSdk` to the build driver. If the SDK is the only missing

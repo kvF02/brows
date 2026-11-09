@@ -5,13 +5,15 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'Windows x64 build host required' }
-$python = (Get-Command python -CommandType Application).Source
-$node = (Get-Command node -CommandType Application).Source
 $manifest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'source-manifest.json') -Raw | ConvertFrom-Json
 $reportPath = [IO.Path]::GetFullPath($Report)
 $root = [IO.Path]::GetFullPath($BuildRoot)
 if ($root -match '\s' -or (Test-Path -LiteralPath $root)) { throw 'Use a new build root without spaces' }
 $result = [ordered]@{ schemaVersion = 1; sourceRevision = $manifest.upstream.revision; stage = 'preflight'; compiled = $false; nativeAcceptancePassed = $false; runtimeAdmitted = $false; complete = $false; failure = $null }
+$result.nativeFirstScriptsPassed = $false
+$result.nativeLifecyclePassed = $false
+$result.runtimeBundleReady = $false
+$bundle = $null
 $oldPath = $env:PATH
 $oldToolchain = $env:DEPOT_TOOLS_WIN_TOOLCHAIN
 $oldUpdate = $env:DEPOT_TOOLS_UPDATE
@@ -31,6 +33,14 @@ function Assert-Exit([string]$Stage) {
 }
 
 try {
+    $result.stage = 'tool-resolution'
+    . (Join-Path $PSScriptRoot 'windows-tools.ps1')
+    $tools = Resolve-NativeBuildTools
+    $python = $tools.python
+    $node = $tools.node
+    $result.pythonVersion = $tools.pythonVersion
+    $result.nodeVersion = $tools.nodeVersion
+    $result.stage = 'preflight'
     if ($PrepareHostedSdk) {
         & (Join-Path $PSScriptRoot 'prepare-hosted-windows.ps1') -Report "$reportPath.sdk.json"
         $setup = Get-Content -LiteralPath "$reportPath.sdk.json" -Raw | ConvertFrom-Json
@@ -77,7 +87,13 @@ try {
         Push-Location $src
         try {
             $result.stage = 'generate'
-            & (Join-Path $depot 'gn.bat') gen out/BrowsNative '--args=is_debug=false is_component_build=false symbol_level=0 blink_symbol_level=0 v8_symbol_level=0 target_cpu="x64" use_remoteexec=false'
+            $gnArgs = 'is_debug=false is_component_build=false symbol_level=0 blink_symbol_level=0 v8_symbol_level=0 target_cpu="x64" use_remoteexec=false'
+            $result.gnArgs = $gnArgs
+            $outDirectory = Join-Path $src 'out/BrowsNative'
+            [IO.Directory]::CreateDirectory($outDirectory) | Out-Null
+            # A real args.gn file avoids PowerShell/batch quote transformations.
+            [IO.File]::WriteAllText((Join-Path $outDirectory 'args.gn'), "$gnArgs`n", [Text.UTF8Encoding]::new($false))
+            & (Join-Path $depot 'gn.bat') gen out/BrowsNative
             Assert-Exit 'GN generation'
             $result.stage = 'compile'
             & (Join-Path $depot 'autoninja.bat') -C out/BrowsNative headless_shell
@@ -87,11 +103,30 @@ try {
             $digest = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
             $result.compiled = $true
             $result.testExecutableSha256 = $digest
+            $result.stage = 'runtime-bundle'
+            & (Join-Path $depot 'autoninja.bat') -C out/BrowsNative generate_headless_shell_license_file
+            Assert-Exit 'runtime license generation'
+            $dependencies = & (Join-Path $depot 'gn.bat') desc out/BrowsNative //headless:headless_shell runtime_deps
+            Assert-Exit 'runtime dependency inventory'
+            $dependencies | Set-Content -LiteralPath "$reportPath.runtime-deps.txt" -Encoding utf8
+            $bundle = Join-Path $root 'test-runtime'
+            & $python (Join-Path $PSScriptRoot 'stage_runtime.py') --out (Join-Path $src 'out/BrowsNative') --deps "$reportPath.runtime-deps.txt" --dest $bundle --sha256 $digest
+            Assert-Exit 'runtime dependency staging'
+            $result.runtimeBundleReady = $true
+            $binary = Join-Path $bundle 'headless_shell.exe'
             $result.stage = 'native-acceptance'
             & $node (Join-Path $PSScriptRoot 'platform-acceptance.mjs') --browser $binary --sha256 $digest --expect native --report "$reportPath.acceptance.json"
             Assert-Exit 'native Worker platform acceptance'
             $evidence = Get-Content -LiteralPath "$reportPath.acceptance.json" -Raw | ConvertFrom-Json
             if (-not $evidence.assertionsPassed -or -not $evidence.nativeWorkerPlatform) { throw 'Native acceptance did not establish the requested capability' }
+            $result.nativeFirstScriptsPassed = $true
+            $result.stage = 'native-lifecycle'
+            $lifecycle = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../tools/native-worker-lifecycle.mjs'))
+            & $node $lifecycle --browser $binary --sha256 $digest --expect native --report "$reportPath.lifecycle.json"
+            Assert-Exit 'native Worker lifecycle acceptance'
+            $lifecycleEvidence = Get-Content -LiteralPath "$reportPath.lifecycle.json" -Raw | ConvertFrom-Json
+            if (-not $lifecycleEvidence.assertionsPassed -or -not $lifecycleEvidence.nativeLifecyclePassed) { throw 'Native lifecycle acceptance did not establish the requested capability' }
+            $result.nativeLifecyclePassed = $true
             $result.nativeAcceptancePassed = $true
             $result.stage = 'completed-test-build'
         } finally { Pop-Location }
@@ -99,6 +134,21 @@ try {
 } catch {
     $result.failure = $_.Exception.Message
 } finally {
+    if ($result.runtimeBundleReady) {
+        try {
+            & $python (Join-Path $PSScriptRoot 'stage_runtime.py') --verify --dest $bundle --sha256 $digest
+            Assert-Exit 'runtime bundle integrity after browser tests'
+        } catch {
+            $result.runtimeBundleReady = $false
+            $result.nativeAcceptancePassed = $false
+            $result.bundleFailure = $_.Exception.Message
+            if (-not $result.failure) { $result.failure = $result.bundleFailure; $result.stage = 'runtime-bundle-integrity' }
+        }
+        if ($result.runtimeBundleReady -and $env:GITHUB_OUTPUT) {
+            'test_runtime_ready=true' | Add-Content -LiteralPath $env:GITHUB_OUTPUT
+            "test_runtime_directory=$bundle" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
+        }
+    }
     foreach ($name in $oldGitEnvironment.Keys) {
         [Environment]::SetEnvironmentVariable($name, $oldGitEnvironment[$name], 'Process')
     }
