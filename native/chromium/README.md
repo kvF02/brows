@@ -73,8 +73,17 @@ On an admitted host with Python, Git, Node and the Python requirements installed
 
 Use a new root without spaces. The driver creates a pinned checkout and leaves
 it available for diagnosis; a large source/build tree is expected. The CI build
-job is skipped when prerequisites are not observed, and the preflight artifact
-explains why. A skipped build is not a successful native build.
+job is skipped when prerequisites cannot be established, and the preflight
+artifact explains why. A skipped build is not a successful native build.
+
+On disposable GitHub-hosted Windows runners, CI may supply
+`-PrepareHostedSdk` to the build driver. If the SDK is the only missing
+prerequisite, this separately invoked setup downloads the fixed Microsoft SDK
+installer recorded in the manifest, checks its SHA-256 and valid Microsoft
+signature, installs only the desktop SDK, and repeats the read-only preflight
+on the actual build host. Both inventories and the installer result are saved.
+It does not run on personal or self-hosted computers, install Visual Studio,
+remove existing software, or turn a failed preflight into native acceptance.
 
 An executable produced by a build can also be checked explicitly:
 

@@ -39,6 +39,7 @@ jobs:
     timeout-minutes: 5
     outputs:
       ready: ${{ steps.preflight.outputs.ready }}
+      can_prepare_sdk: ${{ steps.preflight.outputs.can_prepare_sdk }}
       drive: ${{ steps.preflight.outputs.drive }}
     steps:
       - uses: actions/checkout@v4
@@ -56,7 +57,7 @@ jobs:
     name: Native Chromium build and runtime proof
     needs: [source, windows-preflight, stock-control]
     if: >-
-      needs.windows-preflight.outputs.ready == 'true' &&
+      (needs.windows-preflight.outputs.ready == 'true' || needs.windows-preflight.outputs.can_prepare_sdk == 'true') &&
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: windows-latest
     timeout-minutes: 240
@@ -75,7 +76,7 @@ jobs:
           BUILD_DRIVE: ${{ needs.windows-preflight.outputs.drive }}
         run: |
           if ($env:BUILD_DRIVE -notmatch '^[A-Z]:$') { throw 'Invalid build drive' }
-          ./native/chromium/build-windows.ps1 -BuildRoot "$($env:BUILD_DRIVE)\brows-native-source" -Report target/native-build.json
+          ./native/chromium/build-windows.ps1 -BuildRoot "$($env:BUILD_DRIVE)\brows-native-source" -Report target/native-build.json -PrepareHostedSdk
       - uses: actions/upload-artifact@v4
         if: always()
         with:

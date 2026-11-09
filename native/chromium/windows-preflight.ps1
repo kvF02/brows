@@ -76,6 +76,8 @@ try {
     if ($env:GITHUB_OUTPUT) {
         $readyText = ([string]$result.readyForBuild).ToLowerInvariant()
         "ready=$readyText" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
+        $canPrepareSdk = -not $result.failure -and $result.blockers.Count -eq 1 -and $result.blockers[0] -eq 'required-windows-sdk-not-observed'
+        "can_prepare_sdk=$(([string]$canPrepareSdk).ToLowerInvariant())" | Add-Content -LiteralPath $env:GITHUB_OUTPUT
         if ($result.selectedBuildDrive) { "drive=$($result.selectedBuildDrive)" | Add-Content -LiteralPath $env:GITHUB_OUTPUT }
     }
 }

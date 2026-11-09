@@ -1,6 +1,7 @@
 param(
     [Parameter(Mandatory)][string]$BuildRoot,
-    [Parameter(Mandatory)][string]$Report
+    [Parameter(Mandatory)][string]$Report,
+    [switch]$PrepareHostedSdk
 )
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'Windows x64 build host required' }
@@ -20,6 +21,11 @@ function Assert-Exit([string]$Stage) {
 }
 
 try {
+    if ($PrepareHostedSdk) {
+        & (Join-Path $PSScriptRoot 'prepare-hosted-windows.ps1') -Report "$reportPath.sdk.json"
+        $setup = Get-Content -LiteralPath "$reportPath.sdk.json" -Raw | ConvertFrom-Json
+        if (-not $setup.readyForBuild) { throw 'Hosted SDK preparation did not establish build prerequisites' }
+    }
     & (Join-Path $PSScriptRoot 'windows-preflight.ps1') -Report "$reportPath.preflight.json" -RequireReady
     $preflight = Get-Content -LiteralPath "$reportPath.preflight.json" -Raw | ConvertFrom-Json
     if (-not $preflight.readyForBuild) { throw 'Build prerequisites were not observed' }
