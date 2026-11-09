@@ -185,12 +185,16 @@ impl ControlFixture {
                 .map_or((route, false), |index| (index, true));
             if let Ok(index) = index.parse::<usize>() {
                 if index < 11 && (!heartbeat || headers.starts_with("POST ")) {
-                    let (kind, content) = if heartbeat {
-                        let key = if body == b"canvas-changed" {
+                    let key = if heartbeat {
+                        if body == b"canvas-changed" {
                             format!("/soak/{index}/canvas-changed")
                         } else {
                             format!("/soak/{index}/heartbeat")
-                        };
+                        }
+                    } else {
+                        format!("/soak/{index}/document")
+                    };
+                    {
                         let mut proofs = output.lock().unwrap();
                         if let Some((_, _, count)) =
                             proofs.iter_mut().find(|(path, _, _)| path == &key)
@@ -199,6 +203,8 @@ impl ControlFixture {
                         } else {
                             proofs.push((key, String::new(), serde_json::json!(1)));
                         }
+                    }
+                    let (kind, content) = if heartbeat {
                         ("text/plain", "ok")
                     } else {
                         (

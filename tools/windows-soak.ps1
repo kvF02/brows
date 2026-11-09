@@ -182,6 +182,10 @@ try {
     $result.assertionsPassed = $true
 } catch {
     $result.failure = @{ stage = $stage; message = $_.Exception.Message }
+    $startup = Join-Path $root 'startup-heartbeats.json'
+    if (Test-Path -LiteralPath $startup) {
+        $result.startupHeartbeats = Get-Content -LiteralPath $startup -Raw | ConvertFrom-Json
+    }
     foreach ($name in @('exercise.stdout.txt', 'exercise.stderr.txt', 'reopen.stdout.txt', 'reopen.stderr.txt')) {
         $log = Join-Path $root $name
         if (Test-Path -LiteralPath $log) { Get-Content -LiteralPath $log -Tail 25 | Write-Output }

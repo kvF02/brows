@@ -260,12 +260,56 @@ impl Wire {
     fn call(&self, method: &str, params: Value, session: Option<&str>) -> PortResult<Value> {
         self.finish(self.begin(method, params, session)?)
     }
-    fn start_navigation(&self, session: &str, url: &str) -> PortResult<()> {
-        let tree = self.call("Page.getFrameTree", json!({}), Some(session))?;
+    fn prepare_startup_document(&self, session: &str) -> PortResult<String> {
+        // A policy-ready target and its frame tree can exist before its initial
+        // renderer document is ready. Complete an owned, network-free document
+        // first; never use the external site's response as this barrier.
+        let deadline = Instant::now() + TIMEOUT;
+        let tree = self.finish_until(
+            self.begin("Page.getFrameTree", json!({}), Some(session))?,
+            deadline,
+        )?;
         let frame = tree["frameTree"]["frame"]["id"]
             .as_str()
             .filter(|id| !id.is_empty() && id.len() <= 128)
             .ok_or_else(|| internal("browser omitted the startup frame identity"))?;
+        let result = self.finish_until(
+            self.begin(
+                "Page.navigate",
+                json!({"url":"about:blank","frameId":frame,"transitionType":"reload"}),
+                Some(session),
+            )?,
+            deadline,
+        )?;
+        if !navigation_reply_acknowledged(&result, frame)
+            || !result["errorText"].is_null()
+            || result["isDownload"] == true
+        {
+            return Err(internal(
+                "browser could not initialize the startup document",
+            ));
+        }
+        // Fixed internal read in our blank document, after the policy is
+        // installed and the target is resumed. No caller-supplied expression.
+        let ready = self.finish_until(
+            self.begin(
+                "Runtime.evaluate",
+                json!({
+                    "expression":"new Promise(resolve => { const ready = () => resolve(location.href === 'about:blank' && document.readyState === 'complete'); if (document.readyState === 'complete') ready(); else addEventListener('load', ready, {once:true}); })",
+                    "awaitPromise":true,"returnByValue":true,"silent":true,"timeout":1500
+                }),
+                Some(session),
+            )?,
+            deadline,
+        )?;
+        if ready.get("exceptionDetails").is_some() || ready["result"]["value"] != true {
+            return Err(internal("browser startup document is not ready"));
+        }
+        #[cfg(any(test, debug_assertions))]
+        self.trace("document-ready", "blank", Some(session));
+        Ok(frame.to_owned())
+    }
+    fn start_navigation(&self, session: &str, frame: &str, url: &str) -> PortResult<()> {
         {
             let mut navigation = self
                 .navigation
@@ -871,8 +915,11 @@ impl Controller {
                 .as_str()
                 .ok_or_else(|| internal("browser omitted target identity"))?;
             let target = controller.await_target(id)?;
+            let frame = controller.wire.prepare_startup_document(&target.session)?;
             if url != "about:blank" {
-                controller.wire.start_navigation(&target.session, &url)?;
+                controller
+                    .wire
+                    .start_navigation(&target.session, &frame, &url)?;
             }
         }
         Ok(controller)
@@ -1732,6 +1779,30 @@ mod tests {
             "the document response is still held"
         );
         assert!(browser.controller.try_wait().unwrap().is_none());
+        let page = browser
+            .controller
+            .targets
+            .0
+            .lock()
+            .unwrap()
+            .snapshot()
+            .into_iter()
+            .find(|target| target.kind == "page")
+            .unwrap();
+        // This command is handled by the browser. Renderer-side evaluation may
+        // legitimately be suspended until the held navigation commits.
+        let history = browser
+            .controller
+            .wire
+            .call("Page.getNavigationHistory", json!({}), Some(&page.session))
+            .unwrap();
+        assert_eq!(
+            history["entries"].as_array().unwrap().len(),
+            1,
+            "startup initialization must not introduce an extra history entry"
+        );
+        assert_eq!(history["currentIndex"], 0);
+        assert_eq!(history["entries"][0]["url"], "about:blank");
         fixture.release_document();
         let proofs = fixture.wait_proofs("/held/");
         assert_eq!(
