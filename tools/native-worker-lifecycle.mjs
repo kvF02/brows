@@ -117,7 +117,7 @@ navigator.serviceWorker.register(start+'module-sw/sw.mjs',{scope:start+'module-s
   if (path === 'first.mjs' && kinds.includes(kind)) content = `${capture(kind)}export{proof};`;
   if (path === 'module.mjs') content = `import './first.mjs?kind=module_worker';setInterval(()=>{},1000);`;
   if (path === 'module-shared.mjs') content = `import './first.mjs?kind=module_shared_worker';onconnect=e=>e.ports[0].start();`;
-  const lifecycle = `addEventListener('install',e=>e.waitUntil(proof.then(()=>skipWaiting())));addEventListener('activate',e=>e.waitUntil(clients.claim()));`;
+  const lifecycle = `addEventListener('install',e=>e.waitUntil(proof.then(()=>skipWaiting())));addEventListener('activate',e=>e.waitUntil(clients.claim()));addEventListener('message',e=>e.waitUntil(proof));`;
   if (path === 'classic-sw/sw.js') content = `${capture('service_worker')}${lifecycle}`;
   if (path === 'module-sw/sw.mjs') content = `import{proof}from '../first.mjs?kind=module_service_worker&revision=${revision}';${lifecycle}`;
   if (content === undefined) response.writeHead(404).end(); else response.end(content);
@@ -250,7 +250,10 @@ try {
   const beforeWake = serviceKinds.map(kind => activeVersion(kind));
   for (const item of beforeWake) await pipe.call('ServiceWorker.stopWorker', { versionId: item.versionId }, pageSession);
   await waitFor(() => beforeWake.every(item => versions.get(item.versionId)?.runningStatus === 'stopped'), 'both Service Workers stopped');
-  for (const kind of serviceKinds) await pipe.call('ServiceWorker.startWorker', { scopeURL: scope(kind) }, pageSession);
+  // Wake through real extendable message events. Merely starting a Worker via
+  // CDP does not keep an asynchronous first-script fetch alive.
+  const wake = await pipe.call('Runtime.evaluate', { expression: `(async()=>{const registrations=(await navigator.serviceWorker.getRegistrations()).filter(r=>r.scope.startsWith(location.origin+${JSON.stringify(prefix)}));if(registrations.length!==2||registrations.some(r=>!r.active))throw new Error('owned registrations unavailable');for(const r of registrations)r.active.postMessage('owned-native-wake');return registrations.length})()`, awaitPromise: true, returnByValue: true }, pageSession);
+  assert(!wake.exceptionDetails, 'owned wake message dispatch failed'); assert.equal(wake.result.value, 2);
   await checkpoint('stopped-service-worker-first-scripts-after-wake', start, serviceKinds, 1);
   for (let i = 0; i < serviceKinds.length; i++) assert.notEqual(samplesSince(start, serviceKinds[i])[0].boot, initialServiceBoots[i]);
 
@@ -276,6 +279,8 @@ try {
   report.assertionsPassed = true; report.nativeLifecyclePassed = options.expect === 'native';
 } catch (error) {
   report.failure = error.message; report.failedPhase = phase;
+  report.ownedWorkerState = [...targets.values()].filter(target => target.url.startsWith(`${origin}${prefix}`)).map(target => ({ kind: target.kind, ready: target.ready }));
+  report.serviceWorkerState = serviceKinds.map(kind => { const item = activeVersion(kind); return { kind, status: item?.status ?? 'missing', runningStatus: item?.runningStatus ?? 'missing' }; });
 } finally {
   closing = true; pipe?.close(new Error('owned lifecycle fixture cleanup'));
   try { await killOwned(child); } finally {
