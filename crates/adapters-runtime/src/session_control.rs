@@ -30,10 +30,12 @@ const POLICY_WORKERS: usize = 8;
 const TARGET_EXECUTION_ENDED: &str = "browser target execution ended";
 #[derive(Debug)]
 struct Wire {
-    #[cfg(test)]
+    #[cfg(any(test, debug_assertions))]
     trace: Mutex<std::collections::VecDeque<String>>,
-    #[cfg(test)]
+    #[cfg(any(test, debug_assertions))]
     trace_started: Instant,
+    #[cfg(any(test, debug_assertions))]
+    panic_traced: AtomicBool,
     process: Arc<win_pipe::Process>,
     next: AtomicU64,
     closing: AtomicBool,
@@ -70,7 +72,7 @@ impl Drop for PendingReply {
     }
 }
 impl Wire {
-    #[cfg(test)]
+    #[cfg(any(test, debug_assertions))]
     fn trace(&self, phase: &str, method: &str, session: Option<&str>) {
         use std::hash::{Hash, Hasher};
         let mut hash = std::collections::hash_map::DefaultHasher::new();
@@ -86,7 +88,7 @@ impl Wire {
             ));
         }
     }
-    #[cfg(test)]
+    #[cfg(any(test, debug_assertions))]
     fn trace_failure(&self) {
         if let Ok(trace) = self.trace.lock() {
             eprintln!(
@@ -101,7 +103,7 @@ impl Wire {
         );
     }
     fn transport_closed(&self) {
-        #[cfg(test)]
+        #[cfg(any(test, debug_assertions))]
         self.trace("transport", "closed", None);
         if !self.orderly_shutdown.load(Ordering::Acquire) {
             self.fail();
@@ -166,7 +168,7 @@ impl Wire {
             self.fail();
             return Err(internal("session control writer unavailable"));
         }
-        #[cfg(test)]
+        #[cfg(any(test, debug_assertions))]
         self.trace("send", &format!("{id} {method}"), session);
         Ok(PendingReply {
             id,
@@ -187,7 +189,7 @@ impl Wire {
     }
     fn reply_error(&self, reply: &PendingReply, error: mpsc::RecvTimeoutError) -> PortError {
         let method = &reply.method;
-        #[cfg(test)]
+        #[cfg(any(test, debug_assertions))]
         self.trace_failure();
         let failure = self
             .policy_failure
@@ -297,7 +299,7 @@ impl Wire {
                         if !navigation_reply_acknowledged(&result, frame) {
                             return Err(internal("browser omitted the requested navigation frame"));
                         }
-                        #[cfg(test)]
+                        #[cfg(any(test, debug_assertions))]
                         if let Some(code) = super::navigation::document_result_code(&result) {
                             eprintln!("startup navigation document result: {code}");
                         }
@@ -375,6 +377,48 @@ pub(super) struct Controller {
     threads: Vec<JoinHandle<()>>,
 }
 impl Controller {
+    #[cfg(any(test, debug_assertions))]
+    fn trace_failure_state(&self, expected_url: Option<&str>) {
+        // A production-composition test uses this crate as a dependency, where
+        // cfg(test) is false. Keep evidence in debug builds without enabling
+        // diagnostics or additional commands in the release application.
+        if self.wire.panic_traced.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.wire.trace_failure();
+        let pages = self
+            .targets
+            .0
+            .lock()
+            .map(|state| state.snapshot())
+            .unwrap_or_default();
+        let deadline = Instant::now() + Duration::from_millis(750);
+        for target in pages
+            .into_iter()
+            .filter(|target| target.kind == "page")
+            .take(2)
+        {
+            if Instant::now() >= deadline {
+                break;
+            }
+            let state = self
+                .wire
+                .begin("Page.getFrameTree", json!({}), Some(&target.session))
+                .and_then(|reply| self.wire.finish_until(reply, deadline));
+            if let Ok(state) = state {
+                let frame = &state["frameTree"]["frame"];
+                eprintln!(
+                    "failed page state: kind={} requested={:?} unreachable={}",
+                    super::navigation::document_url_kind(frame["url"].as_str().unwrap_or("")),
+                    expected_url.map(|url| frame["url"].as_str() == Some(url)),
+                    frame["unreachableUrl"]
+                        .as_str()
+                        .is_some_and(|url| !url.is_empty())
+                );
+            }
+        }
+    }
+
     pub(super) fn start(
         executable: &Path,
         args: &[OsString],
@@ -386,10 +430,12 @@ impl Controller {
         let (writer, write_receive) = mpsc::sync_channel::<Vec<u8>>(64);
         let (events, event_receive) = mpsc::sync_channel::<Value>(128);
         let wire = Arc::new(Wire {
-            #[cfg(test)]
+            #[cfg(any(test, debug_assertions))]
             trace: Mutex::new(std::collections::VecDeque::new()),
-            #[cfg(test)]
+            #[cfg(any(test, debug_assertions))]
             trace_started: Instant::now(),
+            #[cfg(any(test, debug_assertions))]
+            panic_traced: AtomicBool::new(false),
             process: Arc::new(process),
             next: AtomicU64::new(1),
             closing: AtomicBool::new(false),
@@ -434,7 +480,7 @@ impl Controller {
                             Err(_) => break 'read,
                         };
                         frame.clear();
-                        #[cfg(test)]
+                        #[cfg(any(test, debug_assertions))]
                         if value["method"] == "Page.frameNavigated" {
                             w.trace(
                                 "document-committed",
@@ -445,9 +491,9 @@ impl Controller {
                             );
                         }
                         if let Some(id) = value["id"].as_u64() {
-                            #[cfg(test)]
+                            #[cfg(any(test, debug_assertions))]
                             w.trace("reply", &id.to_string(), value["sessionId"].as_str());
-                            #[cfg(test)]
+                            #[cfg(any(test, debug_assertions))]
                             if let Some(code) =
                                 super::navigation::document_result_code(&value["result"])
                             {
@@ -461,7 +507,7 @@ impl Controller {
                                 }
                             }
                         } else if value["method"] == "Page.frameStartedNavigating" {
-                            #[cfg(test)]
+                            #[cfg(any(test, debug_assertions))]
                             w.trace(
                                 "document-started",
                                 super::navigation::document_url_kind(
@@ -479,7 +525,7 @@ impl Controller {
                                 }
                             }
                         } else if value["method"] == "Debugger.paused" {
-                            #[cfg(test)]
+                            #[cfg(any(test, debug_assertions))]
                             w.trace("event", "Debugger.paused", value["sessionId"].as_str());
                             if let Some(session) = value["sessionId"].as_str() {
                                 if let Ok(mut paused) = w.paused.lock() {
@@ -500,7 +546,7 @@ impl Controller {
                                     | "Inspector.targetReloadedAfterCrash"
                             )
                         ) {
-                            #[cfg(test)]
+                            #[cfg(any(test, debug_assertions))]
                             w.trace(
                                 "event",
                                 value["method"].as_str().unwrap_or(""),
@@ -560,7 +606,7 @@ impl Controller {
                         continue;
                     }
                     let session = &job.target.session;
-                    #[cfg(test)]
+                    #[cfg(any(test, debug_assertions))]
                     w.trace("policy-begin", &job.target.kind, Some(session));
                     let result: PortResult<()> = (|| {
                         if !job.extension {
@@ -592,7 +638,7 @@ impl Controller {
                         Ok(())
                     })();
                     if let Err(error) = result {
-                        #[cfg(test)]
+                        #[cfg(any(test, debug_assertions))]
                         w.trace("policy-error", &job.target.kind, Some(session));
                         let Ok(mut state) = t.0.lock() else {
                             w.fail();
@@ -636,7 +682,7 @@ impl Controller {
                         break;
                     };
                     if !job.extension && state.ready(&job) {
-                        #[cfg(test)]
+                        #[cfg(any(test, debug_assertions))]
                         w.trace("policy-ready", &job.target.kind, Some(session));
                         t.1.notify_all();
                     }
@@ -866,6 +912,10 @@ impl Controller {
         self.wire.process.id()
     }
     pub(super) fn kill(&self) -> std::io::Result<()> {
+        #[cfg(any(test, debug_assertions))]
+        if std::thread::panicking() {
+            self.trace_failure_state(None);
+        }
         self.wire.fail();
         Ok(())
     }
@@ -1069,6 +1119,10 @@ fn reply_failure_message(
 }
 impl Drop for Controller {
     fn drop(&mut self) {
+        #[cfg(any(test, debug_assertions))]
+        if std::thread::panicking() {
+            self.trace_failure_state(None);
+        }
         self.wire.fail();
         for thread in self.threads.drain(..) {
             let _ = thread.join();
@@ -1306,42 +1360,7 @@ mod tests {
     impl Drop for AcceptanceBrowser {
         fn drop(&mut self) {
             if std::thread::panicking() {
-                self.controller.wire.trace_failure();
-                let pages = self
-                    .controller
-                    .targets
-                    .0
-                    .lock()
-                    .map(|state| state.snapshot())
-                    .unwrap_or_default();
-                let deadline = Instant::now() + Duration::from_millis(750);
-                for target in pages
-                    .into_iter()
-                    .filter(|target| target.kind == "page")
-                    .take(2)
-                {
-                    if Instant::now() >= deadline {
-                        break;
-                    }
-                    let state = self
-                        .controller
-                        .wire
-                        .begin("Page.getFrameTree", json!({}), Some(&target.session))
-                        .and_then(|reply| self.controller.wire.finish_until(reply, deadline));
-                    if let Ok(state) = state {
-                        let frame = &state["frameTree"]["frame"];
-                        eprintln!(
-                            "failed fixture page: kind={} requested={} unreachable={}",
-                            super::super::navigation::document_url_kind(
-                                frame["url"].as_str().unwrap_or("")
-                            ),
-                            frame["url"].as_str() == Some(self.startup_url.as_str()),
-                            frame["unreachableUrl"]
-                                .as_str()
-                                .is_some_and(|url| !url.is_empty())
-                        );
-                    }
-                }
+                self.controller.trace_failure_state(Some(&self.startup_url));
             }
             let _ = self.controller.kill();
             let _ = self.controller.wait();

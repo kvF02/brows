@@ -1,7 +1,7 @@
 //! Correlate first-navigation start, independently of the website's response.
 use url::Url;
 
-#[cfg(test)]
+#[cfg(any(test, all(windows, debug_assertions)))]
 pub(super) fn document_result_code(result: &serde_json::Value) -> Option<&str> {
     result["errorText"].as_str().filter(|code| {
         code.len() <= 64
@@ -13,7 +13,7 @@ pub(super) fn document_result_code(result: &serde_json::Value) -> Option<&str> {
     })
 }
 
-#[cfg(test)]
+#[cfg(any(test, all(windows, debug_assertions)))]
 pub(super) fn document_url_kind(url: &str) -> &'static str {
     if url == "about:blank" {
         "blank"
