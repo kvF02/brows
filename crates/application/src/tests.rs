@@ -495,17 +495,19 @@ fn compiler_passes_the_whole_profile_to_fingerprint_runtime() {
         plan.preferences.accept_languages,
         profile.locale.accept_languages
     );
-    let dir = plan
+    let policy = plan
         .arguments
         .iter()
         .find_map(|arg| match arg {
-            LaunchArgument::LoadExtension(dir) => Some(dir),
+            LaunchArgument::SessionFingerprint(policy) => Some(policy),
             _ => None,
         })
         .unwrap();
-    assert!(std::fs::read_to_string(dir.join("content.js"))
-        .unwrap()
-        .contains(r#""languages":["ja-JP","ja"]"#));
+    assert_eq!(policy.languages, profile.locale.accept_languages);
+    assert!(!plan
+        .arguments
+        .iter()
+        .any(|arg| matches!(arg, LaunchArgument::LoadExtension(_))));
     for support in [
         brows_domain::FingerprintSupport::Unverified,
         brows_domain::FingerprintSupport::Unsupported,

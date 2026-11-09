@@ -42,7 +42,15 @@
       ['deviceMemory', persona.device_memory], ['maxTouchPoints', persona.touch_points],
       ['platform', persona.platform === 'windows' ? 'Win32'
         : persona.platform === 'mac' ? 'MacIntel' : 'Linux x86_64'],
-    ]) overrideGetter(navigatorPrototype, name, value);
+    ]) {
+      // Native Emulation owns CPU/languages/touch and page platform. Chromium's
+      // Worker NavigatorBase::platform still returns a fixed host value; retain
+      // an explicitly scoped fallback only when that value differs.
+      const workerPlatformFallback = name === 'platform' && typeof document === 'undefined'
+        && navigator.platform !== value;
+      if (persona.native_navigator && name !== 'deviceMemory' && !workerPlatformFallback) continue;
+      overrideGetter(navigatorPrototype, name, value);
+    }
   }
   // devicePixelRatio stays native: the launch scale flag and browser zoom own it.
   // Do not fabricate chrome.runtime or replace WebRTC constructors.

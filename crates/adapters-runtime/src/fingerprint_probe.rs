@@ -70,7 +70,7 @@ pub(super) struct Observation {
 
 pub(super) fn run(build: &BrowserBuild, profile_root: &Path) -> PortResult<Observation> {
     #[cfg(windows)]
-    if build.id.as_str().starts_with("managed-") {
+    if build.capabilities.supports_devtools_pipe || build.id.as_str().starts_with("managed-") {
         return run_private(build, profile_root);
     }
     let deadline = Instant::now() + PROCESS_TIMEOUT;
@@ -215,7 +215,10 @@ fn run_private(build: &BrowserBuild, profile_root: &Path) -> PortResult<Observat
         let server = ProbeServer::start(&directory.nonce)?;
         let user_data = directory.path.join("userdata");
         fs::create_dir(&user_data).map_err(|_| internal("cannot create private probe data"))?;
-        let policy = brows_application::memory::fingerprint_probe_policy(&build.version)?;
+        let mut policy = brows_application::memory::fingerprint_probe_policy(&build.version)?;
+        // Exercise enabled native touch rather than requiring the host to be
+        // physically non-touch. Each real profile still verifies its own value.
+        policy.persona.touch_points = 5;
         let mut args: Vec<std::ffi::OsString> = [
             "--headless=new",
             "--no-startup-window",

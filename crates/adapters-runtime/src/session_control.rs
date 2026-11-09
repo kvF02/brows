@@ -260,7 +260,11 @@ impl Wire {
     fn call(&self, method: &str, params: Value, session: Option<&str>) -> PortResult<Value> {
         self.finish(self.begin(method, params, session)?)
     }
-    fn prepare_startup_document(&self, session: &str) -> PortResult<String> {
+    fn prepare_startup_document(
+        &self,
+        session: &str,
+        policy: &SessionFingerprintConfig,
+    ) -> PortResult<String> {
         // A policy-ready target and its frame tree can exist before its initial
         // renderer document is ready. Complete an owned, network-free document
         // first; never use the external site's response as this barrier.
@@ -291,11 +295,12 @@ impl Wire {
         }
         // Fixed internal read in our blank document, after the policy is
         // installed and the target is resumed. No caller-supplied expression.
+        let native_check = native_navigator_check(policy);
         let ready = self.finish_until(
             self.begin(
                 "Runtime.evaluate",
                 json!({
-                    "expression":"new Promise(resolve => { const ready = () => resolve(location.href === 'about:blank' && document.readyState === 'complete'); if (document.readyState === 'complete') ready(); else addEventListener('load', ready, {once:true}); })",
+                    "expression":format!("new Promise(resolve => {{ const ready = () => resolve(location.href === 'about:blank' && document.readyState === 'complete' && {native_check}); if (document.readyState === 'complete') ready(); else addEventListener('load', ready, {{once:true}}); }})"),
                     "awaitPromise":true,"returnByValue":true,"silent":true,"timeout":1500
                 }),
                 Some(session),
@@ -303,7 +308,9 @@ impl Wire {
             deadline,
         )?;
         if ready.get("exceptionDetails").is_some() || ready["result"]["value"] != true {
-            return Err(internal("browser startup document is not ready"));
+            return Err(internal(
+                "browser startup document or native Navigator policy is not ready",
+            ));
         }
         #[cfg(any(test, debug_assertions))]
         self.trace("document-ready", "blank", Some(session));
@@ -915,7 +922,9 @@ impl Controller {
                 .as_str()
                 .ok_or_else(|| internal("browser omitted target identity"))?;
             let target = controller.await_target(id)?;
-            let frame = controller.wire.prepare_startup_document(&target.session)?;
+            let frame = controller
+                .wire
+                .prepare_startup_document(&target.session, &policy)?;
             if url != "about:blank" {
                 controller
                     .wire
@@ -1271,7 +1280,20 @@ fn configure(
     }
     wire.call("Emulation.setUserAgentOverride",json!({"userAgent":policy.user_agent,"acceptLanguage":policy.languages.join(","),"platform":platform_string,
   "userAgentMetadata":{"brands":[{"brand":"Chromium","version":major},{"brand":"Google Chrome","version":major}],"fullVersionList":[{"brand":"Chromium","version":actual},{"brand":"Google Chrome","version":actual}],"fullVersion":actual,"platform":platform,"platformVersion":platform_version,"architecture":"x86","bitness":"64","model":"","mobile":false,"wow64":false}}),Some(session))?;
+    wire.call(
+        "Emulation.setHardwareConcurrencyOverride",
+        json!({"hardwareConcurrency":policy.persona.hardware_concurrency}),
+        Some(session),
+    )?;
     let is_page = kind == "page" || kind == "iframe";
+    if is_page {
+        let points = policy.persona.touch_points;
+        let mut touch = json!({"enabled":points>0});
+        if points > 0 {
+            touch["maxTouchPoints"] = json!(points);
+        }
+        wire.call("Emulation.setTouchEmulationEnabled", touch, Some(session))?;
+    }
     if let Some(timezone) = &policy.timezone {
         let result = wire.call(
             "Emulation.setTimezoneOverride",
@@ -1289,11 +1311,8 @@ fn configure(
         }
     }
     {
-        let memory = policy.persona.device_memory.reported_f64();
-        let values = json!({"hardwareConcurrency":policy.persona.hardware_concurrency,"deviceMemory":memory,"languages":policy.languages,"language":policy.languages[0],"platform":platform_string});
-        let hardware_script=format!("(()=>{{const values={values};const p=Object.getPrototypeOf(navigator);for(const [key,value] of Object.entries(values)){{const d=Object.getOwnPropertyDescriptor(p,key);if(!d?.get&&key==='deviceMemory')continue;if(!d?.get||!d.configurable)throw new Error('Unsupported target property');const original=d.get;const reported=Array.isArray(value)?Object.freeze([...value]):value;Object.defineProperty(p,key,{{...d,get(){{original.call(this);return reported;}}}});}}return navigator.hardwareConcurrency===values.hardwareConcurrency&&(typeof navigator.deviceMemory==='undefined'||navigator.deviceMemory===values.deviceMemory);}})()");
-        let rendering_script = brows_application::render_session_fingerprint(policy, &actual)?;
-        let script = format!("{hardware_script};\n{rendering_script}");
+        let rendering = brows_application::render_session_fingerprint(policy, &actual)?;
+        let script = format!("{rendering}\n{}", native_navigator_check(policy));
         if is_page {
             wire.call("Page.enable", json!({}), Some(session))?;
             if kind == "page" {
@@ -1306,10 +1325,20 @@ fn configure(
             )?;
         }
         if !is_page && evaluate(wire, session, &script)? != true {
-            return Err(internal("target hardware policy did not apply"));
+            return Err(internal("target native Navigator policy did not apply"));
         }
     }
     Ok(())
+}
+fn native_navigator_check(policy: &SessionFingerprintConfig) -> String {
+    let platform = match policy.persona.platform {
+        PlatformKind::Windows => "Win32",
+        PlatformKind::MacOs => "MacIntel",
+        PlatformKind::Linux => "Linux x86_64",
+    };
+    let expected = json!({"cpu":policy.persona.hardware_concurrency,"platform":platform,
+        "languages":policy.languages,"touch":policy.persona.touch_points});
+    format!("(()=>{{const expected={expected};return navigator.hardwareConcurrency===expected.cpu&&navigator.platform===expected.platform&&navigator.language===expected.languages[0]&&JSON.stringify(Array.from(navigator.languages))===JSON.stringify(expected.languages)&&(typeof document==='undefined'||navigator.maxTouchPoints===expected.touch);}})()")
 }
 const OBSERVE:&str="(()=>({userAgent:navigator.userAgent,platform:navigator.platform,languages:Array.from(navigator.languages),hardwareConcurrency:navigator.hardwareConcurrency,deviceMemory:navigator.deviceMemory,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,clientHintsPlatform:navigator.userAgentData?.platform??''}))()";
 
@@ -1402,6 +1431,10 @@ mod tests {
         webgl: Value,
         user_agent: String,
         startup_url: String,
+        hardware_concurrency: u8,
+        touch_points: u8,
+        platform: String,
+        languages: Vec<String>,
     }
 
     impl Drop for AcceptanceBrowser {
@@ -1418,13 +1451,60 @@ mod tests {
     impl AcceptanceBrowser {
         fn assert_signals(&self, value: &Value) {
             assert_eq!(value["userAgent"].as_str(), Some(self.user_agent.as_str()));
-            assert_eq!(value["platform"], "Win32");
-            assert_eq!(value["hardwareConcurrency"], 3);
+            assert_eq!(value["platform"], self.platform);
+            assert_eq!(value["hardwareConcurrency"], self.hardware_concurrency);
             assert_eq!(value["deviceMemory"], 0.5);
-            assert_eq!(value["languages"], json!(["en-US", "en"]));
+            assert_eq!(value["languages"], json!(self.languages));
             assert_eq!(value["timezone"], "Asia/Tokyo");
             assert_eq!(value["offsetWinter"], -540);
             assert_eq!(value["offsetSummer"], -540);
+            for name in ["hardwareConcurrency", "platform", "language", "languages"] {
+                let native = &value["nativeNavigator"][name];
+                // NavigatorBase::platform has no native Worker override in the
+                // admitted Chromium. Cross-OS Worker platform remains a stated
+                // script fallback; CPU and languages must still be native.
+                let worker = value["touch"].is_null();
+                let expected_native = !(name == "platform" && worker && self.platform != "Win32");
+                assert_eq!(
+                    native["nativeGetter"], expected_native,
+                    "{} {name}",
+                    value["kind"]
+                );
+                assert_eq!(
+                    native["brandCheck"], true,
+                    "{} {name} receiver",
+                    value["kind"]
+                );
+            }
+            assert_eq!(
+                value["nativeNavigator"]["hardwareConcurrency"]["value"],
+                self.hardware_concurrency
+            );
+            assert_eq!(value["nativeNavigator"]["platform"]["value"], self.platform);
+            assert_eq!(
+                value["nativeNavigator"]["language"]["value"],
+                self.languages[0]
+            );
+            assert_eq!(
+                value["nativeNavigator"]["languages"]["value"],
+                json!(self.languages)
+            );
+            if !value["touch"].is_null() {
+                assert_eq!(value["touch"]["points"], self.touch_points);
+                assert_eq!(
+                    value["nativeNavigator"]["maxTouchPoints"]["nativeGetter"],
+                    true
+                );
+                assert_eq!(
+                    value["nativeNavigator"]["maxTouchPoints"]["brandCheck"],
+                    true
+                );
+                if self.touch_points > 0 {
+                    assert_eq!(value["touch"]["coarse"], true);
+                    assert_eq!(value["touch"]["hoverNone"], true);
+                    assert_eq!(value["touch"]["api"], true);
+                }
+            }
             assert_eq!(value["canvas"], value["repeat"]);
             if !value["webgl"].is_null() {
                 assert_eq!(value["webgl"], self.webgl);
@@ -1511,6 +1591,25 @@ mod tests {
         canvas_noise: bool,
         seed: &str,
     ) -> AcceptanceBrowser {
+        acceptance_browser_hardware(
+            fixture,
+            route,
+            canvas_noise,
+            seed,
+            3,
+            0,
+            PlatformKind::Windows,
+        )
+    }
+    fn acceptance_browser_hardware(
+        fixture: &browser_fixture::ControlFixture,
+        route: &str,
+        canvas_noise: bool,
+        seed: &str,
+        hardware_concurrency: u8,
+        touch_points: u8,
+        platform: PlatformKind,
+    ) -> AcceptanceBrowser {
         use brows_domain::{DeviceMemoryGb, ScreenConfig, SeedableNoisePersona, WebGLProfile};
         let executable = std::path::PathBuf::from(
             std::env::var_os("BROWS_ACCEPTANCE_BROWSER").expect("explicit acceptance browser"),
@@ -1530,10 +1629,10 @@ mod tests {
         std::fs::create_dir_all(&root).unwrap();
         let persona = SeedableNoisePersona {
             seed: seed.to_owned(),
-            platform: PlatformKind::Windows,
-            hardware_concurrency: 3,
+            platform,
+            hardware_concurrency,
             device_memory: DeviceMemoryGb::Half,
-            touch_points: 0,
+            touch_points,
             screen: ScreenConfig {
                 width: 1920,
                 height: 1080,
@@ -1551,10 +1650,21 @@ mod tests {
             brows_application::persona_fingerprint::PersonaFingerprint::derive(&persona, &version)
                 .unwrap();
         let expected_webgl = json!({"vendor":fp.webgl_vendor,"renderer":fp.webgl_renderer});
+        let languages = if platform == PlatformKind::Windows {
+            vec!["en-US".to_owned(), "en".to_owned()]
+        } else {
+            vec!["pl-PL".to_owned(), "pl".to_owned()]
+        };
+        let platform_name = match platform {
+            PlatformKind::Windows => "Win32",
+            PlatformKind::MacOs => "MacIntel",
+            PlatformKind::Linux => "Linux x86_64",
+        }
+        .to_owned();
         let policy = SessionFingerprintConfig {
             user_agent: fp.user_agent,
             persona,
-            languages: vec!["en-US".to_owned(), "en".to_owned()],
+            languages: languages.clone(),
             timezone: Some("Asia/Tokyo".to_owned()),
         };
         let user_agent = policy.user_agent.clone();
@@ -1580,6 +1690,99 @@ mod tests {
             webgl: expected_webgl,
             user_agent,
             startup_url,
+            hardware_concurrency,
+            touch_points,
+            platform: platform_name,
+            languages,
+        }
+    }
+
+    #[test]
+    #[ignore = "requires signed Edge; native Navigator getters and real touch input"]
+    fn private_native_navigator_acceptance() {
+        let mut modes = Vec::new();
+        for (cpu, touch, platform) in [
+            (3, 0, PlatformKind::Windows),
+            (7, 5, PlatformKind::Windows),
+            (5, 0, PlatformKind::Linux),
+        ] {
+            let fixture = browser_fixture::ControlFixture::start(false);
+            let browser = acceptance_browser_hardware(
+                &fixture,
+                "native-hardware",
+                true,
+                "native-controls",
+                cpu,
+                touch,
+                platform,
+            );
+            let proofs = fixture.wait_proofs("/native-hardware/");
+            assert_eq!(
+                proofs
+                    .iter()
+                    .map(|(_, _, sample)| sample["kind"].as_str().unwrap())
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+                6
+            );
+            for (_, _, sample) in &proofs {
+                browser.assert_signals(sample);
+            }
+            if touch > 0 {
+                let page = browser
+                    .controller
+                    .targets
+                    .0
+                    .lock()
+                    .unwrap()
+                    .snapshot()
+                    .into_iter()
+                    .find(|target| target.kind == "page")
+                    .unwrap();
+                browser.controller.wire.call("Input.dispatchTouchEvent",json!({"type":"touchStart","touchPoints":[{"x":8,"y":8,"id":0},{"x":16,"y":16,"id":1}]}),Some(&page.session)).unwrap();
+                browser
+                    .controller
+                    .wire
+                    .call(
+                        "Input.dispatchTouchEvent",
+                        json!({"type":"touchEnd","touchPoints":[]}),
+                        Some(&page.session),
+                    )
+                    .unwrap();
+                let input = fixture.wait_kind_count("/native-hardware/", "touch_input", 1);
+                assert_eq!(input.len(), 1);
+                assert_eq!(input[0].2["trusted"], true);
+                assert_eq!(input[0].2["nativeEvent"], true);
+                assert_eq!(input[0].2["touches"], 2);
+                assert_eq!(
+                    evaluate(
+                        &browser.controller.wire,
+                        &page.session,
+                        "({cpu:navigator.hardwareConcurrency,touch:navigator.maxTouchPoints})"
+                    )
+                    .unwrap(),
+                    json!({"cpu":cpu,"touch":touch})
+                );
+                browser
+                    .controller
+                    .wire
+                    .call(
+                        "Page.reload",
+                        json!({"ignoreCache":true}),
+                        Some(&page.session),
+                    )
+                    .unwrap();
+                let reloaded = fixture.wait_kind_count("/native-hardware/", "page", 2);
+                assert_eq!(reloaded.len(), 2);
+                for (_, _, sample) in reloaded {
+                    browser.assert_signals(&sample);
+                }
+            }
+            modes.push(json!({"hardwareConcurrency":cpu,"touchPoints":touch,
+                "observations":proofs.iter().map(|(_, _, sample)|sample).collect::<Vec<_>>()}));
+            if cpu == 5 {
+                browser.write_report("native-navigator", json!(modes));
+            }
         }
     }
 
