@@ -23,7 +23,9 @@ try {
         $result.installerSha256 = $digest
         $log = "$reportPath.installer.log"
         [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($log)) | Out-Null
-        $process = Start-Process -FilePath $installer -ArgumentList @('/quiet', '/norestart', '/features', 'OptionId.WindowsDesktopSoftwareDevelopmentKit', '/log', "`"$log`"") -PassThru
+        # Current SDK bundles use architecture-specific desktop components.
+        # The x86 tools are also needed by the x64 Chromium build tooling.
+        $process = Start-Process -FilePath $installer -ArgumentList @('/quiet', '/norestart', '/ceip', 'off', '/features', 'OptionId.DesktopCPPx86', 'OptionId.DesktopCPPx64', '/log', "`"$log`"") -PassThru
         if (-not $process.WaitForExit(900000)) { $process.Kill($true); throw 'Owned SDK installer exceeded 15 minutes' }
         $result.installerExitCode = $process.ExitCode
         if ($process.ExitCode -notin @(0, 3010)) { throw "SDK installer failed with exit $($process.ExitCode)" }

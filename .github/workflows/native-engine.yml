@@ -70,13 +70,16 @@ jobs:
         with:
           node-version: 24
       - run: python -m pip install -r native/chromium/requirements.txt
+      - name: Prepare pinned SDK on this disposable build host
+        shell: pwsh
+        run: ./native/chromium/prepare-hosted-windows.ps1 -Report target/native-build.json.sdk.json
       - name: Build only after this host passes its own preflight
         shell: pwsh
         env:
           BUILD_DRIVE: ${{ needs.windows-preflight.outputs.drive }}
         run: |
           if ($env:BUILD_DRIVE -notmatch '^[A-Z]:$') { throw 'Invalid build drive' }
-          ./native/chromium/build-windows.ps1 -BuildRoot "$($env:BUILD_DRIVE)\brows-native-source" -Report target/native-build.json -PrepareHostedSdk
+          ./native/chromium/build-windows.ps1 -BuildRoot "$($env:BUILD_DRIVE)\brows-native-source" -Report target/native-build.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
