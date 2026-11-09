@@ -1,0 +1,108 @@
+name: Native Chromium source and build prerequisites
+on:
+  pull_request:
+    paths:
+      - 'native/chromium/**'
+      - '.github/workflows/native-engine.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'native/chromium/**'
+      - '.github/workflows/native-engine.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-engine-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  source:
+    name: Pinned patch and upstream generator only
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python -m pip install -r native/chromium/requirements.txt
+      - run: python native/chromium/verify_patch.py --report target/native-source-check.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-source-check
+          path: target/native-source-check.json
+          if-no-files-found: warn
+  windows-preflight:
+    name: Windows build prerequisites only
+    runs-on: windows-latest
+    timeout-minutes: 5
+    outputs:
+      ready: ${{ steps.preflight.outputs.ready }}
+      drive: ${{ steps.preflight.outputs.drive }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Inspect build host without changing it
+        id: preflight
+        shell: pwsh
+        run: ./native/chromium/windows-preflight.ps1 -Report target/native-windows-preflight.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-windows-preflight
+          path: target/native-windows-preflight.json
+          if-no-files-found: warn
+  build:
+    name: Native Chromium build and runtime proof
+    needs: [source, windows-preflight, stock-control]
+    if: >-
+      needs.windows-preflight.outputs.ready == 'true' &&
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+    runs-on: windows-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: python -m pip install -r native/chromium/requirements.txt
+      - name: Build only after this host passes its own preflight
+        shell: pwsh
+        env:
+          BUILD_DRIVE: ${{ needs.windows-preflight.outputs.drive }}
+        run: |
+          if ($env:BUILD_DRIVE -notmatch '^[A-Z]:$') { throw 'Invalid build drive' }
+          ./native/chromium/build-windows.ps1 -BuildRoot "$($env:BUILD_DRIVE)\brows-native-source" -Report target/native-build.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-build-evidence
+          path: target/native-build.json*
+          if-no-files-found: warn
+  stock-control:
+    name: Signed Edge negative control without JS hooks
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Observe stock native Worker platform
+        shell: pwsh
+        run: |
+          $edge = Join-Path ${env:ProgramFiles(x86)} 'Microsoft/Edge/Application/msedge.exe'
+          $signature = Get-AuthenticodeSignature -LiteralPath $edge
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) -ne 'Microsoft Corporation') { throw 'Edge signature admission failed' }
+          $digest = (Get-FileHash -LiteralPath $edge -Algorithm SHA256).Hash.ToLowerInvariant()
+          node native/chromium/platform-acceptance.mjs --browser $edge --sha256 $digest --expect stock --report target/native-stock-control.json
+          if ($LASTEXITCODE -ne 0) { throw 'Stock native control failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-stock-control
+          path: target/native-stock-control.json
+          if-no-files-found: warn
