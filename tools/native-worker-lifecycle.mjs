@@ -110,8 +110,11 @@ const start=${JSON.stringify(prefix)};
 globalThis.ownedWorkers=[new Worker(start+'worker.js'),new Worker(start+'module.mjs',{type:'module'}),
 new SharedWorker(start+'shared.js',{name:'brows-native-classic'}),new SharedWorker(start+'module-shared.mjs',{type:'module',name:'brows-native-module'})];
 for(const worker of ownedWorkers.slice(2))worker.port.start();
-await Promise.all([navigator.serviceWorker.register(start+'classic-sw/sw.js',{scope:start+'classic-sw/'}),
+const registrations=await Promise.all([navigator.serviceWorker.register(start+'classic-sw/sw.js',{scope:start+'classic-sw/'}),
 navigator.serviceWorker.register(start+'module-sw/sw.mjs',{scope:start+'module-sw/',type:'module'})]);
+// Existing registrations survive process exit but do not execute merely
+// because register() is called again; dispatch an actual owned work event.
+for(const registration of registrations)registration.active?.postMessage('owned-native-registration-wake');
 }catch(e){fetch(${JSON.stringify(`${prefix}fault`)},{method:'POST',body:JSON.stringify({kind:'registration-or-worker-start'})})}});</script>`;
   if (path === 'worker.js') content = `${capture('worker')}setInterval(()=>{},1000);`;
   if (path === 'shared.js') content = `${capture('shared_worker')}onconnect=e=>e.ports[0].start();`;
