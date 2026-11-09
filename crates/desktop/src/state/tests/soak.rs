@@ -14,10 +14,22 @@ use std::{
 
 mod seeded;
 
-fn await_condition(seconds: u64, description: &str, mut condition: impl FnMut() -> bool) {
+fn await_condition(seconds: u64, description: &str, condition: impl FnMut() -> bool) {
+    await_condition_with_diagnostics(seconds, description, condition, || {});
+}
+
+fn await_condition_with_diagnostics(
+    seconds: u64,
+    description: &str,
+    mut condition: impl FnMut() -> bool,
+    diagnose: impl FnOnce(),
+) {
     let deadline = Instant::now() + Duration::from_secs(seconds);
     while !condition() {
-        assert!(Instant::now() < deadline, "timed out: {description}");
+        if Instant::now() >= deadline {
+            diagnose();
+            panic!("timed out: {description}");
+        }
         thread::sleep(Duration::from_millis(250));
     }
 }
@@ -148,9 +160,31 @@ fn exercise(root: &Path, duration: Duration) {
         .iter()
         .map(|session| session.id.clone().try_into().unwrap())
         .collect();
-    await_condition(60, "first heartbeat from every profile", || {
-        (0..10).all(|index| page_hits(&fixture, index) > 0)
-    });
+    await_condition_with_diagnostics(
+        60,
+        "first heartbeat from every profile",
+        || (0..10).all(|index| page_hits(&fixture, index) > 0),
+        || {
+            let counts = fixture.proofs.lock().unwrap();
+            let profiles: Vec<_> = ids.iter().enumerate().map(|(index, id)| {
+                let count = |kind| {
+                    let key = format!("/soak/{index}/{kind}");
+                    counts.iter().find(|(path, _, _)| path == &key)
+                        .and_then(|(_, _, value)| value.as_u64()).unwrap_or(0)
+                };
+                serde_json::json!({"index":index,"documentRequests":count("document"),
+                    "heartbeats":count("heartbeat"),"processRunning":state.browsers.is_running(id).ok()})
+            }).collect();
+            let report =
+                serde_json::json!({"assertionsPassed":false,"complete":false,"profiles":profiles});
+            eprintln!("first-heartbeat failure state: {report}");
+            write_marker(
+                root,
+                "startup-heartbeats.json",
+                report.to_string().as_bytes(),
+            );
+        },
+    );
     let ready = serde_json::json!({
         "runtimeVersion": edge.version,
         "edgeExecutable": edge.executable_path,
