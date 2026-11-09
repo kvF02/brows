@@ -1460,7 +1460,16 @@ mod tests {
             assert_eq!(value["offsetSummer"], -540);
             for name in ["hardwareConcurrency", "platform", "language", "languages"] {
                 let native = &value["nativeNavigator"][name];
-                assert_eq!(native["nativeGetter"], true, "{} {name}", value["kind"]);
+                // NavigatorBase::platform has no native Worker override in the
+                // admitted Chromium. Cross-OS Worker platform remains a stated
+                // script fallback; CPU and languages must still be native.
+                let worker = value["touch"].is_null();
+                let expected_native = !(name == "platform" && worker && self.platform != "Win32");
+                assert_eq!(
+                    native["nativeGetter"], expected_native,
+                    "{} {name}",
+                    value["kind"]
+                );
                 assert_eq!(
                     native["brandCheck"], true,
                     "{} {name} receiver",

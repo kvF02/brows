@@ -35,7 +35,8 @@ Brows 的当前基础能力是多环境数据隔离；`SeedableNoise` 是可选�
 |---|---|---|
 | UA / UA-CH | Chromium 参数与私有 CDP 会话策略 | 主版本来自选中内核；UA-CH 完整版本取自运行中的浏览器 |
 | 语言 | 参数、Preferences、各目标会话策略 | 请求行为仍须在实际内核验收 |
-| platform、语言、CPU 核数 | 私有会话的原生 Emulation；独立扩展路径仍用 getter | 页面、iframe 与 Worker 在恢复首脚本前设置；保留原生 getter，不改变物理 OS、CPU 或调度能力 |
+| 语言、CPU 核数 | 私有会话的原生 Emulation；独立扩展路径仍用 getter | 页面、iframe 与 Worker 在恢复首脚本前设置；保留原生 getter，不改变物理 CPU 或调度能力 |
+| platform | 页面/iframe 原生 Emulation；跨系统 Worker 仍需 getter 覆盖 | Worker 的原生实现固定读取主机平台；配置与主机相同时保留原生 getter，不改变物理 OS |
 | Touch | 私有会话的原生触控模拟；独立扩展路径仍用 getter | 同时影响原生 maxTouchPoints、指针/悬停特征和受控输入；Worker 保留原本缺失的接口 |
 | Memory | Navigator getter | 仍是页面/Worker 读取覆盖，物理内存不变 |
 | Screen | Screen getter | 声明宽高、色深；可用区按声明尺寸返回，不模拟系统任务栏 |
@@ -66,7 +67,7 @@ WebGL2 的 PACK_ROW_LENGTH、PACK_SKIP_ROWS、PACK_SKIP_PIXELS 与 dstOffset 共
 不绕过浏览器同源限制。
 
 扩展与私有会话控制器共用同一个脚本生成器，显式区分独立扩展与原生 Navigator 模式。
-私有模式不替换 platform、language/languages、hardwareConcurrency、maxTouchPoints 的 getter；
+私有模式不替换 language/languages、hardwareConcurrency、maxTouchPoints 和页面 platform 的 getter；
 CPU 通过 `Emulation.setHardwareConcurrencyOverride`，语言/平台通过原生 UA override，
 页面触控通过 `Emulation.setTouchEmulationEnabled` 设置。支持私有 pipe 的运行时在探针与
 生产启动中统一走该路径，不再同时加载一份会重新覆盖这些字段的 MV3 脚本。
@@ -76,6 +77,8 @@ CPU 通过 `Emulation.setHardwareConcurrencyOverride`，语言/平台通过原�
 这些值。触控为 0 表示关闭模拟，不能抹去真实触屏：如果设备仍原生返回非零，配置会
 明确失败，不回退成 JS 伪造 0。启用触控会采用 Chromium 的粗指针/无悬停行为，
 不等同于为桌面主机增加物理触摸设备。浏览器版本差异和之后的设置更新仍需实测。
+跨系统 Worker 的 platform 是明确保留的脚本覆盖例外：上游 NavigatorBase 直接返回主机
+平台，CDP 中保存的平台值未进入此读取路径；同主机平台时不重复包裹原生 getter。
 原生 getter 的保留不代表全部脚本痕迹不可检测，也不是本项目定制的 Chromium 内核。
 
 Worker 使用 `WorkerNavigator` 与
@@ -131,10 +134,11 @@ for Testing 的支持路线仍需可信发布者、安装来源与更新校验�
    worker 与网络请求的差异。外部检测站仅作为可选人工观察，记录版本与结果，不作保证。
 
 `private_native_navigator_acceptance` 在签名 Edge 上切换 CPU 3/7/5、触控 0/5、
-Windows/Linux 平台和英语/波兰语，检查六类上下文的原生 getter、原生 receiver 校验与
+Windows/Linux 平台和英语/波兰语，检查六类上下文的 getter 来源、原生 receiver 校验与
 实际返回值。启用触控时另核对 CSS pointer/hover、可信双指输入事件、输入后的数值和
 页面重载后的首脚本。现有九类经典/模块首脚本、Worker 生命周期和 GPU 样本也核对这些
-原生 getter。以上描述是验收要求；通过范围以对应提交的 Windows CI 为准。
+getter 来源；跨系统 Worker 平台覆盖须明确记录为脚本，其余指定原生字段仍须通过。
+以上描述是验收要求；通过范围以对应提交的 Windows CI 为准。
 
 ## 后续优先级
 

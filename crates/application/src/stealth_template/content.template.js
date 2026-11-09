@@ -43,9 +43,12 @@
       ['platform', persona.platform === 'windows' ? 'Win32'
         : persona.platform === 'mac' ? 'MacIntel' : 'Linux x86_64'],
     ]) {
-      // The private controller owns these fields through native Emulation.
-      // Leave their original getter objects and receiver semantics intact.
-      if (persona.native_navigator && name !== 'deviceMemory') continue;
+      // Native Emulation owns CPU/languages/touch and page platform. Chromium's
+      // Worker NavigatorBase::platform still returns a fixed host value; retain
+      // an explicitly scoped fallback only when that value differs.
+      const workerPlatformFallback = name === 'platform' && typeof document === 'undefined'
+        && navigator.platform !== value;
+      if (persona.native_navigator && name !== 'deviceMemory' && !workerPlatformFallback) continue;
       overrideGetter(navigatorPrototype, name, value);
     }
   }

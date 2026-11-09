@@ -235,11 +235,12 @@ test('private native Navigator mode leaves the original page and Worker getters 
     const env = environment({native_navigator:true},[],worker);
     const proto = (env.Navigator ?? env.WorkerNavigator).prototype;
     for (const [name,getter] of Object.entries(env.originalNavigatorGetters)) {
-      assert.equal(Object.getOwnPropertyDescriptor(proto,name).get,getter,name);
+      if (worker && name === 'platform') assert.notEqual(Object.getOwnPropertyDescriptor(proto,name).get,getter);
+      else assert.equal(Object.getOwnPropertyDescriptor(proto,name).get,getter,name);
       assert.throws(()=>getter.call({}),TypeError);
     }
     assert.equal(env.navigator.hardwareConcurrency,2);
-    assert.equal(env.navigator.platform,'native');
+    assert.equal(env.navigator.platform,worker ? 'Win32' : 'native');
     assert.deepEqual([...env.navigator.languages],['en-US']);
     assert.equal(env.navigator.maxTouchPoints,1);
     assert.equal(env.navigator.deviceMemory,0.5);
