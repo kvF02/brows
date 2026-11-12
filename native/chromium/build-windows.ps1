@@ -68,6 +68,10 @@ try {
     $env:PATH = "$depot;$oldPath"
     $env:DEPOT_TOOLS_WIN_TOOLCHAIN = '0'
     $env:DEPOT_TOOLS_UPDATE = '0'
+    $result.stage = 'depot-bootstrap'
+    $initialized = Initialize-NativeDepotTools -Depot $depot -Revision $manifest.depotTools.revision
+    $result.depotPythonVersion = $initialized.pythonVersion
+    $result.depotPythonShimVerified = $initialized.pythonShimVerified
     $sourceRoot = Join-Path $root 'chromium'
     New-Item -ItemType Directory -Path $sourceRoot | Out-Null
     $configuration = "solutions = [{'name': 'src', 'url': '$($manifest.upstream.repository)', 'managed': False, 'custom_deps': {}, 'custom_vars': {'checkout_android': False, 'checkout_ios': False}}]`ntarget_os = ['win']`n"

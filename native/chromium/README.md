@@ -82,6 +82,12 @@ the inherited settings are restored when the driver ends. The patch itself also
 has an LF checkout attribute, so its pinned digest is portable across Git hosts.
 Python and Node are resolved to single executable paths and their versions are
 executed before source checkout. CI checks this on Windows before any large build.
+The driver explicitly runs the pinned depot_tools `bootstrap/win_tools.bat` and
+executes its `python-bin/python3.bat` shim before Chromium checkout. Disabling
+automatic depot_tools updates also skips this setup in `gclient.bat`; a working
+gclient alone does not establish that GN/autoninja's Python shim is initialized.
+The small Windows gate reproduces the fresh-checkout setup, checks that the shim
+runs, and verifies that bootstrap did not change the Git pin or tracked files.
 
 After compilation, GN's `runtime_deps` list stages only the isolated distribution,
 with a generated third-party license file, build args, source pin and patch. Every

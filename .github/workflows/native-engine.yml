@@ -49,11 +49,17 @@ jobs:
           . ./native/chromium/windows-tools.ps1
           $resolved = Resolve-NativeBuildTools
           Write-Output "$($resolved.pythonVersion) / $($resolved.nodeVersion)"
+      - name: Verify pinned depot_tools Python bootstrap without Chromium checkout
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./native/chromium/test-depot-bootstrap.ps1 -Report target/native-depot-bootstrap.json
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: native-source-check-${{ matrix.os }}
-          path: target/native-source-check.json
+          path: |
+            target/native-source-check.json
+            target/native-depot-bootstrap.json
           if-no-files-found: warn
   windows-preflight:
     name: Windows build prerequisites only
