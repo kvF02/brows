@@ -1334,9 +1334,10 @@ fn configure(
     Ok(())
 }
 fn configure_native_screen(wire: &Wire, session: &str, screen: &ScreenConfig) -> PortResult<()> {
-    // Metrics overrides are only accepted at the top target. Chromium carries
-    // the resulting screen info to child frames. Zero view dimensions/DSF and
-    // desktop mode preserve the real viewport, window decorations and DPR.
+    // Metrics overrides are only accepted at the top target. Full OOPIF
+    // propagation requires the pinned screen C++ candidate; stock Chromium
+    // fails the strict cross-frame acceptance and must not qualify this cutover.
+    // Zero view dimensions/DSF preserve the real viewport, window and DPR.
     let orientation = if screen.width < screen.height {
         "portraitPrimary"
     } else {
@@ -1881,6 +1882,12 @@ mod tests {
                 },
             );
             let proofs = fixture.wait_proofs("/native-screen/");
+            browser.write_report_status(
+                "native-screen",
+                json!({"configured":browser.screen,
+                    "observations":proofs.iter().map(|(_,_,sample)|sample).collect::<Vec<_>>() }),
+                false,
+            );
             assert_eq!(
                 proofs
                     .iter()

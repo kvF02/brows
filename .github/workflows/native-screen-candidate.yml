@@ -1,0 +1,61 @@
+name: Native screen source and stock control
+on:
+  pull_request:
+    paths:
+      - 'native/chromium/screen/**'
+      - 'tools/native-screen-acceptance.mjs'
+      - 'tools/test_support/native_pipe.mjs'
+      - '.github/workflows/native-screen-candidate.yml'
+  push:
+    branches: [master]
+    paths:
+      - 'native/chromium/screen/**'
+      - 'tools/native-screen-acceptance.mjs'
+      - 'tools/test_support/native_pipe.mjs'
+      - '.github/workflows/native-screen-candidate.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-screen-candidate-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  source:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python native/chromium/screen/verify_patch.py --report target/native-screen-source-check.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-screen-source-check
+          path: target/native-screen-source-check.json
+          if-no-files-found: warn
+  stock-control:
+    name: Signed Edge screen propagation control
+    runs-on: windows-2022
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Record native getters and the stock OOPIF gap without Brows hooks
+        shell: pwsh
+        run: |
+          $edge = Join-Path ${env:ProgramFiles(x86)} 'Microsoft/Edge/Application/msedge.exe'
+          $signature = Get-AuthenticodeSignature -LiteralPath $edge
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) -ne 'Microsoft Corporation') { throw 'Edge signature admission failed' }
+          $digest = (Get-FileHash -LiteralPath $edge -Algorithm SHA256).Hash.ToLowerInvariant()
+          node tools/native-screen-acceptance.mjs --browser $edge --sha256 $digest --expect stock --report target/native-screen-stock-control.json
+          if ($LASTEXITCODE -ne 0) { throw 'Screen stock control failed' }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-screen-stock-control
+          path: target/native-screen-stock-control.json
+          if-no-files-found: warn

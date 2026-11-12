@@ -39,7 +39,7 @@ Brows 的当前基础能力是多环境数据隔离；`SeedableNoise` 是可选�
 | platform | 页面/iframe 原生 Emulation；跨系统 Worker 仍需 getter 覆盖 | Worker 的原生实现固定读取主机平台；配置与主机相同时保留原生 getter，不改变物理 OS |
 | Touch | 私有会话的原生触控模拟；独立扩展路径仍用 getter | 同时影响原生 maxTouchPoints、指针/悬停特征和受控输入；Worker 保留原本缺失的接口 |
 | Memory | Navigator getter | 仍是页面/Worker 读取覆盖，物理内存不变 |
-| Screen 尺寸/方向 | 私有会话的原生屏幕模拟；独立扩展仍用 getter | 原生宽高和可用区与 CSS 设备媒体查询一致；可用区为整个模拟屏幕，不模拟系统任务栏、物理显示器拓扑或 HDR |
+| Screen 尺寸/方向 | 原生屏幕模拟候选，尚未合入；独立扩展仍用 getter | 普通 Edge 的 OOPIF 首脚本仍泄漏主机屏幕；须编译并验收 C++ 传播补丁。可用区为整个模拟屏幕，不模拟系统任务栏、物理显示器拓扑或 HDR |
 | Screen 色深 | 匹配时保留原生 getter，否则读取覆盖 | colorDepth / pixelDepth 不匹配配置时仍是 JS 覆盖，不改变实际显示器色深 |
 | 窗口与比例 | Chromium 参数 | 不是物理显示器替换；缩放和最大化影响实际视口 |
 | WebGL vendor/renderer | WebGL1/2 `getParameter` | 仅有效的 unmasked 字符串；GPU 像素、扩展、能力仍真实 |
@@ -75,6 +75,11 @@ CPU 通过 `Emulation.setHardwareConcurrencyOverride`，语言/平台通过原�
 独立扩展仍作为旧路径的有界观测工具，不应据其结果宣称原生控制生效。
 
 私有控制器在顶层页面暂停期间设置屏幕尺寸与方向，由 Chromium 传播到 iframe。
+本分支 Screen 原生切换尚未达到合入条件。Windows Server 2022 的签名 Edge 实测中，
+顶层要求 1440×900，但跨进程 iframe 的首脚本原生宽度仍为 656。普通 CDP 设置
+不能修复该传播缺口，详见 [原生屏幕候选](../native/chromium/screen/README.md)。
+以下为候选实现的验收要求，须先完成内核编译、正向验收及真实能力探针对 OOPIF 的检查。
+
 Screen 的 width、height、availWidth、availHeight 保留原生 getter，并在页面启动前同时
 核对 CSS `device-width` / `device-height` 媒体查询；失败时拒绝配置。屏幕模拟使用桌面
 模式，不指定视口宽高或设备缩放，不以声明屏幕大小代替真实窗口/视口；DPR 继续由
