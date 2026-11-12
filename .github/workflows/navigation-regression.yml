@@ -51,6 +51,9 @@ jobs:
       - name: Verify native Navigator getters and real touch input
         timeout-minutes: 3
         run: cargo +1.97.1 test -p brows-adapters-runtime private_native_navigator_acceptance --locked -- --ignored --nocapture
+      - name: Verify native screen getters and CSS while preserving viewport and DPR
+        timeout-minutes: 3
+        run: cargo +1.97.1 test -p brows-adapters-runtime private_native_screen_acceptance --locked -- --ignored --nocapture
       - name: Verify native, seeded, reopened and different-seed GPU pixel paths
         timeout-minutes: 3
         run: cargo +1.97.1 test -p brows-adapters-runtime private_webgl_pixel_acceptance --locked -- --ignored --nocapture
@@ -78,6 +81,7 @@ jobs:
           path: |
             target/fingerprint-pending-navigation-acceptance.json
             target/fingerprint-native-navigator-acceptance.json
+            target/fingerprint-native-screen-acceptance.json
             target/fingerprint-startup-navigation-stress-acceptance.json
             target/fingerprint-webgl-pixels-acceptance.json
             target/fingerprint-worker-lifecycle-acceptance.json
