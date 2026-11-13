@@ -1,6 +1,7 @@
 name: Native Chromium source and build prerequisites
 on:
   pull_request:
+    types: [opened, synchronize, reopened, labeled]
     paths:
       - 'native/chromium/**'
       - '.github/workflows/native-engine.yml'
@@ -50,6 +51,10 @@ jobs:
           . ./native/chromium/windows-tools.ps1
           $resolved = Resolve-NativeBuildTools
           Write-Output "$($resolved.pythonVersion) / $($resolved.nodeVersion)"
+      - name: Reject unsafe GN outputs and missing or empty C++ object evidence
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: ./native/chromium/test-compile-changes.ps1
       - name: Verify pinned depot_tools Python bootstrap without Chromium checkout
         if: runner.os == 'Windows'
         shell: pwsh
@@ -84,13 +89,14 @@ jobs:
           path: target/native-windows-preflight.json
           if-no-files-found: warn
   build:
-    name: Native Chromium build and runtime proof
+    name: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'native-runtime-build') && 'Patched C++ translation units only' || 'Native Chromium build and runtime proof' }}
     needs: [source, windows-preflight, stock-control]
     if: >-
       (needs.windows-preflight.outputs.ready == 'true' || needs.windows-preflight.outputs.can_prepare_sdk == 'true') &&
-      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+      (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) &&
+      (github.event.action != 'labeled' || github.event.label.name == 'native-runtime-build')
     runs-on: windows-latest
-    timeout-minutes: 360
+    timeout-minutes: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'native-runtime-build') && 75 || 360 }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -108,9 +114,11 @@ jobs:
         shell: pwsh
         env:
           BUILD_DRIVE: ${{ needs.windows-preflight.outputs.drive }}
+          COMPILE_CHANGED_ONLY: ${{ github.event_name == 'pull_request' && !contains(github.event.pull_request.labels.*.name, 'native-runtime-build') }}
         run: |
           if ($env:BUILD_DRIVE -notmatch '^[A-Z]:$') { throw 'Invalid build drive' }
-          ./native/chromium/build-windows.ps1 -BuildRoot "$($env:BUILD_DRIVE)\brows-native-source" -Report target/native-build.json
+          $compileOnly = $env:COMPILE_CHANGED_ONLY -eq 'true'
+          ./native/chromium/build-windows.ps1 -BuildRoot "$($env:BUILD_DRIVE)\brows-native-source" -Report target/native-build.json -CompileChangedSourcesOnly:$compileOnly
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -126,6 +134,29 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           compression-level: 1
+  runtime-positive-evidence:
+    name: Native runtime positives required
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-build-evidence
+          path: target/native-functional-evidence
+      - name: Keep object-only success separate from actual runtime qualification
+        shell: python
+        run: |
+          import json
+          from pathlib import Path
+          value = json.loads(Path('target/native-functional-evidence/native-build.json').read_text(encoding='utf-8-sig'))
+          required = ['changedCppObjectsCompiled', 'compiled', 'runtimeBundleReady', 'nativeFirstScriptsPassed',
+                      'nativeLifecyclePassed', 'nativeScreenPassed', 'nativeAcceptancePassed']
+          if (not all(value.get(key) is True for key in required) or value.get('failure') is not None
+              or value.get('compileChangedSourcesOnly') is not False
+              or value.get('runtimeAdmitted') is not False or value.get('complete') is not False):
+              raise SystemExit('No native runtime qualification: patched-object compilation alone is insufficient; request the full build explicitly')
+          print('Linked candidate and all three native positives verified; production admission remains false')
   stock-control:
     name: Signed Edge native getter and lifecycle controls
     runs-on: windows-latest

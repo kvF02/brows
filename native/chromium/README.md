@@ -51,6 +51,41 @@ Every gate keeps `complete: false`. Runtime trust/update/signing integration,
 actual Windows app admission and full stop/wake/update acceptance remain separate
 work. Do not close #35 from a source/generator check or stock control alone.
 
+## Compile the changed C++ before the full browser
+
+The driver uses GN's actual `outputs` mapping for the four patched `.cc` inputs
+and the generator-produced `core_probes_impl.cc`, then asks Ninja/Siso to compile
+those objects before linking `headless_shell`. This checks the generated observer
+calls as C++, rather than relying only on a text patch or Python generator.
+Object paths are not guessed; missing/unsafe mappings and missing/empty object
+outputs fail. The report records source-to-object mappings, sizes and SHA256.
+The [GN outputs reference](https://gn.googlesource.com/gn/+/22c9eba8c5262cb4d2d08fe9fe258b1bde78cfc9/docs/reference.md)
+documents this source-file-to-object invocation.
+
+PR builds default to this compile-only path (75-minute upper bound). They keep
+`compiled: false`, `nativeAcceptancePassed: false`, `runtimeAdmitted: false` and
+`complete: false`, even when `changedCppObjectsCompiled` becomes true. No browser
+has been linked or executed by that mode. The generated probe implementation
+must be present in the compiled-object evidence.
+The separate `Native runtime positives required` check remains blocked/failing
+until the linked runtime, staged integrity and all three native positives are
+actually observed. An object-only green job cannot turn the overall native
+qualification green or replace its merge gate.
+
+An explicit workflow dispatch, a master push, or a PR with the
+`native-runtime-build` label requests the full build and all existing native
+positives (six-hour upper bound). A full build compiles these objects first and
+reuses the same checkout/output directory for the remaining browser build.
+Existing source pins, SDK/bootstrap checks, assertions, runtime dependency
+integrity and native acceptance gates remain required. This change does not
+alter or cancel the already-running pinned build 43348531237.
+
+Manual compile-only command:
+
+```powershell
+./native/chromium/build-windows.ps1 -BuildRoot C:\brows-cpp-source -Report target/native-cpp.json -CompileChangedSourcesOnly
+```
+
 The previous optimized static build in [run 43237106238](https://github.com/kvF02/brows/actions/runs/43237106238)
 completed 22,293 / 46,422 build edges before its four-hour job limit. It produced
 no usable browser or positive native result. Functional qualification now uses
