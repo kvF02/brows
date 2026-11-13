@@ -1,0 +1,150 @@
+name: Native candidate production-controller qualification
+on:
+  pull_request:
+    paths:
+      - 'crates/adapters-runtime/src/fingerprint_probe.rs'
+      - 'crates/adapters-runtime/src/session_control.rs'
+      - 'tools/verify-native-candidate.py'
+      - 'tools/test_native_candidate.py'
+      - '.github/workflows/native-candidate-runtime.yml'
+  workflow_dispatch:
+  workflow_call:
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: native-candidate-controller-${{ github.ref }}
+  cancel-in-progress: true
+env:
+  # This immutable run is already building. Do not start or cancel a kernel
+  # build just to qualify its staged test artifact.
+  NATIVE_SOURCE_RUN_ID: '43348531237'
+  NATIVE_SOURCE_HEAD: a20791f0b13e14c147f49315eb596378815fbdf7
+  # Automatic follow-up uses the already compiled/linted qualification code.
+  NATIVE_QUALIFICATION_HEAD: b2bb99fd54e79231279e4ef7314b42afac0f3b7c
+jobs:
+  input-contract:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && env.NATIVE_QUALIFICATION_HEAD || github.sha }}
+      - run: python -m unittest discover -s tools -p test_native_candidate.py -v
+  windows-compile-and-negative:
+    runs-on: windows-2022
+    timeout-minutes: 7
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && env.NATIVE_QUALIFICATION_HEAD || github.sha }}
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.97.1 --profile minimal --component clippy
+      - name: Compile all candidate-only code and preserve stock negative admission
+        shell: pwsh
+        run: |
+          $edge = Join-Path ${env:ProgramFiles(x86)} 'Microsoft/Edge/Application/msedge.exe'
+          $signature = Get-AuthenticodeSignature -LiteralPath $edge
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) -ne 'Microsoft Corporation') { throw 'Edge signature admission failed' }
+          $env:BROWS_ACCEPTANCE_BROWSER = $edge
+          $v = [Diagnostics.FileVersionInfo]::GetVersionInfo($edge)
+          $env:BROWS_ACCEPTANCE_VERSION = "$($v.ProductMajorPart).$($v.ProductMinorPart).$($v.ProductBuildPart).$($v.ProductPrivatePart)"
+          cargo +1.97.1 test -p brows-adapters-runtime --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.97.1 test -p brows-adapters-runtime private_probe_rejects_stock_oopif_screen --locked -- --ignored --nocapture
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.97.1 clippy -p brows-adapters-runtime --all-targets --locked -- -D warnings
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: candidate-controller-stock-negative
+          path: target/native-screen-capability-negative.json
+          if-no-files-found: warn
+  candidate-positive:
+    needs: [input-contract, windows-compile-and-negative]
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && env.NATIVE_QUALIFICATION_HEAD || github.sha }}
+      - name: Check immutable build run and artifact provenance
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            fs.mkdirSync('target', { recursive: true });
+            const report = { assertionsPassed: false, runtimeAdmitted: false, complete: false,
+              sourceRunId: process.env.NATIVE_SOURCE_RUN_ID, sourceHead: process.env.NATIVE_SOURCE_HEAD };
+            fs.writeFileSync('target/native-candidate-qualification.json', JSON.stringify(report, null, 2));
+            const run_id = Number(process.env.NATIVE_SOURCE_RUN_ID);
+            const { data: run } = await github.rest.actions.getWorkflowRun({ ...context.repo, run_id });
+            if (run.head_sha !== process.env.NATIVE_SOURCE_HEAD || run.workflow_id !== 412176117 ||
+                run.head_repository?.full_name !== 'kvF02/brows' || run.repository.full_name !== 'kvF02/brows') {
+              core.setFailed('Candidate build provenance mismatch'); return;
+            }
+            const { data } = await github.rest.actions.listWorkflowRunArtifacts({ ...context.repo, run_id, per_page: 100 });
+            for (const name of ['experimental-headless-test-runtime', 'native-build-evidence']) {
+              const matches = data.artifacts.filter(a => a.name === name && !a.expired);
+              if (run.status !== 'completed' || matches.length !== 1) {
+                report.blocker = 'Pinned compiled runtime artifact unavailable; no native positive executed';
+                fs.writeFileSync('target/native-candidate-qualification.json', JSON.stringify(report, null, 2));
+                core.setFailed(report.blocker); return;
+              }
+            }
+      - uses: actions/download-artifact@v4
+        with:
+          name: experimental-headless-test-runtime
+          path: target/pinned-native-runtime
+          run-id: ${{ env.NATIVE_SOURCE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-build-evidence
+          path: target/pinned-native-build
+          run-id: ${{ env.NATIVE_SOURCE_RUN_ID }}
+          github-token: ${{ github.token }}
+      - name: Verify all payload bytes, both source patches and compiler evidence
+        id: input
+        run: python tools/verify-native-candidate.py --runtime target/pinned-native-runtime --build-report target/pinned-native-build/native-build.json --report target/native-candidate-input.json
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.97.1 --profile minimal
+      - name: Qualify actual private probe and production controller with strict native getters
+        id: positive
+        shell: pwsh
+        run: |
+          $inputReport = Get-Content target/native-candidate-input.json -Raw | ConvertFrom-Json
+          $env:BROWS_NATIVE_CANDIDATE_EXECUTABLE = $inputReport.executable
+          $env:BROWS_NATIVE_CANDIDATE_SHA256 = $inputReport.executableSha256
+          $env:BROWS_NATIVE_CANDIDATE_VERSION = $inputReport.runtimeVersion
+          cargo +1.97.1 test -p brows-adapters-runtime private_native_candidate_ --locked -- --ignored --nocapture --test-threads=1
+      - name: Recheck payload integrity after browser execution
+        id: post
+        if: ${{ always() && steps.input.outcome == 'success' }}
+        run: python tools/verify-native-candidate.py --runtime target/pinned-native-runtime --build-report target/pinned-native-build/native-build.json --report target/native-candidate-input-after.json
+      - name: Record positive qualification only after all native assertions and post-checks
+        if: ${{ !cancelled() && steps.positive.outcome == 'success' && steps.post.outcome == 'success' }}
+        shell: pwsh
+        run: |
+          $inputReport = Get-Content target/native-candidate-input.json -Raw | ConvertFrom-Json
+          $controller = Get-Content target/fingerprint-native-candidate-controller-acceptance.json -Raw | ConvertFrom-Json
+          $probe = Get-Content target/native-candidate-capability.json -Raw | ConvertFrom-Json
+          if (-not $controller.assertionsPassed -or -not $controller.nativeCandidate -or $controller.runtimeAdmitted -or
+              -not $probe.nativeCandidateProbePassed -or $probe.runtimeAdmitted -or $probe.runtimeTrust -ne 'Untrusted' -or
+              $controller.executableSha256 -ne $inputReport.executableSha256 -or $probe.executableSha256 -ne $inputReport.executableSha256 -or
+              @($controller.observations).Count -ne 2) { throw 'Missing or mismatched native qualification evidence' }
+          @{ assertionsPassed = $true; nativeControllerPassed = $true; nativeProbePassed = $true;
+             sourceRunId = $env:NATIVE_SOURCE_RUN_ID; sourceHead = $env:NATIVE_SOURCE_HEAD;
+             executableSha256 = $inputReport.executableSha256; runtimeAdmitted = $false; complete = $false;
+             scope = 'isolated functional native CPU/platform/language/screen qualification; Memory/rendering remain stated fallbacks' } |
+             ConvertTo-Json | Set-Content target/native-candidate-qualification.json -Encoding utf8
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-candidate-controller-qualification
+          path: |
+            target/native-candidate-qualification.json
+            target/native-candidate-input*.json
+            target/native-candidate-capability.json
+            target/fingerprint-native-candidate-controller-acceptance.json
+          if-no-files-found: warn

@@ -1481,6 +1481,14 @@ mod tests {
         platform: String,
         languages: Vec<String>,
         screen: ScreenConfig,
+        native_candidate: bool,
+        candidate_digest: Option<String>,
+    }
+
+    #[derive(Clone, Copy)]
+    enum AcceptanceRuntime {
+        SignedEdge,
+        NativeCandidate,
     }
 
     impl Drop for AcceptanceBrowser {
@@ -1510,7 +1518,8 @@ mod tests {
                 // admitted Chromium. Cross-OS Worker platform remains a stated
                 // script fallback; CPU and languages must still be native.
                 let worker = value["touch"].is_null();
-                let expected_native = !(name == "platform" && worker && self.platform != "Win32");
+                let expected_native = self.native_candidate
+                    || !(name == "platform" && worker && self.platform != "Win32");
                 assert_eq!(
                     native["nativeGetter"], expected_native,
                     "{} {name}",
@@ -1627,7 +1636,14 @@ mod tests {
         }
         fn write_report_status(&self, name: &str, observations: Value, passed: bool) {
             let version = self.controller.wire.version.lock().unwrap().clone();
-            let report = json!({"scope":"isolated signed Edge private controller", "runtimeVersion":version,
+            let scope = if self.native_candidate {
+                "isolated exact-digest unsigned native candidate through production controller"
+            } else {
+                "isolated signed Edge private controller"
+            };
+            let report = json!({"scope":scope, "runtimeVersion":version,
+                "nativeCandidate":self.native_candidate,"runtimeAdmitted":false,
+                "executableSha256":self.candidate_digest,
                 "assertionsPassed":passed,"complete":false,"observations":observations,
                 "uncovered":["public DNS/ICE", "fonts/GPU/network stack", "other lifecycle scenarios"]});
             let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1688,15 +1704,51 @@ mod tests {
         seed: &str,
         customize: impl FnOnce(&mut brows_domain::SeedableNoisePersona),
     ) -> AcceptanceBrowser {
+        acceptance_browser_configured_runtime(
+            fixture,
+            route,
+            canvas_noise,
+            seed,
+            customize,
+            AcceptanceRuntime::SignedEdge,
+        )
+    }
+
+    fn acceptance_browser_configured_runtime(
+        fixture: &browser_fixture::ControlFixture,
+        route: &str,
+        canvas_noise: bool,
+        seed: &str,
+        customize: impl FnOnce(&mut brows_domain::SeedableNoisePersona),
+        runtime: AcceptanceRuntime,
+    ) -> AcceptanceBrowser {
         use brows_domain::{DeviceMemoryGb, ScreenConfig, SeedableNoisePersona, WebGLProfile};
-        let executable = std::path::PathBuf::from(
-            std::env::var_os("BROWS_ACCEPTANCE_BROWSER").expect("explicit acceptance browser"),
-        );
-        assert_eq!(
-            crate::verify_authenticode_publisher(&executable, &["Microsoft Corporation"]).unwrap(),
-            "Microsoft Corporation"
-        );
-        let version = std::env::var("BROWS_ACCEPTANCE_VERSION").expect("verified binary version");
+        let (executable, version, native_candidate, candidate_digest) = match runtime {
+            AcceptanceRuntime::SignedEdge => {
+                let executable = std::path::PathBuf::from(
+                    std::env::var_os("BROWS_ACCEPTANCE_BROWSER")
+                        .expect("explicit acceptance browser"),
+                );
+                assert_eq!(
+                    crate::verify_authenticode_publisher(&executable, &["Microsoft Corporation"])
+                        .unwrap(),
+                    "Microsoft Corporation"
+                );
+                let version =
+                    std::env::var("BROWS_ACCEPTANCE_VERSION").expect("verified binary version");
+                (executable, version, false, None)
+            }
+            AcceptanceRuntime::NativeCandidate => {
+                let build = crate::fingerprint_probe::isolated_native_candidate_for_test().unwrap();
+                assert_eq!(build.trust, brows_domain::RuntimeTrust::Untrusted);
+                (
+                    build.executable_path,
+                    build.version,
+                    true,
+                    Some(build.sha256),
+                )
+            }
+        };
         static NEXT_ROOT: AtomicU64 = AtomicU64::new(1);
         let root = std::env::temp_dir().join(format!(
             "brows-private-acceptance-{}-{}-{}",
@@ -1783,6 +1835,8 @@ mod tests {
             platform: platform_name,
             languages,
             screen,
+            native_candidate,
+            candidate_digest,
         }
     }
 
@@ -1878,15 +1932,36 @@ mod tests {
     #[test]
     #[ignore = "requires signed Edge; native screen getters/CSS without resizing the viewport"]
     fn private_native_screen_acceptance() {
+        native_screen_controller_checks(AcceptanceRuntime::SignedEdge);
+    }
+
+    #[test]
+    #[ignore = "requires exact-digest staged native candidate; all Worker platform getters must be native"]
+    fn private_native_candidate_controller_acceptance() {
+        native_screen_controller_checks(AcceptanceRuntime::NativeCandidate);
+    }
+
+    fn native_screen_controller_checks(runtime: AcceptanceRuntime) {
+        let candidate = matches!(runtime, AcceptanceRuntime::NativeCandidate);
+        let report_name = if candidate {
+            "native-candidate-controller"
+        } else {
+            "native-screen"
+        };
         let mut modes = Vec::new();
         for (width, height, scale, depth) in [(1440, 900, 125, 24), (900, 1440, 200, 16)] {
-            let fixture = browser_fixture::ControlFixture::start(false);
-            let browser = acceptance_browser_configured(
+            let fixture = browser_fixture::ControlFixture::start(candidate);
+            let browser = acceptance_browser_configured_runtime(
                 &fixture,
                 "native-screen",
                 true,
                 "native-screen-controls",
                 |persona| {
+                    if candidate {
+                        persona.platform = PlatformKind::Linux;
+                        persona.hardware_concurrency = if width < height { 7 } else { 3 };
+                        persona.touch_points = if width < height { 5 } else { 0 };
+                    }
                     persona.screen = ScreenConfig {
                         width,
                         height,
@@ -1894,10 +1969,11 @@ mod tests {
                         device_scale_factor_hundredths: scale,
                     };
                 },
+                runtime,
             );
             let proofs = fixture.wait_proofs("/native-screen/");
             browser.write_report_status(
-                "native-screen",
+                report_name,
                 json!({"configured":{"width":browser.screen.width,"height":browser.screen.height,
                     "colorDepth":browser.screen.color_depth,
                     "scaleHundredths":browser.screen.device_scale_factor_hundredths},
@@ -1910,7 +1986,7 @@ mod tests {
                     .map(|(_, _, sample)| sample["kind"].as_str().unwrap())
                     .collect::<BTreeSet<_>>()
                     .len(),
-                6
+                if candidate { 9 } else { 6 }
             );
             for (_, _, sample) in &proofs {
                 browser.assert_signals(sample);
@@ -1980,7 +2056,7 @@ mod tests {
                 "observations":proofs.iter().map(|(_,_,sample)|sample).collect::<Vec<_>>(),
                 "reloadObservations":reloaded.iter().map(|(_,_,sample)|sample).collect::<Vec<_>>()}));
             if width == 900 {
-                browser.write_report("native-screen", json!(modes));
+                browser.write_report(report_name, json!(modes));
             }
         }
     }
