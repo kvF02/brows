@@ -137,6 +137,7 @@ jobs:
   runtime-positive-evidence:
     name: Native runtime positives required
     needs: build
+    if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
