@@ -10,7 +10,7 @@ use super::{
 use brows_application::{
     PortError, PortErrorKind, PortResult, SessionObservation, TargetObservation,
 };
-use brows_domain::{PlatformKind, SessionFingerprintConfig, SessionId};
+use brows_domain::{PlatformKind, ScreenConfig, SessionFingerprintConfig, SessionId};
 use serde_json::{json, Value};
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -1085,6 +1085,20 @@ impl Controller {
                 "private probe page changed during capture",
             ));
         }
+        if result.as_str().is_some_and(|value| !value.is_empty())
+            && !self
+                .targets
+                .0
+                .lock()
+                .map_err(|_| internal("target lock poisoned"))?
+                .snapshot()
+                .iter()
+                .any(|target| target.kind == "iframe")
+        {
+            return Err(internal(
+                "private screen probe did not control a distinct OOPIF",
+            ));
+        }
         result
             .as_str()
             .filter(|value| value.len() <= 8192)
@@ -1286,6 +1300,9 @@ fn configure(
         Some(session),
     )?;
     let is_page = kind == "page" || kind == "iframe";
+    if kind == "page" {
+        configure_native_screen(wire, session, &policy.persona.screen)?;
+    }
     if is_page {
         let points = policy.persona.touch_points;
         let mut touch = json!({"enabled":points>0});
@@ -1325,11 +1342,31 @@ fn configure(
             )?;
         }
         if !is_page && evaluate(wire, session, &script)? != true {
-            return Err(internal("target native Navigator policy did not apply"));
+            return Err(internal("target native browser policy did not apply"));
         }
     }
     Ok(())
 }
+fn configure_native_screen(wire: &Wire, session: &str, screen: &ScreenConfig) -> PortResult<()> {
+    // Metrics overrides are only accepted at the top target. Full OOPIF
+    // propagation requires the pinned screen C++ candidate; stock Chromium
+    // fails the strict cross-frame acceptance and must not qualify this cutover.
+    // Zero view dimensions/DSF preserve the real viewport, window and DPR.
+    let orientation = if screen.width < screen.height {
+        "portraitPrimary"
+    } else {
+        "landscapePrimary"
+    };
+    wire.call(
+        "Emulation.setDeviceMetricsOverride",
+        json!({"width":0,"height":0,"deviceScaleFactor":0,"mobile":false,
+            "dontSetVisibleSize":true,"screenWidth":screen.width,"screenHeight":screen.height,
+            "screenOrientation":{"type":orientation,"angle":0}}),
+        Some(session),
+    )?;
+    Ok(())
+}
+
 fn native_navigator_check(policy: &SessionFingerprintConfig) -> String {
     let platform = match policy.persona.platform {
         PlatformKind::Windows => "Win32",
@@ -1337,8 +1374,16 @@ fn native_navigator_check(policy: &SessionFingerprintConfig) -> String {
         PlatformKind::Linux => "Linux x86_64",
     };
     let expected = json!({"cpu":policy.persona.hardware_concurrency,"platform":platform,
-        "languages":policy.languages,"touch":policy.persona.touch_points});
-    format!("(()=>{{const expected={expected};return navigator.hardwareConcurrency===expected.cpu&&navigator.platform===expected.platform&&navigator.language===expected.languages[0]&&JSON.stringify(Array.from(navigator.languages))===JSON.stringify(expected.languages)&&(typeof document==='undefined'||navigator.maxTouchPoints===expected.touch);}})()")
+        "languages":policy.languages,"touch":policy.persona.touch_points,
+        "screenWidth":policy.persona.screen.width,"screenHeight":policy.persona.screen.height});
+    format!(
+        r#"(()=>{{
+const expected={expected};
+if(navigator.hardwareConcurrency!==expected.cpu||navigator.platform!==expected.platform||navigator.language!==expected.languages[0]||JSON.stringify(Array.from(navigator.languages))!==JSON.stringify(expected.languages))return false;
+if(typeof document==='undefined')return true;
+return navigator.maxTouchPoints===expected.touch&&screen.width===expected.screenWidth&&screen.height===expected.screenHeight&&screen.availWidth===expected.screenWidth&&screen.availHeight===expected.screenHeight&&matchMedia('(device-width: '+expected.screenWidth+'px) and (device-height: '+expected.screenHeight+'px)').matches;
+}})()"#
+    )
 }
 const OBSERVE:&str="(()=>({userAgent:navigator.userAgent,platform:navigator.platform,languages:Array.from(navigator.languages),hardwareConcurrency:navigator.hardwareConcurrency,deviceMemory:navigator.deviceMemory,timezone:Intl.DateTimeFormat().resolvedOptions().timeZone,clientHintsPlatform:navigator.userAgentData?.platform??''}))()";
 
@@ -1435,6 +1480,7 @@ mod tests {
         touch_points: u8,
         platform: String,
         languages: Vec<String>,
+        screen: ScreenConfig,
     }
 
     impl Drop for AcceptanceBrowser {
@@ -1490,6 +1536,24 @@ mod tests {
                 json!(self.languages)
             );
             if !value["touch"].is_null() {
+                let screen = &value["screen"];
+                for (name, expected) in [
+                    ("width", self.screen.width),
+                    ("height", self.screen.height),
+                    ("availWidth", self.screen.width),
+                    ("availHeight", self.screen.height),
+                ] {
+                    assert_eq!(screen[name], expected, "{} screen {name}", value["kind"]);
+                    assert_eq!(screen["getters"][name]["nativeGetter"], true);
+                    assert_eq!(screen["getters"][name]["brandCheck"], true);
+                    assert_eq!(screen["getters"][name]["value"], expected);
+                }
+                assert_eq!(screen["deviceMedia"], true);
+                assert_eq!(screen["wrongDeviceMedia"], false);
+                for name in ["colorDepth", "pixelDepth"] {
+                    assert_eq!(screen["getters"][name]["value"], self.screen.color_depth);
+                    assert_eq!(screen["getters"][name]["brandCheck"], true);
+                }
                 assert_eq!(value["touch"]["points"], self.touch_points);
                 assert_eq!(
                     value["nativeNavigator"]["maxTouchPoints"]["nativeGetter"],
@@ -1610,6 +1674,20 @@ mod tests {
         touch_points: u8,
         platform: PlatformKind,
     ) -> AcceptanceBrowser {
+        acceptance_browser_configured(fixture, route, canvas_noise, seed, |persona| {
+            persona.hardware_concurrency = hardware_concurrency;
+            persona.touch_points = touch_points;
+            persona.platform = platform;
+        })
+    }
+
+    fn acceptance_browser_configured(
+        fixture: &browser_fixture::ControlFixture,
+        route: &str,
+        canvas_noise: bool,
+        seed: &str,
+        customize: impl FnOnce(&mut brows_domain::SeedableNoisePersona),
+    ) -> AcceptanceBrowser {
         use brows_domain::{DeviceMemoryGb, ScreenConfig, SeedableNoisePersona, WebGLProfile};
         let executable = std::path::PathBuf::from(
             std::env::var_os("BROWS_ACCEPTANCE_BROWSER").expect("explicit acceptance browser"),
@@ -1627,12 +1705,12 @@ mod tests {
             NEXT_ROOT.fetch_add(1, Ordering::Relaxed)
         ));
         std::fs::create_dir_all(&root).unwrap();
-        let persona = SeedableNoisePersona {
+        let mut persona = SeedableNoisePersona {
             seed: seed.to_owned(),
-            platform,
-            hardware_concurrency,
+            platform: PlatformKind::Windows,
+            hardware_concurrency: 3,
             device_memory: DeviceMemoryGb::Half,
-            touch_points,
+            touch_points: 0,
             screen: ScreenConfig {
                 width: 1920,
                 height: 1080,
@@ -1646,6 +1724,11 @@ mod tests {
             spoof_canvas: canvas_noise,
             spoof_audio: false,
         };
+        customize(&mut persona);
+        let screen = persona.screen;
+        let platform = persona.platform;
+        let hardware_concurrency = persona.hardware_concurrency;
+        let touch_points = persona.touch_points;
         let fp =
             brows_application::persona_fingerprint::PersonaFingerprint::derive(&persona, &version)
                 .unwrap();
@@ -1673,6 +1756,11 @@ mod tests {
             OsString::from("--no-first-run"),
             OsString::from("--no-default-browser-check"),
             OsString::from("--no-startup-window"),
+            OsString::from("--window-size=760,600"),
+            OsString::from(format!(
+                "--force-device-scale-factor={}",
+                f64::from(screen.device_scale_factor_hundredths) / 100.0
+            )),
             OsString::from(format!("--user-agent={user_agent}")),
             OsString::from("--lang=en-US"),
         ];
@@ -1694,6 +1782,7 @@ mod tests {
             touch_points,
             platform: platform_name,
             languages,
+            screen,
         }
     }
 
@@ -1782,6 +1871,116 @@ mod tests {
                 "observations":proofs.iter().map(|(_, _, sample)|sample).collect::<Vec<_>>()}));
             if cpu == 5 {
                 browser.write_report("native-navigator", json!(modes));
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "requires signed Edge; native screen getters/CSS without resizing the viewport"]
+    fn private_native_screen_acceptance() {
+        let mut modes = Vec::new();
+        for (width, height, scale, depth) in [(1440, 900, 125, 24), (900, 1440, 200, 16)] {
+            let fixture = browser_fixture::ControlFixture::start(false);
+            let browser = acceptance_browser_configured(
+                &fixture,
+                "native-screen",
+                true,
+                "native-screen-controls",
+                |persona| {
+                    persona.screen = ScreenConfig {
+                        width,
+                        height,
+                        color_depth: depth,
+                        device_scale_factor_hundredths: scale,
+                    };
+                },
+            );
+            let proofs = fixture.wait_proofs("/native-screen/");
+            browser.write_report_status(
+                "native-screen",
+                json!({"configured":{"width":browser.screen.width,"height":browser.screen.height,
+                    "colorDepth":browser.screen.color_depth,
+                    "scaleHundredths":browser.screen.device_scale_factor_hundredths},
+                    "observations":proofs.iter().map(|(_,_,sample)|sample).collect::<Vec<_>>() }),
+                false,
+            );
+            assert_eq!(
+                proofs
+                    .iter()
+                    .map(|(_, _, sample)| sample["kind"].as_str().unwrap())
+                    .collect::<BTreeSet<_>>()
+                    .len(),
+                6
+            );
+            for (_, _, sample) in &proofs {
+                browser.assert_signals(sample);
+                if !sample["screen"].is_null() {
+                    assert_eq!(
+                        sample["screen"]["orientation"],
+                        if width < height {
+                            "portrait-primary"
+                        } else {
+                            "landscape-primary"
+                        }
+                    );
+                    assert!(
+                        (sample["screen"]["dpr"].as_f64().unwrap() - f64::from(scale) / 100.0)
+                            .abs()
+                            < 0.001
+                    );
+                }
+            }
+            let page = browser
+                .controller
+                .targets
+                .0
+                .lock()
+                .unwrap()
+                .snapshot()
+                .into_iter()
+                .find(|target| target.kind == "page")
+                .unwrap();
+            let inspect = "({inner:[innerWidth,innerHeight],outer:[outerWidth,outerHeight],dpr:devicePixelRatio,sameGetters:['width','height','availWidth','availHeight'].every(name=>Object.getOwnPropertyDescriptor(Screen.prototype,name).get===globalThis.__ownedScreenGetters[name])})";
+            let before = evaluate(&browser.controller.wire, &page.session, inspect).unwrap();
+            assert_eq!(before["sameGetters"], true);
+            browser
+                .controller
+                .wire
+                .call(
+                    "Emulation.clearDeviceMetricsOverride",
+                    json!({}),
+                    Some(&page.session),
+                )
+                .unwrap();
+            let host_viewport = evaluate(&browser.controller.wire, &page.session, inspect).unwrap();
+            assert_eq!(
+                before, host_viewport,
+                "screen emulation must not resize the real viewport/window or replace DPR/getters"
+            );
+            configure_native_screen(&browser.controller.wire, &page.session, &browser.screen)
+                .unwrap();
+            let restored = evaluate(&browser.controller.wire, &page.session, inspect).unwrap();
+            assert_eq!(before, restored);
+            browser
+                .controller
+                .wire
+                .call(
+                    "Page.reload",
+                    json!({"ignoreCache":true}),
+                    Some(&page.session),
+                )
+                .unwrap();
+            let reloaded = fixture.wait_kind_count("/native-screen/", "page", 2);
+            assert_eq!(reloaded.len(), 2);
+            for (_, _, sample) in &reloaded {
+                browser.assert_signals(sample);
+            }
+            modes.push(json!({"screenWidth":width,"screenHeight":height,"scaleHundredths":scale,
+                "colorDepth":depth,"viewportPreserved":true,"getterIdentityPreserved":true,
+                "observations":proofs.iter().map(|(_,_,sample)|sample).collect::<Vec<_>>(),
+                "reloadObservations":reloaded.iter().map(|(_,_,sample)|sample).collect::<Vec<_>>()}));
+            if width == 900 {
+                browser.write_report("native-screen", json!(modes));
             }
         }
     }

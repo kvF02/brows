@@ -205,6 +205,8 @@ function environment(overrides = {}, missing = [], worker = false) {
   const originalDpr = Object.getOwnPropertyDescriptor(globals, 'devicePixelRatio');
   const originalNavigatorGetters = Object.fromEntries(['language','languages','platform','hardwareConcurrency','maxTouchPoints']
     .map(name => [name,Object.getOwnPropertyDescriptor(Navigator.prototype,name).get]));
+  const originalScreenGetters = Object.fromEntries(['width','height','availWidth','availHeight','colorDepth','pixelDepth']
+    .map(name => [name,Object.getOwnPropertyDescriptor(Screen.prototype,name).get]));
   const context = vm.createContext(globals);
   const serialized = JSON.stringify(persona).replaceAll('\\', '\\\\').replaceAll("'", "\\'");
   vm.runInContext(template.replace('{{PERSONA_JSON}}', serialized), context, { filename: 'fingerprint-content.js' });
@@ -212,7 +214,7 @@ function environment(overrides = {}, missing = [], worker = false) {
     const json = JSON.stringify(next).replaceAll('\\', '\\\\').replaceAll("'", "\\'");
     return vm.runInContext(template.replace('{{PERSONA_JSON}}', json), context);
   };
-  return { ...globals, persona, calls, context, originalRealtime, originalDpr, originalNavigatorGetters, reinject };
+  return { ...globals, persona, calls, context, originalRealtime, originalDpr, originalNavigatorGetters, originalScreenGetters, reinject };
 }
 
 function populatedCanvas(env, offscreen = false) {
@@ -245,7 +247,19 @@ test('private native Navigator mode leaves the original page and Worker getters 
     assert.equal(env.navigator.maxTouchPoints,1);
     assert.equal(env.navigator.deviceMemory,0.5);
     assert.equal(env.reinject(),true);
+    if (!worker) {
+      for (const [name,getter] of Object.entries(env.originalScreenGetters)) {
+        assert.equal(Object.getOwnPropertyDescriptor(env.Screen.prototype,name).get,getter,name);
+        assert.throws(()=>getter.call({}),TypeError);
+      }
+      assert.equal(env.screen.width,800); // Emulation, rather than this hook, must own geometry.
+      assert.equal(env.screen.availWidth,790);
+    }
   }
+  const depth = environment({native_navigator:true,color_depth:16});
+  assert.equal(depth.screen.colorDepth,16);
+  assert.notEqual(Object.getOwnPropertyDescriptor(depth.Screen.prototype,'colorDepth').get,depth.originalScreenGetters.colorDepth);
+  assert.equal(Object.getOwnPropertyDescriptor(depth.Screen.prototype,'width').get,depth.originalScreenGetters.width);
 });
 
 test('navigator native types, primary language, frozen languages and getter brand checks', () => {

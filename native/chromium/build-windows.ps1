@@ -12,6 +12,8 @@ if ($root -match '\s' -or (Test-Path -LiteralPath $root)) { throw 'Use a new bui
 $result = [ordered]@{ schemaVersion = 1; sourceRevision = $manifest.upstream.revision; stage = 'preflight'; compiled = $false; nativeAcceptancePassed = $false; runtimeAdmitted = $false; complete = $false; failure = $null }
 $result.nativeFirstScriptsPassed = $false
 $result.nativeLifecyclePassed = $false
+$result.nativeScreenPassed = $false
+$result.buildProfile = 'debug-component-functional-candidate'
 $result.runtimeBundleReady = $false
 $bundle = $null
 $oldPath = $env:PATH
@@ -85,13 +87,19 @@ try {
         $result.stage = 'patch'
         & $python (Join-Path $PSScriptRoot 'verify_patch.py') --source $src --apply --report "$reportPath.source.json"
         Assert-Exit 'pinned patch and probe generation'
+        & $python (Join-Path $PSScriptRoot 'screen/verify_patch.py') --source $src --apply --report "$reportPath.screen-source.json"
+        Assert-Exit 'pinned OOPIF screen propagation patch'
         $result.stage = 'hooks'
         & (Join-Path $depot 'gclient.bat') runhooks
         Assert-Exit 'Chromium hooks'
         Push-Location $src
         try {
             $result.stage = 'generate'
-            $gnArgs = 'is_debug=false is_component_build=false symbol_level=0 blink_symbol_level=0 v8_symbol_level=0 target_cpu="x64" use_remoteexec=false'
+            # Functional qualification first: the previous optimized static
+            # build reached only 22,293 / 46,422 edges before the four-hour cap.
+            # Component/debug keeps assertions and all sandbox/security gates;
+            # it is not a release-performance or production-admission result.
+            $gnArgs = 'is_debug=true is_component_build=true v8_optimized_debug=false symbol_level=0 blink_symbol_level=0 v8_symbol_level=0 target_cpu="x64" use_remoteexec=false'
             $result.gnArgs = $gnArgs
             $outDirectory = Join-Path $src 'out/BrowsNative'
             [IO.Directory]::CreateDirectory($outDirectory) | Out-Null
@@ -100,6 +108,8 @@ try {
             & (Join-Path $depot 'gn.bat') gen out/BrowsNative
             Assert-Exit 'GN generation'
             $result.stage = 'compile'
+            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($reportPath)) | Out-Null
+            $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding utf8
             & (Join-Path $depot 'autoninja.bat') -C out/BrowsNative headless_shell
             Assert-Exit 'headless shell compilation'
             $binary = Join-Path $src 'out/BrowsNative/headless_shell.exe'
@@ -131,6 +141,13 @@ try {
             $lifecycleEvidence = Get-Content -LiteralPath "$reportPath.lifecycle.json" -Raw | ConvertFrom-Json
             if (-not $lifecycleEvidence.assertionsPassed -or -not $lifecycleEvidence.nativeLifecyclePassed) { throw 'Native lifecycle acceptance did not establish the requested capability' }
             $result.nativeLifecyclePassed = $true
+            $result.stage = 'native-screen'
+            $screenAcceptance = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../tools/native-screen-acceptance.mjs'))
+            & $node $screenAcceptance --browser $binary --sha256 $digest --expect native --report "$reportPath.screen-acceptance.json"
+            Assert-Exit 'native OOPIF screen acceptance'
+            $screenEvidence = Get-Content -LiteralPath "$reportPath.screen-acceptance.json" -Raw | ConvertFrom-Json
+            if (-not $screenEvidence.assertionsPassed -or -not $screenEvidence.nativeScreenPassed -or -not $screenEvidence.oopifObserved) { throw 'Native screen acceptance did not establish OOPIF propagation' }
+            $result.nativeScreenPassed = $true
             $result.nativeAcceptancePassed = $true
             $result.stage = 'completed-test-build'
         } finally { Pop-Location }

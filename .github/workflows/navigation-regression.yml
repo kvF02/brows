@@ -26,6 +26,34 @@ concurrency:
   group: navigation-regression-${{ github.ref }}
   cancel-in-progress: true
 jobs:
+  native-screen:
+    name: Native screen on Windows Server 2022
+    runs-on: windows-2022
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+      - name: Select signature-admitted Edge
+        shell: pwsh
+        run: |
+          $edge = Join-Path ${env:ProgramFiles(x86)} 'Microsoft/Edge/Application/msedge.exe'
+          $signature = Get-AuthenticodeSignature -LiteralPath $edge
+          if ($signature.Status -ne 'Valid' -or $signature.SignerCertificate.GetNameInfo([Security.Cryptography.X509Certificates.X509NameType]::SimpleName, $false) -ne 'Microsoft Corporation') { throw 'Edge signature admission failed' }
+          "BROWS_ACCEPTANCE_BROWSER=$edge" >> $env:GITHUB_ENV
+          $v = [Diagnostics.FileVersionInfo]::GetVersionInfo($edge)
+          "BROWS_ACCEPTANCE_VERSION=$($v.ProductMajorPart).$($v.ProductMinorPart).$($v.ProductBuildPart).$($v.ProductPrivatePart)" >> $env:GITHUB_ENV
+      - name: Install pinned Rust
+        run: rustup toolchain install 1.97.1 --profile minimal --component clippy
+      - name: Verify native screen getters and CSS while preserving viewport and DPR
+        timeout-minutes: 5
+        run: cargo +1.97.1 test -p brows-adapters-runtime private_native_screen_acceptance --locked -- --ignored --nocapture
+      - name: Lint Windows runtime paths
+        run: cargo +1.97.1 clippy -p brows-adapters-runtime --all-targets --locked -- -D warnings
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: native-screen-windows2022-evidence
+          path: target/fingerprint-native-screen-acceptance.json
+          if-no-files-found: warn
   lifecycle:
     runs-on: windows-latest
     timeout-minutes: 15
@@ -51,6 +79,9 @@ jobs:
       - name: Verify native Navigator getters and real touch input
         timeout-minutes: 3
         run: cargo +1.97.1 test -p brows-adapters-runtime private_native_navigator_acceptance --locked -- --ignored --nocapture
+      - name: Verify native screen getters and CSS while preserving viewport and DPR
+        timeout-minutes: 3
+        run: cargo +1.97.1 test -p brows-adapters-runtime private_native_screen_acceptance --locked -- --ignored --nocapture
       - name: Verify native, seeded, reopened and different-seed GPU pixel paths
         timeout-minutes: 3
         run: cargo +1.97.1 test -p brows-adapters-runtime private_webgl_pixel_acceptance --locked -- --ignored --nocapture
@@ -78,6 +109,7 @@ jobs:
           path: |
             target/fingerprint-pending-navigation-acceptance.json
             target/fingerprint-native-navigator-acceptance.json
+            target/fingerprint-native-screen-acceptance.json
             target/fingerprint-startup-navigation-stress-acceptance.json
             target/fingerprint-webgl-pixels-acceptance.json
             target/fingerprint-worker-lifecycle-acceptance.json

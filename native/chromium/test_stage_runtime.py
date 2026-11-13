@@ -27,6 +27,9 @@ class TestRuntimeStaging(unittest.TestCase):
         self.assertEqual((self.destination / "icudtl.dat").read_bytes(), b"runtime data")
         self.assertFalse(result["runtimeAdmitted"])
         self.assertFalse(result["complete"])
+        self.assertEqual(result["screenPatchSha256"],
+                         json.loads((self.destination / "brows-screen-source-manifest.json").read_text())["patch"]["sha256"])
+        self.assertEqual(digest(self.destination / "brows-native-oopif-screen.patch"), result["screenPatchSha256"])
         self.assertEqual(verify(self.destination, self.expected), result)
         self.assertEqual(json.loads((self.destination / INDEX).read_text()), result)
 

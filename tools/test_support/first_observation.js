@@ -31,6 +31,17 @@ first.nativeNavigator = Object.fromEntries(['hardwareConcurrency','platform','la
       brandCheck, value: Array.isArray(value) ? Array.from(value) : value}];
   }));
 if (typeof document !== 'undefined') {
+  const names = ['width','height','availWidth','availHeight','colorDepth','pixelDepth'];
+  globalThis.__ownedScreenGetters = Object.fromEntries(names.map(name=>[name,Object.getOwnPropertyDescriptor(Screen.prototype,name).get]));
+  first.screen = {width:screen.width,height:screen.height,availWidth:screen.availWidth,availHeight:screen.availHeight,
+    orientation:screen.orientation.type,dpr:devicePixelRatio,
+    deviceMedia:matchMedia(`(device-width: ${screen.width}px) and (device-height: ${screen.height}px)`).matches,
+    wrongDeviceMedia:matchMedia(`(device-width: ${screen.width+1}px)`).matches,
+    getters:Object.fromEntries(names.map(name=>{
+      const getter=globalThis.__ownedScreenGetters[name];let brandCheck=false;
+      try{Reflect.apply(getter,{},[])}catch(error){brandCheck=error instanceof TypeError}
+      return[name,{nativeGetter:Function.prototype.toString.call(getter).includes('[native code]'),brandCheck,value:Reflect.apply(getter,screen,[])}];
+    }))};
   first.touch = {points:navigator.maxTouchPoints,coarse:matchMedia('(pointer: coarse)').matches,
     hoverNone:matchMedia('(hover: none)').matches,api:'ontouchstart' in globalThis};
   if (location.pathname === '/native-hardware/page') {

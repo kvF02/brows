@@ -59,7 +59,14 @@
       ['width', persona.screen_width], ['height', persona.screen_height],
       ['availWidth', persona.screen_width], ['availHeight', persona.screen_height],
       ['colorDepth', persona.color_depth], ['pixelDepth', persona.color_depth],
-    ]) overrideGetter(Screen.prototype, name, value);
+    ]) {
+      // The private controller owns native screen geometry (including CSS
+      // device media queries). Keep native depth when it already matches;
+      // unmatched color/pixel depth remains an explicit script fallback.
+      if (persona.native_navigator &&
+          (!['colorDepth', 'pixelDepth'].includes(name) || screen[name] === value)) continue;
+      overrideGetter(Screen.prototype, name, value);
+    }
   }
 
   // Capture both interfaces before wrapping either (some hosts share methods).

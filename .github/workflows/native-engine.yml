@@ -35,6 +35,7 @@ jobs:
           node-version: 24
       - run: python -m pip install -r native/chromium/requirements.txt
       - run: python native/chromium/verify_patch.py --report target/native-source-check.json
+      - run: python native/chromium/screen/verify_patch.py --report target/native-screen-source-check.json
       - run: python -m unittest discover -s native/chromium -p test_stage_runtime.py -v
       - name: Parse Windows build drivers before any large checkout
         if: runner.os == 'Windows'
@@ -59,6 +60,7 @@ jobs:
           name: native-source-check-${{ matrix.os }}
           path: |
             target/native-source-check.json
+            target/native-screen-source-check.json
             target/native-depot-bootstrap.json
           if-no-files-found: warn
   windows-preflight:
@@ -88,7 +90,7 @@ jobs:
       (needs.windows-preflight.outputs.ready == 'true' || needs.windows-preflight.outputs.can_prepare_sdk == 'true') &&
       (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     runs-on: windows-latest
-    timeout-minutes: 240
+    timeout-minutes: 360
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -144,6 +146,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw 'Stock native control failed' }
           node tools/native-worker-lifecycle.mjs --browser $edge --sha256 $digest --expect stock --report target/native-stock-lifecycle.json
           if ($LASTEXITCODE -ne 0) { throw 'Stock native lifecycle control failed' }
+          node tools/native-screen-acceptance.mjs --browser $edge --sha256 $digest --expect stock --report target/native-stock-screen.json
+          if ($LASTEXITCODE -ne 0) { throw 'Stock screen propagation control failed' }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -151,4 +155,5 @@ jobs:
           path: |
             target/native-stock-control.json
             target/native-stock-lifecycle.json
+            target/native-stock-screen.json
           if-no-files-found: warn

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "version": "158.0.8127.18",
+    "revision": "6449d9f9a6a906edff724b7b220199b3fde4615c",
+    "repository": "https://chromium.googlesource.com/chromium/src.git"
+  },
+  "patch": {
+    "path": "patches/0001-native-oopif-screen-geometry.patch",
+    "sha256": "5fc122e3f034ef6fd134b4cc8adb91d0d3fd41983a3cfc2e74a0bf2c0c99d52b"
+  },
+  "sources": [
+    {
+      "path": "third_party/blink/renderer/core/frame/web_frame_widget_impl.h",
+      "gitBlob": "9c9b3c56ba68274d2bd09b996903074d945cfc9e"
+    },
+    {
+      "path": "third_party/blink/renderer/core/frame/web_frame_widget_impl.cc",
+      "gitBlob": "15820a2f69d994027ba95534c7ec863dd3b05bb7"
+    },
+    {
+      "path": "third_party/blink/renderer/core/frame/web_remote_frame_impl.cc",
+      "gitBlob": "30b6dd03d9049bfa8e06ad0f049113f05d73ea81"
+    }
+  ],
+  "productionEnabled": false,
+  "compiled": false,
+  "nativeAcceptancePassed": false
+}

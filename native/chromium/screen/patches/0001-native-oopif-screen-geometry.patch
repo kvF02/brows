@@ -1,0 +1,72 @@
+diff --git a/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc b/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
+index 15820a2f69d994027ba95534c7ec863dd3b05bb7..a150ab9c3f2369ecc6b5fe97bc4b90f41dfc3fd6 100644
+--- a/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
++++ b/third_party/blink/renderer/core/frame/web_frame_widget_impl.cc
+@@ -3770,6 +3770,17 @@ const display::ScreenInfos& WebFrameWidgetImpl::GetOriginalScreenInfos() {
+   return widget_base_->screen_infos();
+ }
+ 
++display::ScreenInfos WebFrameWidgetImpl::GetScreenInfosForRemoteFrame() {
++  display::ScreenInfos infos = GetOriginalScreenInfos();
++  const display::ScreenInfo& exposed = GetScreenInfo();
++  display::ScreenInfo& current = infos.mutable_current();
++  current.rect = exposed.rect;
++  current.available_rect = exposed.available_rect;
++  current.orientation_type = exposed.orientation_type;
++  current.orientation_angle = exposed.orientation_angle;
++  return infos;
++}
++
+ gfx::Rect WebFrameWidgetImpl::WindowRect() {
+   return widget_base_->WindowRect();
+ }
+@@ -5589,14 +5600,14 @@ void WebFrameWidgetImpl::DidUpdateSurfaceAndScreen(
+         }
+       });
+ 
+-  if (previous_original_screen_infos != original_screen_infos) {
+-    // Propagate changes down to child local root RenderWidgets and
+-    // BrowserPlugins in other frame trees/processes.
+-    ForEachRemoteFrameControlledByWidget(
+-        [&original_screen_infos](RemoteFrame* remote_frame) {
+-          remote_frame->DidChangeScreenInfos(original_screen_infos);
+-        });
+-  }
++  // Emulated geometry may change while the original screen stays unchanged.
++  // RemoteFrame deduplicates unchanged visual properties before sending IPC.
++  // Keep the original device scale and color data used by the compositor.
++  display::ScreenInfos remote_screen_infos = GetScreenInfosForRemoteFrame();
++  ForEachRemoteFrameControlledByWidget(
++      [&remote_screen_infos](RemoteFrame* remote_frame) {
++        remote_frame->DidChangeScreenInfos(remote_screen_infos);
++      });
+ }
+ 
+ gfx::Rect WebFrameWidgetImpl::ViewportVisibleRect() {
+diff --git a/third_party/blink/renderer/core/frame/web_frame_widget_impl.h b/third_party/blink/renderer/core/frame/web_frame_widget_impl.h
+index 9c9b3c56ba68274d2bd09b996903074d945cfc9e..fcd2a966d697c914305f50053c1d9896a09f8e6b 100644
+--- a/third_party/blink/renderer/core/frame/web_frame_widget_impl.h
++++ b/third_party/blink/renderer/core/frame/web_frame_widget_impl.h
+@@ -500,6 +500,8 @@ class CORE_EXPORT WebFrameWidgetImpl
+   const display::ScreenInfos& GetScreenInfos() override;
+   const display::ScreenInfo& GetOriginalScreenInfo() override;
+   const display::ScreenInfos& GetOriginalScreenInfos() override;
++  // Web-exposed geometry for child local roots; keep compositor scale native.
++  display::ScreenInfos GetScreenInfosForRemoteFrame();
+   gfx::Rect WindowRect() override;
+   gfx::Rect ViewRect() override;
+   void SetScreenRects(const gfx::Rect& widget_screen_rect,
+diff --git a/third_party/blink/renderer/core/frame/web_remote_frame_impl.cc b/third_party/blink/renderer/core/frame/web_remote_frame_impl.cc
+index 30b6dd03d9049bfa8e06ad0f049113f05d73ea81..739684cd914702891a59074fa670dc6fe700f3ce 100644
+--- a/third_party/blink/renderer/core/frame/web_remote_frame_impl.cc
++++ b/third_party/blink/renderer/core/frame/web_remote_frame_impl.cc
+@@ -359,7 +359,8 @@ void WebRemoteFrameImpl::InitializeFrameVisualProperties(
+   visual_properties.page_scale_factor = ancestor_widget->PageScaleInMainFrame();
+   visual_properties.is_pinch_gesture_active =
+       ancestor_widget->PinchGestureActiveInMainFrame();
+-  visual_properties.screen_infos = ancestor_widget->GetOriginalScreenInfos();
++  visual_properties.screen_infos =
++      ancestor_widget->GetScreenInfosForRemoteFrame();
+   visual_properties.visible_viewport_size =
+       ancestor_widget->VisibleViewportSize();
+   const std::vector<gfx::Rect>& viewport_segments =

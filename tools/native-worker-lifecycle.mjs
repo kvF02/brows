@@ -237,7 +237,7 @@ try {
   phase = 'clear-and-restore';
   const workerTargets = [...targets.values()].filter(target => ['worker', 'shared_worker', 'service_worker'].includes(target.kind) && target.url.startsWith(`${origin}${prefix}`));
   assert.equal(workerTargets.length, 6, 'all six live Worker targets required');
-  const inspect = `(()=>{const getter=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(navigator),'platform').get;return{platform:navigator.platform,sameGetter:getter===globalThis.__originalPlatformGetter,nativeGetter:Function.prototype.toString.call(getter).includes('[native code]')}})()`;
+  const inspect = `(()=>{const getter=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(navigator),'platform').get;return{scriptReady:typeof globalThis.__originalPlatformGetter==='function',platform:navigator.platform,sameGetter:getter===globalThis.__originalPlatformGetter,nativeGetter:Function.prototype.toString.call(getter).includes('[native code]')}})()`;
   for (const target of workerTargets) {
     for (const platform of ['', configured]) {
       await pipe.call('Emulation.setUserAgentOverride', { userAgent, platform }, target.session);
@@ -253,15 +253,38 @@ try {
   await pipe.call('Page.reload', { ignoreCache: true }, pageSession);
   await checkpoint('reload-dedicated-worker-first-scripts', start, ['page', 'worker', 'module_worker'], 1);
   await waitFor(() => metadata.get(processIndex)?.registrations === 2, 'reload retains registrations');
+  // A re-created Shared Worker may attach/resume before its first script has
+  // stored the original getter. Dedicated Worker proofs do not establish this
+  // readiness. Wait only for that script's own marker, then keep every native
+  // getter assertion strict; a detached target or protocol error still fails.
+  await waitFor(() => {
+    const current = [...targets.values()].filter(target => target.kind === 'shared_worker' && target.url.startsWith(`${origin}${prefix}`));
+    return current.length === 2 && current.every(target => target.ready && !target.suspended);
+  }, 'both reloaded Shared Worker policies ready', 8000);
   const shared = [...targets.values()].filter(target => target.kind === 'shared_worker' && target.url.startsWith(`${origin}${prefix}`));
   assert.equal(shared.length, 2, 'both Shared Workers required after reload');
+  const sharedReadings = [];
   for (const target of shared) {
-    const result = await pipe.call('Runtime.evaluate', { expression: inspect, returnByValue: true }, target.session);
-    assert(!result.exceptionDetails, 'reloaded Shared Worker getter inspection threw');
-    assert.equal(result.result.value.platform, options.expect === 'native' ? configured : host);
-    assert.equal(result.result.value.sameGetter, true); assert.equal(result.result.value.nativeGetter, true);
+    const deadline = Date.now() + 8000;
+    let reading;
+    do {
+      assert.equal(targets.get(target.id), target, 'Shared Worker changed during its owned capture');
+      const result = await pipe.call('Runtime.evaluate', { expression: inspect, returnByValue: true }, target.session);
+      assert(!result.exceptionDetails, 'reloaded Shared Worker getter inspection threw');
+      assert.equal(targets.get(target.id), target, 'Shared Worker changed during getter read');
+      reading = result.result.value;
+      if (reading.scriptReady) break;
+      assert(Date.now() < deadline, 'Shared Worker first script did not capture its getter');
+      if (failure) throw failure;
+      await sleep(20);
+    } while (true);
+    assert.equal(reading.platform, options.expect === 'native' ? configured : host, 'reloaded Shared Worker platform');
+    assert.equal(reading.sameGetter, true, 'reloaded Shared Worker original getter identity');
+    assert.equal(reading.nativeGetter, true, 'reloaded Shared Worker native getter');
+    sharedReadings.push(reading);
   }
-  report.checkpoints.push({ name: 'reload-shared-worker-native-getters', processIndex, targets: 2, assertionsPassed: true });
+  report.checkpoints.push({ name: 'reload-shared-worker-native-getters', processIndex, targets: 2,
+    readings: sharedReadings, assertionsPassed: true });
 
   phase = 'service-worker-wake'; start = proofs.length;
   const beforeWake = serviceKinds.map(kind => activeVersion(kind));

@@ -212,7 +212,7 @@ fn run_private(build: &BrowserBuild, profile_root: &Path) -> PortResult<Observat
     let deadline = Instant::now() + PROCESS_TIMEOUT;
     let directory = ProbeDirectory::create(profile_root)?;
     let outcome = (|| {
-        let server = ProbeServer::start(&directory.nonce)?;
+        let server = ProbeServer::start_mode(&directory.nonce, true)?;
         let user_data = directory.path.join("userdata");
         fs::create_dir(&user_data).map_err(|_| internal("cannot create private probe data"))?;
         let mut policy = brows_application::memory::fingerprint_probe_policy(&build.version)?;
@@ -230,6 +230,8 @@ fn run_private(build: &BrowserBuild, profile_root: &Path) -> PortResult<Observat
             "--metrics-recording-only",
             "--disable-domain-reliability",
             "--no-proxy-server",
+            "--site-per-process",
+            "--host-resolver-rules=MAP localhost 127.0.0.1",
             "--lang=pl-PL",
         ]
         .into_iter()
@@ -261,7 +263,7 @@ fn run_private(build: &BrowserBuild, profile_root: &Path) -> PortResult<Observat
                 continue;
             }
             let dump = format!("{PRE_START}{encoded}</pre>");
-            let missing = inspect_dump(dump.as_bytes(), &directory.nonce)?;
+            let missing = inspect_private_dump(dump.as_bytes(), &directory.nonce)?;
             return Ok(Observation {
                 support: if missing.is_empty() {
                     FingerprintSupport::Supported
@@ -269,7 +271,7 @@ fn run_private(build: &BrowserBuild, profile_root: &Path) -> PortResult<Observat
                     FingerprintSupport::Unsupported
                 },
                 detail: if missing.is_empty() {
-                    "隔离的私有管道在页面首段脚本中观测到语言、硬件、屏幕和 WebGL 配置；不依赖 MV3，不代表全部 API 或检测站通过率".to_owned()
+                    "隔离的私有管道在页面首脚本观测到语言、硬件和 WebGL，页面及独立跨进程 iframe 的原生屏幕与 CSS 均匹配；不依赖 MV3，不代表全部 API 或检测站通过率".to_owned()
                 } else {
                     format!(
                         "私有管道首脚本配置未通过（{}）；SeedableNoise 保持不可用",
@@ -340,6 +342,10 @@ struct ProbeServer {
 
 impl ProbeServer {
     fn start(nonce: &str) -> PortResult<Self> {
+        Self::start_mode(nonce, false)
+    }
+
+    fn start_mode(nonce: &str, private: bool) -> PortResult<Self> {
         let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0)).map_err(|_| {
             PortError::new(PortErrorKind::Unavailable, "无法启动仅本地可访问的探针页面")
         })?;
@@ -354,14 +360,19 @@ impl ProbeServer {
         let stop = stopped.clone();
         let served = requested.clone();
         let route = format!("/{nonce}");
-        let page = probe_page(nonce);
+        let page = if private {
+            private_probe_page(nonce, address.port())
+        } else {
+            probe_page(nonce)
+        };
+        let frame = private.then(|| private_probe_frame(nonce, address.port()));
         let worker = thread::Builder::new()
             .name("fingerprint-probe-http".to_owned())
             .spawn(move || {
                 while !stop.load(Ordering::Acquire) {
                     match listener.accept() {
                         Ok((mut stream, peer)) if peer.ip().is_loopback() => {
-                            if serve_request(&mut stream, &route, &page) {
+                            if serve_request(&mut stream, &route, &page, frame.as_deref()) {
                                 served.store(true, Ordering::Release);
                             }
                         }
@@ -392,7 +403,7 @@ impl Drop for ProbeServer {
     }
 }
 
-fn serve_request(stream: &mut TcpStream, route: &str, page: &str) -> bool {
+fn serve_request(stream: &mut TcpStream, route: &str, page: &str, frame: Option<&str>) -> bool {
     // Winsock accept inherits the listener's nonblocking mode. Timeouts do
     // not change it, so a browser preconnection could otherwise be closed
     // before its first request bytes arrive.
@@ -427,11 +438,19 @@ fn serve_request(stream: &mut TcpStream, route: &str, page: &str) -> bool {
         .next()
         .unwrap_or_default()
         .split_whitespace();
-    let matches = first_line.next() == Some("GET") && first_line.next() == Some(route);
-    let (status, body) = if matches {
-        ("200 OK", page)
+    let get = first_line.next() == Some("GET");
+    let path = first_line.next();
+    let frame_route = format!("{route}/screen");
+    let body = if get && path == Some(route) {
+        Some(page)
+    } else if get && path == Some(frame_route.as_str()) {
+        frame
     } else {
-        ("404 Not Found", "")
+        None
+    };
+    let (status, body, matches) = match body {
+        Some(body) => ("200 OK", body, true),
+        None => ("404 Not Found", "", false),
     };
     let response = format!("HTTP/1.1 {status}\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{body}", body.len());
     stream.write_all(response.as_bytes()).is_ok() && matches
@@ -442,23 +461,54 @@ fn probe_page(nonce: &str) -> String {
     // only writing the captured observation waits for DOMContentLoaded.
     format!(
         r#"<!doctype html><html><head><meta charset="utf-8"><script>
-const result = {{ token: "{nonce}", language: navigator.language,
+{capture}
+document.addEventListener('DOMContentLoaded', () => {{
+  document.getElementById('brows-fingerprint-probe').textContent =
+    Array.from(new TextEncoder().encode(JSON.stringify(result)), b => b.toString(16).padStart(2, '0')).join('');
+}});
+</script></head><body><pre id="brows-fingerprint-probe"></pre></body></html>"#,
+        capture = probe_capture(nonce)
+    )
+}
+
+fn probe_capture(nonce: &str) -> String {
+    format!(
+        r#"const result = {{ token: "{nonce}", language: navigator.language,
   languages: Array.from(navigator.languages), concurrency: navigator.hardwareConcurrency,
   memory: navigator.deviceMemory, memoryType: typeof navigator.deviceMemory,
   screenWidth: screen.width, screenHeight: screen.height, webglVendor: null }};
 try {{ const gl = document.createElement('canvas').getContext('webgl');
   const debug = gl && gl.getExtension('WEBGL_debug_renderer_info');
   if (debug) result.webglVendor = gl.getParameter(debug.UNMASKED_VENDOR_WEBGL);
-}} catch (_) {{}}
-document.addEventListener('DOMContentLoaded', () => {{
-  document.getElementById('brows-fingerprint-probe').textContent =
-    Array.from(new TextEncoder().encode(JSON.stringify(result)), b => b.toString(16).padStart(2, '0')).join('');
-}});
-</script></head><body><pre id="brows-fingerprint-probe"></pre></body></html>"#
+}} catch (_) {{}}"#
     )
 }
 
-fn inspect_dump(output: &[u8], nonce: &str) -> PortResult<Vec<&'static str>> {
+const NATIVE_SCREEN_CAPTURE: &str = "(()=>{const names=['width','height','availWidth','availHeight'];return {width:screen.width,height:screen.height,availWidth:screen.availWidth,availHeight:screen.availHeight,nativeGetters:names.every(name=>{const get=Object.getOwnPropertyDescriptor(Screen.prototype,name).get;let receiver=false;try{Reflect.apply(get,{},[])}catch(e){receiver=e instanceof TypeError}return receiver&&Function.prototype.toString.call(get).includes('[native code]')&&Reflect.apply(get,screen,[])===screen[name]}),deviceMedia:matchMedia('(device-width: 1777px) and (device-height: 1111px)').matches}})()";
+
+fn private_probe_page(nonce: &str, port: u16) -> String {
+    format!(
+        r#"<!doctype html><html><head><meta charset="utf-8"><script>
+{capture}
+result.screenTop={screen};
+let frame,ready=false;
+const emit=()=>{{if(ready&&result.screenCrossFrame)document.getElementById('brows-fingerprint-probe').textContent=Array.from(new TextEncoder().encode(JSON.stringify(result)),b=>b.toString(16).padStart(2,'0')).join('');}};
+addEventListener('message',event=>{{if(frame&&event.source===frame.contentWindow&&event.origin==='http://localhost:{port}'&&event.data?.token==='{nonce}'&&event.data.screen){{result.screenCrossFrame=event.data.screen;emit();}}}});
+addEventListener('DOMContentLoaded',()=>{{frame=document.getElementById('owned-screen-frame');ready=true;frame.src='http://localhost:{port}/{nonce}/screen';emit();}});
+</script></head><body><pre id="brows-fingerprint-probe"></pre><iframe id="owned-screen-frame"></iframe></body></html>"#,
+        capture = probe_capture(nonce),
+        screen = NATIVE_SCREEN_CAPTURE
+    )
+}
+
+fn private_probe_frame(nonce: &str, port: u16) -> String {
+    format!(
+        r#"<!doctype html><script>const proof={{token:'{nonce}',screen:{screen}}};parent.postMessage(proof,'http://127.0.0.1:{port}');</script>"#,
+        screen = NATIVE_SCREEN_CAPTURE
+    )
+}
+
+fn decode_dump(output: &[u8], nonce: &str) -> PortResult<Value> {
     if output.len() > MAX_DUMP_BYTES {
         return Err(invalid_data("probe output exceeds limit"));
     }
@@ -495,6 +545,33 @@ fn inspect_dump(output: &[u8], nonce: &str) -> PortResult<Vec<&'static str>> {
     if value["token"].as_str() != Some(nonce) {
         return Err(invalid_data("probe observation is from a different run"));
     }
+    Ok(value)
+}
+
+fn inspect_dump(output: &[u8], nonce: &str) -> PortResult<Vec<&'static str>> {
+    Ok(inspect_captured_fields(&decode_dump(output, nonce)?))
+}
+
+#[cfg(any(windows, test))]
+fn inspect_private_dump(output: &[u8], nonce: &str) -> PortResult<Vec<&'static str>> {
+    let value = decode_dump(output, nonce)?;
+    let mut missing = inspect_captured_fields(&value);
+    for name in ["screenTop", "screenCrossFrame"] {
+        let screen = &value[name];
+        if screen["width"].as_u64() != Some(1777)
+            || screen["height"].as_u64() != Some(1111)
+            || screen["availWidth"].as_u64() != Some(1777)
+            || screen["availHeight"].as_u64() != Some(1111)
+            || screen["nativeGetters"] != true
+            || screen["deviceMedia"] != true
+        {
+            missing.push(name);
+        }
+    }
+    Ok(missing)
+}
+
+fn inspect_captured_fields(value: &Value) -> Vec<&'static str> {
     let mut missing = Vec::new();
     for (name, matches) in [
         ("language", value["language"].as_str() == Some("pl-PL")),
@@ -524,7 +601,7 @@ fn inspect_dump(output: &[u8], nonce: &str) -> PortResult<Vec<&'static str>> {
             missing.push(name);
         }
     }
-    Ok(missing)
+    missing
 }
 
 #[derive(Debug)]
@@ -654,6 +731,48 @@ fn validate_tree(
 mod tests {
     use super::*;
 
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires signed Edge; actual private probe must reject the stock OOPIF screen gap"]
+    fn private_probe_rejects_stock_oopif_screen() {
+        use brows_domain::{BrowserCapabilities, BrowserChannel, RuntimeTrust};
+        let executable = PathBuf::from(
+            std::env::var_os("BROWS_ACCEPTANCE_BROWSER").expect("explicit acceptance browser"),
+        );
+        let publisher =
+            crate::verify_authenticode_publisher(&executable, &["Microsoft Corporation"]).unwrap();
+        let build = BrowserBuild {
+            id: BrowserBuildId::new("owned-stock-screen-negative").unwrap(),
+            provider: "isolated signed Edge test".to_owned(),
+            version: std::env::var("BROWS_ACCEPTANCE_VERSION").expect("verified binary version"),
+            channel: BrowserChannel::Stable,
+            sha256: crate::digest_file(&executable).unwrap(),
+            executable_path: executable,
+            publisher,
+            trust: RuntimeTrust::Verified,
+            capabilities: BrowserCapabilities {
+                supports_devtools_pipe: true,
+                ..BrowserCapabilities::default()
+            },
+            installed_at_ms: now_ms(),
+        };
+        let root = temp_root("private-screen-negative");
+        let observed = run_private(&build, &root);
+        let passed = observed.as_ref().is_ok_and(|value| {
+            value.support == FingerprintSupport::Unsupported
+                && value.detail.contains("screenCrossFrame")
+        });
+        let report = serde_json::json!({"scope":"actual private capability probe on signed Edge",
+            "assertionsPassed":passed,"expected":"Unsupported: screenCrossFrame",
+            "detail":observed.as_ref().map(|value|value.detail.as_str()).unwrap_or("probe error"),
+            "nativeScreenPassed":false,"runtimeAdmitted":false,"complete":false});
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/native-screen-capability-negative.json");
+        fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        fs::remove_dir(&root).unwrap();
+        assert!(passed, "{report}");
+    }
+
     #[test]
     fn probe_http_accepts_delayed_headers_on_a_nonblocking_accepted_socket() {
         let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
@@ -663,7 +782,7 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             stream.set_nonblocking(true).unwrap();
             send.send(()).unwrap();
-            serve_request(&mut stream, "/delayed", "probe-ok")
+            serve_request(&mut stream, "/delayed", "probe-ok", None)
         });
         let mut client = TcpStream::connect(address).unwrap();
         client
@@ -705,6 +824,35 @@ mod tests {
         serde_json::json!({ "token":"probe-token", "language":"pl-PL", "languages":["pl-PL","pl"],
             "concurrency":3, "memory":0.5, "memoryType":"number", "screenWidth":1777,
             "screenHeight":1111, "webglVendor":"Google Inc. (Intel)" })
+    }
+
+    #[test]
+    fn private_parser_rejects_host_screen_and_script_fallback_in_cross_frame() {
+        let mut value = observation();
+        let screen = serde_json::json!({"width":1777,"height":1111,
+            "availWidth":1777,"availHeight":1111,"nativeGetters":true,"deviceMedia":true});
+        value["screenTop"] = screen.clone();
+        value["screenCrossFrame"] = screen;
+        assert!(inspect_private_dump(&encoded_dump(&value), "probe-token")
+            .unwrap()
+            .is_empty());
+        for (field, incorrect) in [
+            ("width", serde_json::json!(656)),
+            ("nativeGetters", serde_json::json!(false)),
+            ("deviceMedia", serde_json::json!(false)),
+        ] {
+            let mut failed = value.clone();
+            failed["screenCrossFrame"][field] = incorrect;
+            assert_eq!(
+                inspect_private_dump(&encoded_dump(&failed), "probe-token").unwrap(),
+                ["screenCrossFrame"]
+            );
+        }
+        value.as_object_mut().unwrap().remove("screenCrossFrame");
+        assert_eq!(
+            inspect_private_dump(&encoded_dump(&value), "probe-token").unwrap(),
+            ["screenCrossFrame"]
+        );
     }
 
     #[test]

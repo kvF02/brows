@@ -75,13 +75,17 @@ def stage(out, dependencies, destination, expected_executable):
     add("brows-build-args.gn", checked(out, "args.gn"))
     add("brows-source-manifest.json", ROOT / "source-manifest.json")
     add("brows-native-worker-platform.patch", ROOT / "patches/0001-native-worker-platform.patch")
+    add("brows-screen-source-manifest.json", ROOT / "screen/source-manifest.json")
+    add("brows-native-oopif-screen.patch", ROOT / "screen/patches/0001-native-oopif-screen-geometry.patch")
     if "headless_shell.exe" not in entries or digest(entries["headless_shell.exe"][1]) != expected_executable:
         raise ValueError("compiled test executable digest mismatch")
     if sum(path.stat().st_size for _, path in entries.values()) > 2 * 1024**3:
         raise ValueError("runtime size limit")
     manifest = json.loads((ROOT / "source-manifest.json").read_text())
+    screen_manifest = json.loads((ROOT / "screen/source-manifest.json").read_text())
     result = {"schemaVersion": 1, "scope": "unsigned isolated test runtime; no production admission",
               "sourceRevision": manifest["upstream"]["revision"], "patchSha256": manifest["patch"]["sha256"],
+              "screenPatchSha256": screen_manifest["patch"]["sha256"],
               "executableSha256": expected_executable, "runtimeAdmitted": False, "complete": False, "files": []}
     destination.parent.mkdir(parents=True, exist_ok=True)
     temporary = pathlib.Path(tempfile.mkdtemp(prefix="brows-runtime-stage-", dir=destination.parent))

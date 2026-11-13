@@ -1,4 +1,4 @@
-# Controlled Chromium candidate: native Worker platform
+# Controlled Chromium candidate: native Worker platform and OOPIF screen
 
 This directory is an experimental source/build path for issue [#35](https://github.com/kvF02/brows/issues/35).
 It is **not enabled in the desktop application**. The production runtime publisher,
@@ -20,6 +20,11 @@ clears the stored value. Page Navigator's existing settings override is retained
 The patch does not implement font filtering, GPU/audio-device isolation or a
 different TLS/HTTP2 stack.
 
+The independent [screen propagation patch](screen/README.md) carries exposed
+geometry and orientation through OOPIF creation and live updates. The build
+applies and verifies both patches; the screen inputs retain their own blob pins
+and SHA256. Ordinary Edge still fails the strict positive OOPIF screen test.
+
 ## Separate evidence gates
 
 1. **Source check:** each input is verified against its pinned Git blob;
@@ -39,10 +44,20 @@ different TLS/HTTP2 stack.
    `nativeAcceptancePassed: true`, after the additional
    [native lifecycle gate](../../docs/native-worker-lifecycle.md) also passes
    reload, stop/wake, update, clean process reopen and a fresh-profile host control.
+   The no-hook screen positive must additionally pass first scripts in a distinct
+   OOPIF, portrait updates, dynamic creation, clear/restore and reload.
 
 Every gate keeps `complete: false`. Runtime trust/update/signing integration,
 actual Windows app admission and full stop/wake/update acceptance remain separate
 work. Do not close #35 from a source/generator check or stock control alone.
+
+The previous optimized static build in [run 43237106238](https://github.com/kvF02/brows/actions/runs/43237106238)
+completed 22,293 / 46,422 build edges before its four-hour job limit. It produced
+no usable browser or positive native result. Functional qualification now uses
+`is_debug=true is_component_build=true v8_optimized_debug=false` with symbols off
+and a six-hour maximum. This avoids release optimizer work while retaining debug
+assertions, sandboxing and admission rules. A debug component pass does not prove
+release performance, client Windows compatibility or production signing.
 
 ## Commands
 
@@ -90,8 +105,8 @@ The small Windows gate reproduces the fresh-checkout setup, checks that the shim
 runs, and verifies that bootstrap did not change the Git pin or tracked files.
 
 After compilation, GN's `runtime_deps` list stages only the isolated distribution,
-with a generated third-party license file, build args, source pin and patch. Every
-file has a size and SHA-256 entry. Both native gates run from that staged
+with a generated third-party license file, build args, both source manifests and
+both patches. Every file has a size and SHA-256 entry. All native gates run from that staged
 distribution; integrity is checked again afterwards. CI may preserve this
 `experimental-headless-test-runtime` artifact for seven days, including when a
 native gate fails, so follow-up acceptance need not recompile the kernel. Its
