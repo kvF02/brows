@@ -53,9 +53,23 @@ jobs:
           $digest = (Get-FileHash -LiteralPath $edge -Algorithm SHA256).Hash.ToLowerInvariant()
           node tools/native-screen-acceptance.mjs --browser $edge --sha256 $digest --expect stock --report target/native-screen-stock-control.json
           if ($LASTEXITCODE -ne 0) { throw 'Screen stock control failed' }
+          "BROWS_ACCEPTANCE_BROWSER=$edge" >> $env:GITHUB_ENV
+          $version = [Diagnostics.FileVersionInfo]::GetVersionInfo($edge)
+          "BROWS_ACCEPTANCE_VERSION=$($version.ProductMajorPart).$($version.ProductMinorPart).$($version.ProductBuildPart).$($version.ProductPrivatePart)" >> $env:GITHUB_ENV
+      - name: Install pinned Rust for the actual capability probe
+        run: rustup toolchain install 1.97.1 --profile minimal --component clippy
+      - name: Reject stock OOPIF screen mismatch through the actual capability probe
+        run: cargo +1.97.1 test -p brows-adapters-runtime private_probe_rejects_stock_oopif_screen --locked -- --ignored --nocapture
+      - name: Check Windows runtime units and lint
+        run: |
+          cargo +1.97.1 test -p brows-adapters-runtime --locked
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo +1.97.1 clippy -p brows-adapters-runtime --all-targets --locked -- -D warnings
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: native-screen-stock-control
-          path: target/native-screen-stock-control.json
+          path: |
+            target/native-screen-stock-control.json
+            target/native-screen-capability-negative.json
           if-no-files-found: warn

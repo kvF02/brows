@@ -1,0 +1,70 @@
+diff --git a/third_party/blink/renderer/core/execution_context/navigator_base.cc b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+index 83f427c..c4f568e 100644
+--- a/third_party/blink/renderer/core/execution_context/navigator_base.cc
++++ b/third_party/blink/renderer/core/execution_context/navigator_base.cc
+@@ -67,6 +67,12 @@ String NavigatorBase::userAgent() const {
+ }
+ 
+ String NavigatorBase::platform() const {
++  String platform_override;
++  probe::ApplyNavigatorPlatformOverride(
++      probe::ToCoreProbeSink(GetExecutionContext()), &platform_override);
++  if (!platform_override.empty()) {
++    return platform_override;
++  }
+ #if BUILDFLAG(IS_ANDROID)
+   // We need to check the ReduceUserAgentMinorVersion feature flag for
+   // Android WebView, which does not currently ship a reduced User-Agent.
+diff --git a/third_party/blink/renderer/core/inspector/inspector_emulation_agent.cc b/third_party/blink/renderer/core/inspector/inspector_emulation_agent.cc
+index e261ee5..8f28523 100644
+--- a/third_party/blink/renderer/core/inspector/inspector_emulation_agent.cc
++++ b/third_party/blink/renderer/core/inspector/inspector_emulation_agent.cc
+@@ -1138,6 +1138,12 @@ void InspectorEmulationAgent::ApplyDataSaverOverride(bool& data_saver) {
+   }
+ }
+ 
++void InspectorEmulationAgent::ApplyNavigatorPlatformOverride(String* platform) {
++  if (!navigator_platform_override_.Get().empty()) {
++    *platform = navigator_platform_override_.Get();
++  }
++}
++
+ void InspectorEmulationAgent::ApplyHardwareConcurrencyOverride(
+     unsigned int& hardware_concurrency) {
+   if (int concurrency = hardware_concurrency_override_.Get())
+diff --git a/third_party/blink/renderer/core/inspector/inspector_emulation_agent.h b/third_party/blink/renderer/core/inspector/inspector_emulation_agent.h
+index ca29f6e..0eeea42 100644
+--- a/third_party/blink/renderer/core/inspector/inspector_emulation_agent.h
++++ b/third_party/blink/renderer/core/inspector/inspector_emulation_agent.h
+@@ -122,6 +122,7 @@ class CORE_EXPORT InspectorEmulationAgent final
+   void ApplyAcceptLanguageOverride(String* accept_lang);
+   void ApplyDataSaverOverride(bool& data_saver);
+   void ApplyHardwareConcurrencyOverride(unsigned int& hardware_concurrency);
++  void ApplyNavigatorPlatformOverride(String* platform);
+   void ApplyCPUPerformanceOverride(mojom::blink::PerformanceTier& tier);
+   void ApplyUserAgentOverride(String* user_agent);
+   void ApplyUserAgentMetadataOverride(
+diff --git a/third_party/blink/renderer/core/probe/core_probes.json5 b/third_party/blink/renderer/core/probe/core_probes.json5
+index 5f5fda6..ab2df98 100644
+--- a/third_party/blink/renderer/core/probe/core_probes.json5
++++ b/third_party/blink/renderer/core/probe/core_probes.json5
+@@ -160,6 +160,7 @@
+         "ApplyCPUPerformanceOverride",
+         "ApplyDataSaverOverride",
+         "ApplyHardwareConcurrencyOverride",
++        "ApplyNavigatorPlatformOverride",
+         "ApplyUserAgentOverride",
+         "ApplyUserAgentMetadataOverride",
+         "PrepareRequest",
+diff --git a/third_party/blink/renderer/core/probe/core_probes.pidl b/third_party/blink/renderer/core/probe/core_probes.pidl
+index ae495e9..3ed54ac 100644
+--- a/third_party/blink/renderer/core/probe/core_probes.pidl
++++ b/third_party/blink/renderer/core/probe/core_probes.pidl
+@@ -102,6 +102,7 @@ interface CoreProbes {
+   void ApplyAcceptLanguageOverride(CoreProbeSink*, String* accept_language);
+   void ApplyCPUPerformanceOverride(CoreProbeSink*, mojom::blink::PerformanceTier& tier);
+   void ApplyHardwareConcurrencyOverride(CoreProbeSink*, unsigned int& hardware_concurrency);
++  void ApplyNavigatorPlatformOverride(CoreProbeSink*, String* platform);
+   void ApplyDataSaverOverride(CoreProbeSink*, bool& data_saver);
+   void ApplyUserAgentOverride(CoreProbeSink*, String* user_agent);
+   void ApplyUserAgentMetadataOverride(CoreProbeSink*, std::optional<blink::UserAgentMetadata>* ua_metadata_override);

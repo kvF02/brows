@@ -2,7 +2,7 @@
 
 **Not compiled, not accepted, not enabled in an admitted production runtime.**
 The private-controller screen cutover in PR #38 must not merge until a patched
-runtime passes the positive checks and the actual capability probe covers OOPIF.
+runtime passes the positive checks and actual capability-probe qualification.
 
 Signed Edge 156.0.4314.58 on Windows Server 2022 failed the unchanged strict
 `private_native_screen_acceptance` in [job 131277480640](https://github.com/kvF02/brows/actions/runs/43245656940/job/131277480640):
@@ -33,10 +33,12 @@ the patch. Source validation always records `compiled: false` and
 python native/chromium/screen/verify_patch.py --report target/native-screen-source-check.json
 ```
 
-For a future full Chromium checkout, apply this independent patch after the
-Worker-platform patch and before `gn gen`; the three screen input blobs must
-still match the pinned upstream. No active build is changed or restarted by
-this PR. The current PR #36 build does not include this screen patch.
+The combined build driver applies this independent patch after the Worker
+platform patch and before `gn gen`; the three screen input blobs must still
+match the pinned upstream. The earlier PR #36 build ended at its four-hour limit
+without a usable binary and did not contain this screen patch. The next combined
+build includes both patches and all three positive gates, using a debug component
+profile for functional qualification. It is not a release-performance result.
 
 ```sh
 python native/chromium/screen/verify_patch.py --source /path/to/chromium/src --apply --report target/native-screen-source-check.json
@@ -57,8 +59,17 @@ $digest = (Get-FileHash $binary -Algorithm SHA256).Hash.ToLowerInvariant()
 node tools/native-screen-acceptance.mjs --browser $binary --sha256 $digest --expect native --report target/native-screen-positive.json
 ```
 
+The actual private capability probe now waits for a separately controlled
+cross-origin iframe's first-script observation, authenticates its message origin,
+window and nonce, and checks native raw getters and CSS in both frames. A stock
+native-screen mismatch returns Unsupported. A dedicated signed-Edge negative
+test verifies this actual probe path; ordinary extension-mode probing is unchanged.
+Unit cases reject missing OOPIF proof, host geometry, wrapped getters and CSS
+mismatch even when the top frame matches. The Windows negative result must be
+read from its own report; parser unit success alone is not browser qualification.
+
 Before merging: compile the combined patches; pass the no-hook positive fixture
-and strict production-controller screen acceptance; extend the actual capability
-probe to reject the stock OOPIF mismatch; retain runtime/package/lifecycle
+and strict production-controller screen acceptance; qualify the actual capability
+probe and signed-runtime integration; retain runtime/package/lifecycle
 regression results. Publisher/signature/full-distribution integrity gates stay
 required for production.

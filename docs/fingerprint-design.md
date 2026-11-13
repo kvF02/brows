@@ -78,7 +78,9 @@ CPU 通过 `Emulation.setHardwareConcurrencyOverride`，语言/平台通过原�
 本分支 Screen 原生切换尚未达到合入条件。Windows Server 2022 的签名 Edge 实测中，
 顶层要求 1440×900，但跨进程 iframe 的首脚本原生宽度仍为 656。普通 CDP 设置
 不能修复该传播缺口，详见 [原生屏幕候选](../native/chromium/screen/README.md)。
-以下为候选实现的验收要求，须先完成内核编译、正向验收及真实能力探针对 OOPIF 的检查。
+真实私有能力探针已增加独立跨进程 iframe 首脚本、原生 getter 与 CSS 检查，并校验
+消息来源窗口、origin 和 nonce；此路径的 Windows 负向验收仍须以对应 CI 为准。
+以下为候选实现的验收要求，须先完成内核编译、正向验收及签名运行时集成。
 
 Screen 的 width、height、availWidth、availHeight 保留原生 getter，并在页面启动前同时
 核对 CSS `device-width` / `device-height` 媒体查询；失败时拒绝配置。屏幕模拟使用桌面

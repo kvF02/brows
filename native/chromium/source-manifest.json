@@ -1,0 +1,81 @@
+{
+  "schemaVersion": 1,
+  "upstream": {
+    "repository": "https://chromium.googlesource.com/chromium/src.git",
+    "mirror": "https://github.com/chromium/chromium",
+    "version": "158.0.8127.18",
+    "revision": "6449d9f9a6a906edff724b7b220199b3fde4615c"
+  },
+  "patch": {
+    "path": "patches/0001-native-worker-platform.patch",
+    "sha256": "9383bf3244c1613bc17e452a11a6c7f511f73e883d13201e75e8f264f53f2033"
+  },
+  "sources": [
+    {
+      "path": "third_party/blink/renderer/core/execution_context/navigator_base.cc",
+      "gitBlob": "83f427c5ec9b75cbf41935af9935f9fa293ea11c"
+    },
+    {
+      "path": "third_party/blink/renderer/core/inspector/inspector_emulation_agent.h",
+      "gitBlob": "ca29f6e9fceec50e028d37d27f750d2d9bbf1089"
+    },
+    {
+      "path": "third_party/blink/renderer/core/inspector/inspector_emulation_agent.cc",
+      "gitBlob": "e261ee5e96efb9d14dffc9d6de5df191cc2a2a63"
+    },
+    {
+      "path": "third_party/blink/renderer/core/probe/core_probes.json5",
+      "gitBlob": "5f5fda6583c0a01dc8cc9d791ff6921de0805bbb"
+    },
+    {
+      "path": "third_party/blink/renderer/core/probe/core_probes.pidl",
+      "gitBlob": "ae495e9bce584ac84e7c1512751d8b5849b1319d"
+    },
+    {
+      "path": "third_party/blink/renderer/build/scripts/make_instrumenting_probes.py",
+      "gitBlob": "3838d5031901804f10de380fe0f7aaaed2aaf85a"
+    },
+    {
+      "path": "third_party/blink/renderer/build/scripts/blinkbuild/name_style_converter.py",
+      "gitBlob": "ae64c19c0d49b93648ebfdb2a53b2bd7d1259d1f"
+    },
+    {
+      "path": "third_party/blink/renderer/build/scripts/templates/instrumenting_probes_impl.cc.tmpl",
+      "gitBlob": "ed8d9679a1339262e4094e1b22c3824bc896a983"
+    },
+    {
+      "path": "third_party/blink/renderer/build/scripts/templates/instrumenting_probes_inl.h.tmpl",
+      "gitBlob": "e30cbba84518ccbe0f0490badc489060cc4ab064"
+    },
+    {
+      "path": "third_party/blink/renderer/build/scripts/templates/probe_sink.h.tmpl",
+      "gitBlob": "98c0ef77d33e2d189a96d9ea7280b8dbe1cdc93f"
+    },
+    {
+      "path": "third_party/blink/renderer/build/scripts/templates/macros.tmpl",
+      "gitBlob": "f3740f3b932e258db4090dfdf96eccc310cd5516"
+    }
+  ],
+  "buildRequirements": {
+    "architecture": "AMD64",
+    "minimumRamGiB": 8,
+    "minimumFreeDiskGiB": 100,
+    "filesystem": "NTFS",
+    "visualStudioMajor": 18,
+    "sdkVersion": "10.0.28000.2270",
+    "debuggerMinimumVersion": "10.0.26100.3323"
+  },
+  "productionEnabled": false,
+  "compiled": false,
+  "nativeAcceptancePassed": false,
+  "depotTools": {
+    "repository": "https://chromium.googlesource.com/chromium/tools/depot_tools.git",
+    "revision": "96a7c1418eedaa6bea333a8941e8a0078681b4d0"
+  },
+  "windowsSdkInstaller": {
+    "version": "10.0.28000.2270",
+    "url": "https://download.microsoft.com/download/78b533c3-6724-4e28-a984-b9fa93265781/KIT_BUNDLE_WINDOWSSDK_MEDIACREATION/winsdksetup.exe",
+    "sha256": "e9f1bde566381355e594e2f90daf4f714eb5c7ef2c45c501ce236afe2abea300",
+    "source": "https://learn.microsoft.com/en-us/windows/apps/windows-sdk/downloads"
+  }
+}

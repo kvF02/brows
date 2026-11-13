@@ -1085,6 +1085,20 @@ impl Controller {
                 "private probe page changed during capture",
             ));
         }
+        if result.as_str().is_some_and(|value| !value.is_empty())
+            && !self
+                .targets
+                .0
+                .lock()
+                .map_err(|_| internal("target lock poisoned"))?
+                .snapshot()
+                .iter()
+                .any(|target| target.kind == "iframe")
+        {
+            return Err(internal(
+                "private screen probe did not control a distinct OOPIF",
+            ));
+        }
         result
             .as_str()
             .filter(|value| value.len() <= 8192)
@@ -1884,7 +1898,9 @@ mod tests {
             let proofs = fixture.wait_proofs("/native-screen/");
             browser.write_report_status(
                 "native-screen",
-                json!({"configured":browser.screen,
+                json!({"configured":{"width":browser.screen.width,"height":browser.screen.height,
+                    "colorDepth":browser.screen.color_depth,
+                    "scaleHundredths":browser.screen.device_scale_factor_hundredths},
                     "observations":proofs.iter().map(|(_,_,sample)|sample).collect::<Vec<_>>() }),
                 false,
             );

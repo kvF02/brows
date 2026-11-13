@@ -75,7 +75,8 @@ HTTP 响应，要求受控会话先返回且保持存活，再释放响应并核
 
 原生屏幕切换目前属于未合入候选。签名 Edge 的严格验收已真实发现 OOPIF 读取主机
 屏幕，C++ 创建/更新传播补丁尚未编译；不得把源码校验或 stock 对照通过记作正向通过。
-尚须扩展生产能力探针的 OOPIF 检查，详情见 [候选与合入门槛](../native/chromium/screen/README.md)。
+真实私有能力探针已增加独立 OOPIF 首脚本的原生 getter / CSS 检查，不满足即 Unsupported；
+新负向验收和正向内核验收仍需各自的 Windows 结果，详情见 [候选与合入门槛](../native/chromium/screen/README.md)。
 
 控制器统一 UA、UA-CH、平台、CPU、Memory 和语言。候选中的平台、语言、CPU、页面触控和屏幕尺寸使用
 原生 Emulation，私有模式保留其原始 Navigator getter；跨系统 Worker 平台、Memory 与
