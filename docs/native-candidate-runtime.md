@@ -9,9 +9,13 @@ release performance or certify full independent fingerprinting.
 workflow ID and the same repository. It requires the immutable test-runtime and
 build-evidence artifacts after that run completes. Missing or expired artifacts
 produce an explicit failing/blocked qualification report, never a native pass.
-Once the artifact exists, rerun this qualification job; the native build can
-remain unchanged. A different source run/head requires reviewing and updating
-both pins in this workflow.
+Once the artifact exists, this reusable workflow can qualify it without changing
+the native build. The automatic workflow-run listener is a separate default-branch
+change: it must pin this reusable workflow by SHA and accept only this exact
+source run/head. Automatic execution checks out the already compiled/linted test
+code at `b2bb99fd54e79231279e4ef7314b42afac0f3b7c`; PR execution checks its own merge
+ref. A different source run/head or test implementation requires reviewing and
+updating the relevant immutable pins. A manual rerun can also reuse the artifact.
 
 Before browser execution, `tools/verify-native-candidate.py` checks every packaged
 file and rejects extra files/links/corruption. It binds the binary digest to

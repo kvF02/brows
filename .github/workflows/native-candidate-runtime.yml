@@ -8,6 +8,7 @@ on:
       - 'tools/test_native_candidate.py'
       - '.github/workflows/native-candidate-runtime.yml'
   workflow_dispatch:
+  workflow_call:
 permissions:
   contents: read
   actions: read
@@ -19,18 +20,24 @@ env:
   # build just to qualify its staged test artifact.
   NATIVE_SOURCE_RUN_ID: '43348531237'
   NATIVE_SOURCE_HEAD: a20791f0b13e14c147f49315eb596378815fbdf7
+  # Automatic follow-up uses the already compiled/linted qualification code.
+  NATIVE_QUALIFICATION_HEAD: b2bb99fd54e79231279e4ef7314b42afac0f3b7c
 jobs:
   input-contract:
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && env.NATIVE_QUALIFICATION_HEAD || github.sha }}
       - run: python -m unittest discover -s tools -p test_native_candidate.py -v
   windows-compile-and-negative:
     runs-on: windows-2022
     timeout-minutes: 7
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && env.NATIVE_QUALIFICATION_HEAD || github.sha }}
       - name: Install pinned Rust
         run: rustup toolchain install 1.97.1 --profile minimal --component clippy
       - name: Compile all candidate-only code and preserve stock negative admission
@@ -59,6 +66,8 @@ jobs:
     timeout-minutes: 12
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event_name == 'workflow_run' && env.NATIVE_QUALIFICATION_HEAD || github.sha }}
       - name: Check immutable build run and artifact provenance
         uses: actions/github-script@v7
         with:
