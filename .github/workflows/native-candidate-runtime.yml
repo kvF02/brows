@@ -18,8 +18,8 @@ concurrency:
 env:
   # This immutable run is already building. Do not start or cancel a kernel
   # build just to qualify its staged test artifact.
-  NATIVE_SOURCE_RUN_ID: '43348531237'
-  NATIVE_SOURCE_HEAD: a20791f0b13e14c147f49315eb596378815fbdf7
+  NATIVE_SOURCE_RUN_ID: '44082221586'
+  NATIVE_SOURCE_HEAD: ed903170d6a4d54fe3ac6d11ec98d5a467d0477b
   # Automatic follow-up uses the already compiled/linted qualification code.
   NATIVE_QUALIFICATION_HEAD: b2bb99fd54e79231279e4ef7314b42afac0f3b7c
 jobs:
@@ -79,7 +79,7 @@ jobs:
             fs.writeFileSync('target/native-candidate-qualification.json', JSON.stringify(report, null, 2));
             const run_id = Number(process.env.NATIVE_SOURCE_RUN_ID);
             const { data: run } = await github.rest.actions.getWorkflowRun({ ...context.repo, run_id });
-            if (run.head_sha !== process.env.NATIVE_SOURCE_HEAD || run.workflow_id !== 412176117 ||
+            if (run.head_sha !== process.env.NATIVE_SOURCE_HEAD || run.workflow_id !== 421301331 ||
                 run.head_repository?.full_name !== 'kvF02/brows' || run.repository.full_name !== 'kvF02/brows') {
               core.setFailed('Candidate build provenance mismatch'); return;
             }
