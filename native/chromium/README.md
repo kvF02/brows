@@ -169,3 +169,15 @@ terminates only its owned process tree and removes its temporary profile.
 
 Chromium-derived patch context, generator inputs and generated bindings use the
 upstream BSD-style license, reproduced in `UPSTREAM_LICENSE`.
+
+The cached-runtime workflow addresses the observed six-hour hosted build timeout.
+A digest-pinned sccache wrapper is first tested with two real clang-cl compilations
+and a required cache hit. Both build jobs keep the same source/toolchain pins,
+functional GN profile and build-root paths. The first stops its owned compiler
+tree after a four-hour compile budget, flushes an 8 GiB local cache and saves a
+snapshot. The second restores compiler results by content and continues to link
+and run all three native positives. Cache snapshots and checkpoints cannot satisfy
+the final native-positive-evidence job. Cache misses, eviction, unsupported flags
+or another exhausted budget remain possible; the workflow must report those
+failures rather than claiming native success. It changes no cache storage limits,
+runtime publisher admission or sandbox settings.

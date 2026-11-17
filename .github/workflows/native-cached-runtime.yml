@@ -1,0 +1,93 @@
+name: Cached native Chromium runtime qualification
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/native-cached-runtime.yml'
+      - '.github/actions/native-cached-build/**'
+      - 'native/chromium/compiler-cache.ps1'
+      - 'native/chromium/test-compile-budget.ps1'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: native-cached-runtime-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  driver-contract:
+    runs-on: windows-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: python -m pip install -r native/chromium/requirements.txt
+      - run: python native/chromium/verify_patch.py --report target/native-source-check.json
+      - run: python native/chromium/screen/verify_patch.py --report target/native-screen-source-check.json
+      - name: Parse and exercise actual Windows process-budget and cache boundaries
+        shell: pwsh
+        env:
+          SCCACHE_DIR: D:\brows-cache-smoke
+          SCCACHE_CACHE_SIZE: 100M
+        run: |
+          Get-ChildItem native/chromium/*.ps1 | ForEach-Object {
+            $tokens = $null; $errors = $null
+            [Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+          ./native/chromium/test-compile-changes.ps1
+          ./native/chromium/test-compile-budget.ps1
+          . ./native/chromium/compiler-cache.ps1
+          $cache = Install-NativeCompilerCache D:\brows-cache-tools
+          $clang = 'C:\Program Files\LLVM\bin\clang-cl.exe'
+          if (-not (Test-Path $clang)) { throw 'Hosted clang-cl required for a real cache-hit control' }
+          Test-NativeCompilerCache $cache $clang D:\brows-cache-control
+          & $cache --stop-server
+  checkpoint:
+    name: Preserve bounded compilation work (not native qualification)
+    needs: driver-contract
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/native-cached-build
+        with:
+          checkpoint: 'true'
+          phase: checkpoint
+  runtime:
+    name: Resume compiler work and require all native runtime positives
+    needs: checkpoint
+    runs-on: windows-latest
+    timeout-minutes: 360
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/native-cached-build
+        with:
+          checkpoint: 'false'
+          phase: runtime
+  native-positive-evidence:
+    needs: runtime
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: native-build-evidence
+          path: evidence
+      - shell: python
+        run: |
+          import json
+          from pathlib import Path
+          v = json.loads(Path('evidence/native-build.json').read_text(encoding='utf-8-sig'))
+          keys = ['changedCppObjectsCompiled', 'compiled', 'runtimeBundleReady', 'nativeFirstScriptsPassed',
+                  'nativeLifecyclePassed', 'nativeScreenPassed', 'nativeAcceptancePassed']
+          if (not all(v.get(k) is True for k in keys) or v.get('failure') is not None
+              or v.get('compileCheckpointOnly') is not False or v.get('compileChangedSourcesOnly') is not False
+              or v.get('runtimeAdmitted') is not False or v.get('complete') is not False):
+              raise SystemExit('No native runtime qualification: checkpoint/cache evidence is insufficient')
+          print('Linked runtime and all native positives passed; production admission remains false')

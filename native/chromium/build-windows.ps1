@@ -2,10 +2,14 @@ param(
     [Parameter(Mandatory)][string]$BuildRoot,
     [Parameter(Mandatory)][string]$Report,
     [switch]$PrepareHostedSdk,
-    [switch]$CompileChangedSourcesOnly
+    [switch]$CompileChangedSourcesOnly,
+    [string]$CompilerCache,
+    [ValidateRange(1, 280)][int]$CompileBudgetMinutes = 240,
+    [switch]$CheckpointOnly
 )
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'Windows x64 build host required' }
+if ($CheckpointOnly -and (-not $CompilerCache -or $CompileChangedSourcesOnly)) { throw 'Checkpoint mode requires the compiler cache and full compile path' }
 $manifest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'source-manifest.json') -Raw | ConvertFrom-Json
 $reportPath = [IO.Path]::GetFullPath($Report)
 $root = [IO.Path]::GetFullPath($BuildRoot)
@@ -16,6 +20,8 @@ $result.nativeLifecyclePassed = $false
 $result.nativeScreenPassed = $false
 $result.changedCppObjectsCompiled = $false
 $result.compileChangedSourcesOnly = [bool]$CompileChangedSourcesOnly
+$result.compileCheckpointOnly = [bool]$CheckpointOnly
+$result.compileCheckpointSaved = $false
 $result.buildProfile = 'debug-component-functional-candidate'
 $result.runtimeBundleReady = $false
 $bundle = $null
@@ -103,6 +109,12 @@ try {
             # Component/debug keeps assertions and all sandbox/security gates;
             # it is not a release-performance or production-admission result.
             $gnArgs = 'is_debug=true is_component_build=true v8_optimized_debug=false symbol_level=0 blink_symbol_level=0 v8_symbol_level=0 target_cpu="x64" use_remoteexec=false'
+            if ($CompilerCache) {
+                if ($CompilerCache -notmatch '^[A-Z]:\\[A-Za-z0-9_-]+\\sccache\.exe$') { throw 'Compiler cache must use the fixed installed executable path' }
+                . (Join-Path $PSScriptRoot 'compiler-cache.ps1')
+                $result.compilerCacheSmoke = Test-NativeCompilerCache -Cache $CompilerCache -Compiler (Join-Path $src 'third_party/llvm-build/Release+Asserts/bin/clang-cl.exe') -Directory (Join-Path $root 'cache-smoke')
+                $gnArgs += ' cc_wrapper="' + $CompilerCache.Replace('\', '/') + '"'
+            }
             $result.gnArgs = $gnArgs
             $outDirectory = Join-Path $src 'out/BrowsNative'
             [IO.Directory]::CreateDirectory($outDirectory) | Out-Null
@@ -128,46 +140,55 @@ try {
                 $result.stage = 'compile'
                 [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($reportPath)) | Out-Null
                 $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding utf8
-                & (Join-Path $depot 'autoninja.bat') -C out/BrowsNative headless_shell
-                Assert-Exit 'headless shell compilation'
-                $binary = Join-Path $src 'out/BrowsNative/headless_shell.exe'
-                if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Compiled test executable missing' }
-                $digest = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
-                $result.compiled = $true
-                $result.testExecutableSha256 = $digest
-                $result.stage = 'runtime-bundle'
-                & (Join-Path $depot 'autoninja.bat') -C out/BrowsNative generate_headless_shell_license_file
-                Assert-Exit 'runtime license generation'
-                $dependencies = & (Join-Path $depot 'gn.bat') desc out/BrowsNative //headless:headless_shell runtime_deps
-                Assert-Exit 'runtime dependency inventory'
-                $dependencies | Set-Content -LiteralPath "$reportPath.runtime-deps.txt" -Encoding utf8
-                $bundle = Join-Path $root 'test-runtime'
-                & $python (Join-Path $PSScriptRoot 'stage_runtime.py') --out (Join-Path $src 'out/BrowsNative') --deps "$reportPath.runtime-deps.txt" --dest $bundle --sha256 $digest
-                Assert-Exit 'runtime dependency staging'
-                $result.runtimeBundleReady = $true
-                $binary = Join-Path $bundle 'headless_shell.exe'
-                $result.stage = 'native-acceptance'
-                & $node (Join-Path $PSScriptRoot 'platform-acceptance.mjs') --browser $binary --sha256 $digest --expect native --report "$reportPath.acceptance.json"
-                Assert-Exit 'native Worker platform acceptance'
-                $evidence = Get-Content -LiteralPath "$reportPath.acceptance.json" -Raw | ConvertFrom-Json
-                if (-not $evidence.assertionsPassed -or -not $evidence.nativeWorkerPlatform) { throw 'Native acceptance did not establish the requested capability' }
-                $result.nativeFirstScriptsPassed = $true
-                $result.stage = 'native-lifecycle'
-                $lifecycle = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../tools/native-worker-lifecycle.mjs'))
-                & $node $lifecycle --browser $binary --sha256 $digest --expect native --report "$reportPath.lifecycle.json"
-                Assert-Exit 'native Worker lifecycle acceptance'
-                $lifecycleEvidence = Get-Content -LiteralPath "$reportPath.lifecycle.json" -Raw | ConvertFrom-Json
-                if (-not $lifecycleEvidence.assertionsPassed -or -not $lifecycleEvidence.nativeLifecyclePassed) { throw 'Native lifecycle acceptance did not establish the requested capability' }
-                $result.nativeLifecyclePassed = $true
-                $result.stage = 'native-screen'
-                $screenAcceptance = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../tools/native-screen-acceptance.mjs'))
-                & $node $screenAcceptance --browser $binary --sha256 $digest --expect native --report "$reportPath.screen-acceptance.json"
-                Assert-Exit 'native OOPIF screen acceptance'
-                $screenEvidence = Get-Content -LiteralPath "$reportPath.screen-acceptance.json" -Raw | ConvertFrom-Json
-                if (-not $screenEvidence.assertionsPassed -or -not $screenEvidence.nativeScreenPassed -or -not $screenEvidence.oopifObserved) { throw 'Native screen acceptance did not establish OOPIF propagation' }
-                $result.nativeScreenPassed = $true
-                $result.nativeAcceptancePassed = $true
-                $result.stage = 'completed-test-build'
+                if ($CompilerCache) {
+                    $finished = Invoke-NativeCompileCheckpoint -Depot $depot -Seconds ($CompileBudgetMinutes * 60)
+                    $result.compileCheckpointSaved = $true
+                    if ($CheckpointOnly) { $result.stage = 'compile-cache-checkpoint' }
+                    if (-not $finished -and -not $CheckpointOnly) { throw 'Compile budget exhausted; cached work saved, no native runtime qualification' }
+                } else {
+                    & (Join-Path $depot 'autoninja.bat') -C out/BrowsNative headless_shell
+                    Assert-Exit 'headless shell compilation'
+                }
+                if (-not $CheckpointOnly) {
+                    $binary = Join-Path $src 'out/BrowsNative/headless_shell.exe'
+                    if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Compiled test executable missing' }
+                    $digest = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+                    $result.compiled = $true
+                    $result.testExecutableSha256 = $digest
+                    $result.stage = 'runtime-bundle'
+                    & (Join-Path $depot 'autoninja.bat') -C out/BrowsNative generate_headless_shell_license_file
+                    Assert-Exit 'runtime license generation'
+                    $dependencies = & (Join-Path $depot 'gn.bat') desc out/BrowsNative //headless:headless_shell runtime_deps
+                    Assert-Exit 'runtime dependency inventory'
+                    $dependencies | Set-Content -LiteralPath "$reportPath.runtime-deps.txt" -Encoding utf8
+                    $bundle = Join-Path $root 'test-runtime'
+                    & $python (Join-Path $PSScriptRoot 'stage_runtime.py') --out (Join-Path $src 'out/BrowsNative') --deps "$reportPath.runtime-deps.txt" --dest $bundle --sha256 $digest
+                    Assert-Exit 'runtime dependency staging'
+                    $result.runtimeBundleReady = $true
+                    $binary = Join-Path $bundle 'headless_shell.exe'
+                    $result.stage = 'native-acceptance'
+                    & $node (Join-Path $PSScriptRoot 'platform-acceptance.mjs') --browser $binary --sha256 $digest --expect native --report "$reportPath.acceptance.json"
+                    Assert-Exit 'native Worker platform acceptance'
+                    $evidence = Get-Content -LiteralPath "$reportPath.acceptance.json" -Raw | ConvertFrom-Json
+                    if (-not $evidence.assertionsPassed -or -not $evidence.nativeWorkerPlatform) { throw 'Native acceptance did not establish the requested capability' }
+                    $result.nativeFirstScriptsPassed = $true
+                    $result.stage = 'native-lifecycle'
+                    $lifecycle = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../tools/native-worker-lifecycle.mjs'))
+                    & $node $lifecycle --browser $binary --sha256 $digest --expect native --report "$reportPath.lifecycle.json"
+                    Assert-Exit 'native Worker lifecycle acceptance'
+                    $lifecycleEvidence = Get-Content -LiteralPath "$reportPath.lifecycle.json" -Raw | ConvertFrom-Json
+                    if (-not $lifecycleEvidence.assertionsPassed -or -not $lifecycleEvidence.nativeLifecyclePassed) { throw 'Native lifecycle acceptance did not establish the requested capability' }
+                    $result.nativeLifecyclePassed = $true
+                    $result.stage = 'native-screen'
+                    $screenAcceptance = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../tools/native-screen-acceptance.mjs'))
+                    & $node $screenAcceptance --browser $binary --sha256 $digest --expect native --report "$reportPath.screen-acceptance.json"
+                    Assert-Exit 'native OOPIF screen acceptance'
+                    $screenEvidence = Get-Content -LiteralPath "$reportPath.screen-acceptance.json" -Raw | ConvertFrom-Json
+                    if (-not $screenEvidence.assertionsPassed -or -not $screenEvidence.nativeScreenPassed -or -not $screenEvidence.oopifObserved) { throw 'Native screen acceptance did not establish OOPIF propagation' }
+                    $result.nativeScreenPassed = $true
+                    $result.nativeAcceptancePassed = $true
+                    $result.stage = 'completed-test-build'
+                }
             }
         } finally { Pop-Location }
     } finally { Pop-Location }
@@ -199,6 +220,8 @@ try {
     $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding utf8
     $result | ConvertTo-Json -Depth 8 | Write-Output
 }
-if ($CompileChangedSourcesOnly) {
+if ($CheckpointOnly) {
+    if (-not $result.compileCheckpointSaved -or $result.failure) { exit 1 }
+} elseif ($CompileChangedSourcesOnly) {
     if (-not $result.changedCppObjectsCompiled -or $result.failure) { exit 1 }
 } elseif (-not $result.nativeAcceptancePassed) { exit 1 }
