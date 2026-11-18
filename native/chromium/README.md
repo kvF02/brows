@@ -181,6 +181,11 @@ After the five patched/generated objects compile, re-execute those exact command
 and require actual cache hits with byte-identical objects. The resumed job also
 requires real cache hits during its first object build, excluding the tiny smoke
 control. A failed cache proof stops before another four-hour full-build attempt.
+The cached workflow verifies sources against the mandatory pinned gclient
+checkout, before hooks/GN/compilation, rather than fetching the same inputs again
+from the raw GitHub mirror (which returned HTTP 429). Its final gate requires
+both actual-checkout source reports, all 14 pinned blobs, patch application and
+successful probe generation in addition to compiler and native runtime evidence.
 A digest-pinned sccache wrapper is first tested with two real clang-cl compilations
 and a required cache hit. Both build jobs keep the same source/toolchain pins,
 functional GN profile and build-root paths. The first stops its owned compiler

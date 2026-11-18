@@ -27,8 +27,9 @@ jobs:
         with:
           node-version: 24
       - run: python -m pip install -r native/chromium/requirements.txt
-      - run: python native/chromium/verify_patch.py --report target/native-source-check.json
-      - run: python native/chromium/screen/verify_patch.py --report target/native-screen-source-check.json
+      # Source verification is mandatory in build-windows.ps1 against the
+      # actual pinned gclient checkout before hooks/GN/compilation. Avoid a
+      # duplicate raw GitHub mirror fetch here (observed HTTP 429).
       - name: Parse and exercise actual Windows process-budget and cache boundaries
         shell: pwsh
         env:
@@ -87,6 +88,15 @@ jobs:
           import json
           from pathlib import Path
           v = json.loads(Path('evidence/native-build.json').read_text(encoding='utf-8-sig'))
+          worker = json.loads(Path('evidence/native-build.json.source.json').read_text(encoding='utf-8-sig'))
+          screen = json.loads(Path('evidence/native-build.json.screen-source.json').read_text(encoding='utf-8-sig'))
+          if (worker.get('assertionsPassed') is not True or worker.get('probeGeneratorPassed') is not True
+              or worker.get('patchAppliedToCheckout') is not True or worker.get('sourceFilesVerified') != 11
+              or screen.get('patchApplies') is not True or screen.get('patchAppliedToCheckout') is not True
+              or screen.get('pinnedBlobsChecked') != 3
+              or worker.get('sourceRevision') != v.get('sourceRevision')
+              or screen.get('sourceRevision') != v.get('sourceRevision')):
+              raise SystemExit('Actual pinned checkout source/probe/patch evidence is incomplete')
           keys = ['actualCppCachePassed', 'changedCppObjectsCompiled', 'compiled', 'runtimeBundleReady', 'nativeFirstScriptsPassed',
                   'nativeLifecyclePassed', 'nativeScreenPassed', 'nativeAcceptancePassed']
           if (not all(v.get(k) is True for k in keys) or v.get('failure') is not None
