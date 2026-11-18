@@ -18,8 +18,8 @@ concurrency:
 env:
   # This immutable run is already building. Do not start or cancel a kernel
   # build just to qualify its staged test artifact.
-  NATIVE_SOURCE_RUN_ID: '44082221586'
-  NATIVE_SOURCE_HEAD: ed903170d6a4d54fe3ac6d11ec98d5a467d0477b
+  NATIVE_SOURCE_RUN_ID: '44216582797'
+  NATIVE_SOURCE_HEAD: 4162be59d09b0f8ec5a90f526a4e81cb51384f7b
   # Automatic follow-up uses the already compiled/linted qualification code.
   NATIVE_QUALIFICATION_HEAD: b2bb99fd54e79231279e4ef7314b42afac0f3b7c
 jobs:
