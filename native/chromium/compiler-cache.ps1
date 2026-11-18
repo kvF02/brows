@@ -50,3 +50,64 @@ function Invoke-NativeCompileCheckpoint([string]$Depot, [int]$Seconds) {
         return $true
     } finally { $process.Dispose() }
 }
+
+function Read-NativeCompilerCacheStats([string]$Cache) {
+    $value = & $Cache --show-stats --stats-format=json | ConvertFrom-Json
+    if ($LASTEXITCODE -ne 0 -or $null -eq $value.stats.compile_requests) { throw 'Compiler-cache statistics unavailable' }
+    [pscustomobject]@{
+        hits = [long](($value.stats.cache_hits.counts.PSObject.Properties.Value | Measure-Object -Sum).Sum)
+        writes = [long]$value.stats.cache_writes
+        requests = [long]$value.stats.compile_requests
+        rejected = [long]$value.stats.requests_not_cacheable
+    }
+}
+
+function Assert-NativeCacheCommand([string]$Command, [string]$Source, [string]$Object) {
+    if ($Command.Length -lt 1 -or $Command.Length -gt 32700 -or $Command -match '[\r\n]' -or
+        -not $Command.Contains('sccache.exe') -or
+        -not $Command.Replace('\', '/').Contains($Object) -or
+        -not $Command.Replace('\', '/').Contains($Source)) { throw 'Cannot bind the actual GN compiler command to its source/object' }
+    if ($Command -match '-fmodules(?:-cache-path|\b)|-emit-module|fmodule-file=') {
+        throw 'Actual GN compiler command still uses modules unsupported by this compiler cache'
+    }
+}
+
+function Get-NativeCppCacheCommands([string]$SourceRoot, [string]$Depot, [string]$OutDirectory, [object[]]$Plan) {
+    $ninja = @((Join-Path $SourceRoot 'third_party/ninja/ninja.exe'), (Join-Path $Depot 'ninja.bat')) |
+        Where-Object { Test-Path -LiteralPath $_ -PathType Leaf } | Select-Object -First 1
+    if (-not $ninja) { throw 'Pinned Ninja command introspection executable missing' }
+    foreach ($entry in $Plan) {
+        foreach ($object in $entry.outputs) {
+            $lines = @(& $ninja -C $OutDirectory -t commands $object)
+            if ($LASTEXITCODE -ne 0 -or $lines.Count -eq 0) { throw 'Ninja could not describe the actual object compiler command' }
+            $command = [string]$lines[-1]
+            # Generated input paths in commands are build-relative.
+            $source = $entry.source.Replace('out/BrowsNative/', '')
+            Assert-NativeCacheCommand $command $source $object
+            [pscustomobject]@{ source = $entry.source; object = $object; command = $command }
+        }
+    }
+}
+
+function Test-NativeCppCacheCommands([string]$Cache, [string]$OutDirectory, [object[]]$Commands) {
+    Push-Location $OutDirectory
+    try {
+        foreach ($entry in $Commands) {
+            $before = Read-NativeCompilerCacheStats $Cache
+            # Re-execute the exact GN/Ninja command, bypassing Siso's local
+            # up-to-date checks. No arguments are removed or approximated.
+            $process = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d', '/s', '/c', ('"' + $entry.command + '"')) -NoNewWindow -PassThru
+            try {
+                if (-not $process.WaitForExit(120000)) { $process.Kill($true); $process.WaitForExit(); throw 'Actual compiler-cache proof exceeded two minutes' }
+                if ($process.ExitCode -ne 0) { throw 'Actual compiler-cache proof command failed' }
+            } finally { $process.Dispose() }
+            $after = Read-NativeCompilerCacheStats $Cache
+            if ($after.hits -le $before.hits -or $after.rejected -gt $before.rejected) {
+                throw 'Actual Chromium object command did not hit the compiler cache'
+            }
+            $bytes = [Text.Encoding]::UTF8.GetBytes($entry.command)
+            [pscustomobject]@{ source = $entry.source; object = $entry.object; cacheHits = $after.hits - $before.hits;
+                commandSha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant() }
+        }
+    } finally { Pop-Location }
+}

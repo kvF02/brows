@@ -171,6 +171,16 @@ Chromium-derived patch context, generator inputs and generated bindings use the
 upstream BSD-style license, reproduced in `UPSTREAM_LICENSE`.
 
 The cached-runtime workflow addresses the observed six-hour hosted build timeout.
+Its first attempt revealed that a tiny standalone cache control is insufficient:
+sccache rejected real Chromium commands with `-fmodules-cache-path`, leaving only
+a 587-byte cache. The cached profile now uses `use_clang_modules=false` to compile
+headers textually while retaining libc++, debug assertions and browser features.
+GN rejects unused arguments. Before compiling, actual Ninja object commands must
+bind to the expected sources/outputs/wrapper and contain no unsupported modules.
+After the five patched/generated objects compile, re-execute those exact commands
+and require actual cache hits with byte-identical objects. The resumed job also
+requires real cache hits during its first object build, excluding the tiny smoke
+control. A failed cache proof stops before another four-hour full-build attempt.
 A digest-pinned sccache wrapper is first tested with two real clang-cl compilations
 and a required cache hit. Both build jobs keep the same source/toolchain pins,
 functional GN profile and build-root paths. The first stops its owned compiler

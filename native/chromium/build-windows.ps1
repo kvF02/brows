@@ -4,12 +4,14 @@ param(
     [switch]$PrepareHostedSdk,
     [switch]$CompileChangedSourcesOnly,
     [string]$CompilerCache,
+    [switch]$RequireRestoredCompilerHits,
     [ValidateRange(1, 280)][int]$CompileBudgetMinutes = 240,
     [switch]$CheckpointOnly
 )
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'Windows x64 build host required' }
 if ($CheckpointOnly -and (-not $CompilerCache -or $CompileChangedSourcesOnly)) { throw 'Checkpoint mode requires the compiler cache and full compile path' }
+if ($RequireRestoredCompilerHits -and -not $CompilerCache) { throw 'Restored compiler evidence requires the cache path' }
 $manifest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'source-manifest.json') -Raw | ConvertFrom-Json
 $reportPath = [IO.Path]::GetFullPath($Report)
 $root = [IO.Path]::GetFullPath($BuildRoot)
@@ -22,6 +24,7 @@ $result.changedCppObjectsCompiled = $false
 $result.compileChangedSourcesOnly = [bool]$CompileChangedSourcesOnly
 $result.compileCheckpointOnly = [bool]$CheckpointOnly
 $result.compileCheckpointSaved = $false
+$result.actualCppCachePassed = $false
 $result.buildProfile = 'debug-component-functional-candidate'
 $result.runtimeBundleReady = $false
 $bundle = $null
@@ -113,14 +116,16 @@ try {
                 if ($CompilerCache -notmatch '^[A-Z]:\\[A-Za-z0-9_-]+\\sccache\.exe$') { throw 'Compiler cache must use the fixed installed executable path' }
                 . (Join-Path $PSScriptRoot 'compiler-cache.ps1')
                 $result.compilerCacheSmoke = Test-NativeCompilerCache -Cache $CompilerCache -Compiler (Join-Path $src 'third_party/llvm-build/Release+Asserts/bin/clang-cl.exe') -Directory (Join-Path $root 'cache-smoke')
-                $gnArgs += ' cc_wrapper="' + $CompilerCache.Replace('\', '/') + '"'
+                # Header modules are a build optimization, not a browser
+                # capability. sccache 0.19 rejects their compiler arguments.
+                $gnArgs += ' use_clang_modules=false cc_wrapper="' + $CompilerCache.Replace('\', '/') + '"'
             }
             $result.gnArgs = $gnArgs
             $outDirectory = Join-Path $src 'out/BrowsNative'
             [IO.Directory]::CreateDirectory($outDirectory) | Out-Null
             # A real args.gn file avoids PowerShell/batch quote transformations.
             [IO.File]::WriteAllText((Join-Path $outDirectory 'args.gn'), "$gnArgs`n", [Text.UTF8Encoding]::new($false))
-            & (Join-Path $depot 'gn.bat') gen out/BrowsNative
+            & (Join-Path $depot 'gn.bat') gen out/BrowsNative --fail-on-unused-args
             Assert-Exit 'GN generation'
             $result.stage = 'compile-patched-cpp'
             . (Join-Path $PSScriptRoot 'compile-changes.ps1')
@@ -128,12 +133,32 @@ try {
             $cppSources = @(@($manifest.sources) + @($screenManifest.sources) | Where-Object { $_.path.EndsWith('.cc') } | ForEach-Object path | Sort-Object -Unique)
             $plan = @(Get-NativeCppCompilePlan -Depot $depot -OutRelative 'out/BrowsNative' -Sources $cppSources)
             $objects = @($plan | ForEach-Object outputs | Sort-Object -Unique)
+            if ($CompilerCache) {
+                $commands = @(Get-NativeCppCacheCommands -SourceRoot $src -Depot $depot -OutDirectory $outDirectory -Plan $plan)
+                $cacheBeforeObjects = Read-NativeCompilerCacheStats $CompilerCache
+            }
             $plan | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath "$reportPath.cpp-plan.json" -Encoding utf8
             Write-Output "Compiling $($cppSources.Count) patched translation units and the generated core probe implementation"
             & (Join-Path $depot 'autoninja.bat') -C out/BrowsNative @objects
             Assert-Exit 'patched C++ and generated observer compilation'
             $result.cppObjects = @(Get-NativeCppObjectEvidence -OutDirectory $outDirectory -Plan $plan)
             $result.changedCppObjectsCompiled = $true
+            if ($CompilerCache) {
+                $afterObjects = Read-NativeCompilerCacheStats $CompilerCache
+                $result.restoredCompilerHits = $afterObjects.hits - $cacheBeforeObjects.hits
+                if ($RequireRestoredCompilerHits -and $result.restoredCompilerHits -lt $objects.Count) {
+                    throw 'Restored cache did not serve real Chromium compilations; refusing another cold full build'
+                }
+                $result.stage = 'verify-actual-cpp-cache'
+                $result.cppCacheProof = @(Test-NativeCppCacheCommands -Cache $CompilerCache -OutDirectory $outDirectory -Commands $commands)
+                if ($result.cppCacheProof.Count -ne $objects.Count) { throw 'Missing actual object cache evidence' }
+                $cachedObjects = @(Get-NativeCppObjectEvidence -OutDirectory $outDirectory -Plan $plan)
+                if (($cachedObjects | ConvertTo-Json -Depth 8 -Compress) -ne ($result.cppObjects | ConvertTo-Json -Depth 8 -Compress)) {
+                    throw 'Cached compiler execution changed the proven object bytes'
+                }
+                $result.actualCppCachePassed = $true
+                $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding utf8
+            }
             if ($CompileChangedSourcesOnly) {
                 $result.stage = 'patched-cpp-objects-completed'
             } else {

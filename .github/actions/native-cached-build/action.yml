@@ -27,9 +27,9 @@ runs:
       id: cache
       with:
         path: D:\brows-compiler-cache
-        key: native-cl-v1-${{ hashFiles('native/chromium/source-manifest.json', 'native/chromium/screen/source-manifest.json', 'native/chromium/**/patches/*.patch') }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.phase }}
+        key: native-cl-v2-textual-${{ hashFiles('native/chromium/source-manifest.json', 'native/chromium/screen/source-manifest.json', 'native/chromium/**/patches/*.patch') }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.phase }}
         restore-keys: |
-          native-cl-v1-${{ hashFiles('native/chromium/source-manifest.json', 'native/chromium/screen/source-manifest.json', 'native/chromium/**/patches/*.patch') }}-
+          native-cl-v2-textual-${{ hashFiles('native/chromium/source-manifest.json', 'native/chromium/screen/source-manifest.json', 'native/chromium/**/patches/*.patch') }}-
     - name: Prepare SDK and build with a cooperative compile budget
       id: build
       shell: pwsh
@@ -41,7 +41,7 @@ runs:
       run: |
         ./native/chromium/prepare-hosted-windows.ps1 -Report target/native-build.json.sdk.json
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        ./native/chromium/build-windows.ps1 -BuildRoot D:\brows-native-source -Report target/native-build.json -CompilerCache D:\brows-cache-tools\sccache.exe -CompileBudgetMinutes 240 -CheckpointOnly:($env:CHECKPOINT_ONLY -eq 'true')
+        ./native/chromium/build-windows.ps1 -BuildRoot D:\brows-native-source -Report target/native-build.json -CompilerCache D:\brows-cache-tools\sccache.exe -CompileBudgetMinutes 240 -CheckpointOnly:($env:CHECKPOINT_ONLY -eq 'true') -RequireRestoredCompilerHits:($env:CHECKPOINT_ONLY -ne 'true')
     - name: Flush cache and preserve compiler statistics
       if: always()
       shell: pwsh

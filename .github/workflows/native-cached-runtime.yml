@@ -6,6 +6,8 @@ on:
       - '.github/actions/native-cached-build/**'
       - 'native/chromium/compiler-cache.ps1'
       - 'native/chromium/test-compile-budget.ps1'
+      - 'native/chromium/test-compiler-cache-commands.ps1'
+      - 'native/chromium/build-windows.ps1'
   workflow_dispatch:
 permissions:
   contents: read
@@ -40,6 +42,7 @@ jobs:
           }
           ./native/chromium/test-compile-changes.ps1
           ./native/chromium/test-compile-budget.ps1
+          ./native/chromium/test-compiler-cache-commands.ps1
           . ./native/chromium/compiler-cache.ps1
           $cache = Install-NativeCompilerCache D:\brows-cache-tools
           $clang = 'C:\Program Files\LLVM\bin\clang-cl.exe'
@@ -84,7 +87,7 @@ jobs:
           import json
           from pathlib import Path
           v = json.loads(Path('evidence/native-build.json').read_text(encoding='utf-8-sig'))
-          keys = ['changedCppObjectsCompiled', 'compiled', 'runtimeBundleReady', 'nativeFirstScriptsPassed',
+          keys = ['actualCppCachePassed', 'changedCppObjectsCompiled', 'compiled', 'runtimeBundleReady', 'nativeFirstScriptsPassed',
                   'nativeLifecyclePassed', 'nativeScreenPassed', 'nativeAcceptancePassed']
           if (not all(v.get(k) is True for k in keys) or v.get('failure') is not None
               or v.get('compileCheckpointOnly') is not False or v.get('compileChangedSourcesOnly') is not False
