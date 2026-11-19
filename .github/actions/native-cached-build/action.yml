@@ -1,0 +1,78 @@
+name: Cached pinned native build
+description: Preserve real compiler work before the hosted-job deadline, then qualify the linked runtime
+inputs:
+  checkpoint:
+    description: Whether this is the intermediate cache checkpoint
+    required: true
+  phase:
+    description: Unique cache snapshot and evidence suffix
+    required: true
+runs:
+  using: composite
+  steps:
+    - uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 24
+    - shell: pwsh
+      run: python -m pip install -r native/chromium/requirements.txt
+    - name: Install digest-pinned compiler cache
+      shell: pwsh
+      run: |
+        . ./native/chromium/compiler-cache.ps1
+        Install-NativeCompilerCache -Directory 'D:\brows-cache-tools'
+    - uses: actions/cache/restore@v4
+      id: cache
+      with:
+        path: D:\brows-compiler-cache
+        key: native-cl-v2-textual-${{ hashFiles('native/chromium/source-manifest.json', 'native/chromium/screen/source-manifest.json', 'native/chromium/**/patches/*.patch') }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.phase }}
+        restore-keys: |
+          native-cl-v2-textual-${{ hashFiles('native/chromium/source-manifest.json', 'native/chromium/screen/source-manifest.json', 'native/chromium/**/patches/*.patch') }}-${{ inputs.checkpoint == 'false' && format('{0}-', github.run_id) || '' }}
+    - name: Require a restored build snapshot on the second host
+      if: inputs.checkpoint == 'false' && !steps.cache.outputs.cache-matched-key
+      shell: pwsh
+      run: throw 'No matching compiler-cache snapshot to qualify'
+    - name: Prepare SDK and build with a cooperative compile budget
+      id: build
+      shell: pwsh
+      env:
+        SCCACHE_DIR: D:\brows-compiler-cache
+        SCCACHE_CACHE_SIZE: 8G
+        SCCACHE_IDLE_TIMEOUT: '0'
+        CHECKPOINT_ONLY: ${{ inputs.checkpoint }}
+      run: |
+        ./native/chromium/prepare-hosted-windows.ps1 -Report target/native-build.json.sdk.json
+        if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+        ./native/chromium/build-windows.ps1 -BuildRoot D:\brows-native-source -Report target/native-build.json -CompilerCache D:\brows-cache-tools\sccache.exe -CompileBudgetMinutes 240 -CheckpointOnly:($env:CHECKPOINT_ONLY -eq 'true') -RequireRestoredCompilerHits:($env:CHECKPOINT_ONLY -ne 'true')
+    - name: Flush cache and preserve compiler statistics
+      if: always()
+      shell: pwsh
+      env:
+        SCCACHE_DIR: D:\brows-compiler-cache
+      run: |
+        if (Test-Path D:\brows-cache-tools\sccache.exe) {
+          New-Item -ItemType Directory target -Force | Out-Null
+          & D:\brows-cache-tools\sccache.exe --show-stats --stats-format=json | Set-Content target/native-build.json.cache-stats.json
+          & D:\brows-cache-tools\sccache.exe --stop-server
+        }
+    - uses: actions/cache/save@v4
+      if: always() && steps.cache.outputs.cache-matched-key != steps.cache.outputs.cache-primary-key
+      with:
+        path: D:\brows-compiler-cache
+        key: ${{ steps.cache.outputs.cache-primary-key }}
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: ${{ inputs.checkpoint == 'true' && 'native-compile-checkpoint-evidence' || 'native-build-evidence' }}
+        path: target/native-build.json*
+        if-no-files-found: warn
+    - uses: actions/upload-artifact@v4
+      if: always() && steps.build.outputs.test_runtime_ready == 'true'
+      with:
+        name: experimental-headless-test-runtime
+        path: ${{ steps.build.outputs.test_runtime_directory }}
+        retention-days: 7
+        compression-level: 1
+        if-no-files-found: error

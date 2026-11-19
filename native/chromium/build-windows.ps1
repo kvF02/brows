@@ -1,10 +1,17 @@
 param(
     [Parameter(Mandatory)][string]$BuildRoot,
     [Parameter(Mandatory)][string]$Report,
-    [switch]$PrepareHostedSdk
+    [switch]$PrepareHostedSdk,
+    [switch]$CompileChangedSourcesOnly,
+    [string]$CompilerCache,
+    [switch]$RequireRestoredCompilerHits,
+    [ValidateRange(1, 280)][int]$CompileBudgetMinutes = 240,
+    [switch]$CheckpointOnly
 )
 $ErrorActionPreference = 'Stop'
 if (-not $IsWindows) { throw 'Windows x64 build host required' }
+if ($CheckpointOnly -and (-not $CompilerCache -or $CompileChangedSourcesOnly)) { throw 'Checkpoint mode requires the compiler cache and full compile path' }
+if ($RequireRestoredCompilerHits -and -not $CompilerCache) { throw 'Restored compiler evidence requires the cache path' }
 $manifest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'source-manifest.json') -Raw | ConvertFrom-Json
 $reportPath = [IO.Path]::GetFullPath($Report)
 $root = [IO.Path]::GetFullPath($BuildRoot)
@@ -13,12 +20,19 @@ $result = [ordered]@{ schemaVersion = 1; sourceRevision = $manifest.upstream.rev
 $result.nativeFirstScriptsPassed = $false
 $result.nativeLifecyclePassed = $false
 $result.nativeScreenPassed = $false
+$result.changedCppObjectsCompiled = $false
+$result.compileChangedSourcesOnly = [bool]$CompileChangedSourcesOnly
+$result.compileCheckpointOnly = [bool]$CheckpointOnly
+$result.compileCheckpointSaved = $false
+$result.actualCppCachePassed = $false
+$result.restoredCppCachePassed = $false
 $result.buildProfile = 'debug-component-functional-candidate'
 $result.runtimeBundleReady = $false
 $bundle = $null
 $oldPath = $env:PATH
 $oldToolchain = $env:DEPOT_TOOLS_WIN_TOOLCHAIN
 $oldUpdate = $env:DEPOT_TOOLS_UPDATE
+$oldCacheMode = $env:SCCACHE_LOCAL_RW_MODE
 $gitCount = 0
 if ($env:GIT_CONFIG_COUNT -and -not [int]::TryParse($env:GIT_CONFIG_COUNT, [ref]$gitCount)) { throw 'Invalid inherited Git configuration count' }
 if ($gitCount -lt 0 -or $gitCount -gt 256) { throw 'Invalid inherited Git configuration count' }
@@ -100,56 +114,121 @@ try {
             # Component/debug keeps assertions and all sandbox/security gates;
             # it is not a release-performance or production-admission result.
             $gnArgs = 'is_debug=true is_component_build=true v8_optimized_debug=false symbol_level=0 blink_symbol_level=0 v8_symbol_level=0 target_cpu="x64" use_remoteexec=false'
+            if ($CompilerCache) {
+                if ($CompilerCache -notmatch '^[A-Z]:\\[A-Za-z0-9_-]+\\sccache\.exe$') { throw 'Compiler cache must use the fixed installed executable path' }
+                . (Join-Path $PSScriptRoot 'compiler-cache.ps1')
+                $result.compilerCacheSmoke = Test-NativeCompilerCache -Cache $CompilerCache -Compiler (Join-Path $src 'third_party/llvm-build/Release+Asserts/bin/clang-cl.exe') -Directory (Join-Path $root 'cache-smoke')
+                # Header modules are a build optimization, not a browser
+                # capability. sccache 0.19 rejects their compiler arguments.
+                $gnArgs += ' use_clang_modules=false cc_wrapper="' + $CompilerCache.Replace('\', '/') + '"'
+            }
             $result.gnArgs = $gnArgs
             $outDirectory = Join-Path $src 'out/BrowsNative'
             [IO.Directory]::CreateDirectory($outDirectory) | Out-Null
             # A real args.gn file avoids PowerShell/batch quote transformations.
             [IO.File]::WriteAllText((Join-Path $outDirectory 'args.gn'), "$gnArgs`n", [Text.UTF8Encoding]::new($false))
-            & (Join-Path $depot 'gn.bat') gen out/BrowsNative
+            & (Join-Path $depot 'gn.bat') gen out/BrowsNative --fail-on-unused-args
             Assert-Exit 'GN generation'
-            $result.stage = 'compile'
-            [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($reportPath)) | Out-Null
-            $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding utf8
-            & (Join-Path $depot 'autoninja.bat') -C out/BrowsNative headless_shell
-            Assert-Exit 'headless shell compilation'
-            $binary = Join-Path $src 'out/BrowsNative/headless_shell.exe'
-            if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Compiled test executable missing' }
-            $digest = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
-            $result.compiled = $true
-            $result.testExecutableSha256 = $digest
-            $result.stage = 'runtime-bundle'
-            & (Join-Path $depot 'autoninja.bat') -C out/BrowsNative generate_headless_shell_license_file
-            Assert-Exit 'runtime license generation'
-            $dependencies = & (Join-Path $depot 'gn.bat') desc out/BrowsNative //headless:headless_shell runtime_deps
-            Assert-Exit 'runtime dependency inventory'
-            $dependencies | Set-Content -LiteralPath "$reportPath.runtime-deps.txt" -Encoding utf8
-            $bundle = Join-Path $root 'test-runtime'
-            & $python (Join-Path $PSScriptRoot 'stage_runtime.py') --out (Join-Path $src 'out/BrowsNative') --deps "$reportPath.runtime-deps.txt" --dest $bundle --sha256 $digest
-            Assert-Exit 'runtime dependency staging'
-            $result.runtimeBundleReady = $true
-            $binary = Join-Path $bundle 'headless_shell.exe'
-            $result.stage = 'native-acceptance'
-            & $node (Join-Path $PSScriptRoot 'platform-acceptance.mjs') --browser $binary --sha256 $digest --expect native --report "$reportPath.acceptance.json"
-            Assert-Exit 'native Worker platform acceptance'
-            $evidence = Get-Content -LiteralPath "$reportPath.acceptance.json" -Raw | ConvertFrom-Json
-            if (-not $evidence.assertionsPassed -or -not $evidence.nativeWorkerPlatform) { throw 'Native acceptance did not establish the requested capability' }
-            $result.nativeFirstScriptsPassed = $true
-            $result.stage = 'native-lifecycle'
-            $lifecycle = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../tools/native-worker-lifecycle.mjs'))
-            & $node $lifecycle --browser $binary --sha256 $digest --expect native --report "$reportPath.lifecycle.json"
-            Assert-Exit 'native Worker lifecycle acceptance'
-            $lifecycleEvidence = Get-Content -LiteralPath "$reportPath.lifecycle.json" -Raw | ConvertFrom-Json
-            if (-not $lifecycleEvidence.assertionsPassed -or -not $lifecycleEvidence.nativeLifecyclePassed) { throw 'Native lifecycle acceptance did not establish the requested capability' }
-            $result.nativeLifecyclePassed = $true
-            $result.stage = 'native-screen'
-            $screenAcceptance = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../tools/native-screen-acceptance.mjs'))
-            & $node $screenAcceptance --browser $binary --sha256 $digest --expect native --report "$reportPath.screen-acceptance.json"
-            Assert-Exit 'native OOPIF screen acceptance'
-            $screenEvidence = Get-Content -LiteralPath "$reportPath.screen-acceptance.json" -Raw | ConvertFrom-Json
-            if (-not $screenEvidence.assertionsPassed -or -not $screenEvidence.nativeScreenPassed -or -not $screenEvidence.oopifObserved) { throw 'Native screen acceptance did not establish OOPIF propagation' }
-            $result.nativeScreenPassed = $true
-            $result.nativeAcceptancePassed = $true
-            $result.stage = 'completed-test-build'
+            $result.stage = 'compile-patched-cpp'
+            . (Join-Path $PSScriptRoot 'compile-changes.ps1')
+            $screenManifest = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'screen/source-manifest.json') -Raw | ConvertFrom-Json
+            $cppSources = @(@($manifest.sources) + @($screenManifest.sources) | Where-Object { $_.path.EndsWith('.cc') } | ForEach-Object path | Sort-Object -Unique)
+            $plan = @(Get-NativeCppCompilePlan -Depot $depot -OutRelative 'out/BrowsNative' -Sources $cppSources)
+            $objects = @($plan | ForEach-Object outputs | Sort-Object -Unique)
+            if ($CompilerCache) {
+                $commands = @(Get-NativeCppCacheCommands -SourceRoot $src -Depot $depot -OutDirectory $outDirectory -Plan $plan)
+                if ($RequireRestoredCompilerHits) {
+                    Set-NativeCompilerCacheMode $CompilerCache READ_ONLY
+                }
+                $cacheBeforeObjects = Read-NativeCompilerCacheStats $CompilerCache
+            }
+            $plan | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath "$reportPath.cpp-plan.json" -Encoding utf8
+            Write-Output "Compiling $($cppSources.Count) patched translation units and the generated core probe implementation"
+            & (Join-Path $depot 'autoninja.bat') -C out/BrowsNative @objects
+            Assert-Exit 'patched C++ and generated observer compilation'
+            $result.cppObjects = @(Get-NativeCppObjectEvidence -OutDirectory $outDirectory -Plan $plan)
+            $result.changedCppObjectsCompiled = $true
+            if ($CompilerCache) {
+                $afterObjects = Read-NativeCompilerCacheStats $CompilerCache
+                $result.objectBuildHits = $afterObjects.hits - $cacheBeforeObjects.hits
+                $result.stage = 'verify-actual-cpp-cache'
+                if ($RequireRestoredCompilerHits) {
+                    $result.restoredCompilerHits = $result.objectBuildHits
+                    $result.readOnlyCacheWrites = $afterObjects.writes - $cacheBeforeObjects.writes
+                    if ($result.restoredCompilerHits -lt $objects.Count -or $result.readOnlyCacheWrites -ne 0) {
+                        throw 'Read-only snapshot did not establish cross-host Chromium cache hits'
+                    }
+                    $result.restoredCppCachePassed = $true
+                    Set-NativeCompilerCacheMode $CompilerCache READ_WRITE
+                    # Objects evicted before the snapshot can compile on a read-only
+                    # miss. Populate their writable entries before checking each hit.
+                    foreach ($entry in $commands) { Invoke-NativeCacheCommand $entry.command $outDirectory $entry.object }
+                }
+                $result.cppCacheProof = @(Test-NativeCppCacheCommands -Cache $CompilerCache -OutDirectory $outDirectory -Commands $commands)
+                if ($result.cppCacheProof.Count -ne $objects.Count) { throw 'Missing actual object cache evidence' }
+                $cachedObjects = @(Get-NativeCppObjectEvidence -OutDirectory $outDirectory -Plan $plan)
+                if (($cachedObjects | ConvertTo-Json -Depth 8 -Compress) -ne ($result.cppObjects | ConvertTo-Json -Depth 8 -Compress)) {
+                    throw 'Cached compiler execution changed the proven object bytes'
+                }
+                $result.actualCppCachePassed = $true
+                $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding utf8
+            }
+            if ($CompileChangedSourcesOnly) {
+                $result.stage = 'patched-cpp-objects-completed'
+            } else {
+                $result.stage = 'compile'
+                [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($reportPath)) | Out-Null
+                $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding utf8
+                if ($CompilerCache) {
+                    $finished = Invoke-NativeCompileCheckpoint -Depot $depot -Seconds ($CompileBudgetMinutes * 60)
+                    $result.compileCheckpointSaved = $true
+                    if ($CheckpointOnly) { $result.stage = 'compile-cache-checkpoint' }
+                    if (-not $finished -and -not $CheckpointOnly) { throw 'Compile budget exhausted; cached work saved, no native runtime qualification' }
+                } else {
+                    & (Join-Path $depot 'autoninja.bat') -C out/BrowsNative headless_shell
+                    Assert-Exit 'headless shell compilation'
+                }
+                if (-not $CheckpointOnly) {
+                    $binary = Join-Path $src 'out/BrowsNative/headless_shell.exe'
+                    if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) { throw 'Compiled test executable missing' }
+                    $digest = (Get-FileHash -LiteralPath $binary -Algorithm SHA256).Hash.ToLowerInvariant()
+                    $result.compiled = $true
+                    $result.testExecutableSha256 = $digest
+                    $result.stage = 'runtime-bundle'
+                    & (Join-Path $depot 'autoninja.bat') -C out/BrowsNative generate_headless_shell_license_file
+                    Assert-Exit 'runtime license generation'
+                    $dependencies = & (Join-Path $depot 'gn.bat') desc out/BrowsNative //headless:headless_shell runtime_deps
+                    Assert-Exit 'runtime dependency inventory'
+                    $dependencies | Set-Content -LiteralPath "$reportPath.runtime-deps.txt" -Encoding utf8
+                    $bundle = Join-Path $root 'test-runtime'
+                    & $python (Join-Path $PSScriptRoot 'stage_runtime.py') --out (Join-Path $src 'out/BrowsNative') --deps "$reportPath.runtime-deps.txt" --dest $bundle --sha256 $digest
+                    Assert-Exit 'runtime dependency staging'
+                    $result.runtimeBundleReady = $true
+                    $binary = Join-Path $bundle 'headless_shell.exe'
+                    $result.stage = 'native-acceptance'
+                    & $node (Join-Path $PSScriptRoot 'platform-acceptance.mjs') --browser $binary --sha256 $digest --expect native --report "$reportPath.acceptance.json"
+                    Assert-Exit 'native Worker platform acceptance'
+                    $evidence = Get-Content -LiteralPath "$reportPath.acceptance.json" -Raw | ConvertFrom-Json
+                    if (-not $evidence.assertionsPassed -or -not $evidence.nativeWorkerPlatform) { throw 'Native acceptance did not establish the requested capability' }
+                    $result.nativeFirstScriptsPassed = $true
+                    $result.stage = 'native-lifecycle'
+                    $lifecycle = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../tools/native-worker-lifecycle.mjs'))
+                    & $node $lifecycle --browser $binary --sha256 $digest --expect native --report "$reportPath.lifecycle.json"
+                    Assert-Exit 'native Worker lifecycle acceptance'
+                    $lifecycleEvidence = Get-Content -LiteralPath "$reportPath.lifecycle.json" -Raw | ConvertFrom-Json
+                    if (-not $lifecycleEvidence.assertionsPassed -or -not $lifecycleEvidence.nativeLifecyclePassed) { throw 'Native lifecycle acceptance did not establish the requested capability' }
+                    $result.nativeLifecyclePassed = $true
+                    $result.stage = 'native-screen'
+                    $screenAcceptance = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../../tools/native-screen-acceptance.mjs'))
+                    & $node $screenAcceptance --browser $binary --sha256 $digest --expect native --report "$reportPath.screen-acceptance.json"
+                    Assert-Exit 'native OOPIF screen acceptance'
+                    $screenEvidence = Get-Content -LiteralPath "$reportPath.screen-acceptance.json" -Raw | ConvertFrom-Json
+                    if (-not $screenEvidence.assertionsPassed -or -not $screenEvidence.nativeScreenPassed -or -not $screenEvidence.oopifObserved) { throw 'Native screen acceptance did not establish OOPIF propagation' }
+                    $result.nativeScreenPassed = $true
+                    $result.nativeAcceptancePassed = $true
+                    $result.stage = 'completed-test-build'
+                }
+            }
         } finally { Pop-Location }
     } finally { Pop-Location }
 } catch {
@@ -176,8 +255,13 @@ try {
     $env:PATH = $oldPath
     $env:DEPOT_TOOLS_WIN_TOOLCHAIN = $oldToolchain
     $env:DEPOT_TOOLS_UPDATE = $oldUpdate
+    $env:SCCACHE_LOCAL_RW_MODE = $oldCacheMode
     [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($reportPath)) | Out-Null
     $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding utf8
     $result | ConvertTo-Json -Depth 8 | Write-Output
 }
-if (-not $result.nativeAcceptancePassed) { exit 1 }
+if ($CheckpointOnly) {
+    if (-not $result.compileCheckpointSaved -or $result.failure) { exit 1 }
+} elseif ($CompileChangedSourcesOnly) {
+    if (-not $result.changedCppObjectsCompiled -or $result.failure) { exit 1 }
+} elseif (-not $result.nativeAcceptancePassed) { exit 1 }
