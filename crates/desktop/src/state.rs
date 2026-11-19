@@ -682,20 +682,30 @@ mod tests {
                 .unwrap(),
         );
         let proofs = fixture.wait_proofs("/managed/");
-        assert_eq!(
-            proofs
-                .iter()
-                .map(|(_, _, value)| value["kind"].as_str().unwrap())
-                .collect::<std::collections::BTreeSet<_>>()
-                .len(),
-            9
-        );
+        let id: brows_domain::SessionId = session.id.clone().try_into().unwrap();
+        let report_path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/managed-runtime-acceptance.json");
+        let missing = fixture.missing_proof_kinds(&proofs);
+        let distinct = proofs
+            .iter()
+            .map(|(_, _, value)| value["kind"].as_str())
+            .collect::<std::collections::BTreeSet<_>>()
+            .len();
+        if !missing.is_empty() || distinct != 9 {
+            let report = serde_json::json!({
+                "assertionsPassed": false, "complete": false, "stage": "first-script-proofs",
+                "runtimeVersion": snapshot.version, "proofCount": proofs.len(),
+                "distinctKindCount": distinct, "missingKinds": missing,
+                "processRunning": state.browsers.is_running(&id).ok(),
+            });
+            std::fs::write(&report_path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+            panic!("Managed startup observed {distinct} distinct proof kinds, missing {missing:?}");
+        }
         for (_, _, first) in &proofs {
             assert_eq!(first["hardwareConcurrency"], 3);
             assert_eq!(first["deviceMemory"], 0.5);
             assert_eq!(first["timezone"], "Asia/Tokyo");
         }
-        let id: brows_domain::SessionId = session.id.clone().try_into().unwrap();
         assert!(state.browsers.is_running(&id).unwrap());
         assert!(state
             .runtime_management
@@ -741,12 +751,7 @@ mod tests {
         let report = serde_json::json!({ "assertionsPassed": true, "complete": false, "runtimeVersion": snapshot.version,
             "checks": ["signed-installed-capture", "immutable-reuse", "selection-survives-restart", "fresh-capability-probe", "nine-context-launch", "busy-activation-rejected", "extra-resource-launch-rejected", "corrupt-snapshot-excluded-on-restart", "missing-default-does-not-fallback"],
             "notChecked": ["signed online catalog", "automatic security updates", "multi-hour stability"] });
-        std::fs::write(
-            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../../target/managed-runtime-acceptance.json"),
-            serde_json::to_vec_pretty(&report).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(report_path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
     }
 
     fn start_capacity_profiles(

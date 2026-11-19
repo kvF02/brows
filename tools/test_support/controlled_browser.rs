@@ -82,6 +82,32 @@ impl ControlFixture {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
     }
+    pub(crate) fn missing_proof_kinds(&self, proofs: &[CapturedProof]) -> Vec<&'static str> {
+        let classic = [
+            "page",
+            "frame",
+            "cross_frame",
+            "worker",
+            "shared_worker",
+            "service_worker",
+        ];
+        let modules: &[&str] = if self.modules {
+            &[
+                "module_worker",
+                "module_shared_worker",
+                "module_service_worker",
+            ]
+        } else {
+            &[]
+        };
+        classic
+            .iter()
+            .chain(modules)
+            .copied()
+            .filter(|kind| !proofs.iter().any(|(_, _, value)| value["kind"] == *kind))
+            .collect()
+    }
+
     pub(crate) fn wait_proofs(&self, prefix: &str) -> Vec<CapturedProof> {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
         loop {
@@ -93,25 +119,7 @@ impl ControlFixture {
                 .filter(|(path, _, _)| path.starts_with(prefix))
                 .cloned()
                 .collect();
-            let mut expected = vec![
-                "page",
-                "frame",
-                "cross_frame",
-                "worker",
-                "shared_worker",
-                "service_worker",
-            ];
-            if self.modules {
-                expected.extend([
-                    "module_worker",
-                    "module_shared_worker",
-                    "module_service_worker",
-                ]);
-            }
-            if expected
-                .iter()
-                .all(|kind| proofs.iter().any(|(_, _, value)| value["kind"] == *kind))
-            {
+            if self.missing_proof_kinds(&proofs).is_empty() {
                 return proofs;
             }
             if std::time::Instant::now() >= deadline {
