@@ -179,8 +179,14 @@ GN rejects unused arguments. Before compiling, actual Ninja object commands must
 bind to the expected sources/outputs/wrapper and contain no unsupported modules.
 After the five patched/generated objects compile, re-execute those exact commands
 and require actual cache hits with byte-identical objects. The resumed job also
-requires real cache hits during its first object build, excluding the tiny smoke
-control. A failed cache proof stops before another four-hour full-build attempt.
+requires a restored snapshot. During its first object build the cache is read-only.
+At least five hits and zero writes are required before returning to writable mode.
+This excludes the smoke control and same-host reuse of newly compiled dependencies.
+A failed cache proof stops before another four-hour full-build attempt.
+The first textual-header checkpoint compiled all five objects and recorded 690
+cache writes, then cmd.exe rejected the replay command as too long. Replay now
+launches the compiler command directly in the Ninja output directory. The Windows
+driver test restores a clang-cl object from a command exceeding 10,000 characters.
 The cached workflow verifies sources against the mandatory pinned gclient
 checkout, before hooks/GN/compilation, rather than fetching the same inputs again
 from the raw GitHub mirror (which returned HTTP 429). Its final gate requires

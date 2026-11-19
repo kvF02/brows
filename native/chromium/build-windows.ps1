@@ -25,12 +25,14 @@ $result.compileChangedSourcesOnly = [bool]$CompileChangedSourcesOnly
 $result.compileCheckpointOnly = [bool]$CheckpointOnly
 $result.compileCheckpointSaved = $false
 $result.actualCppCachePassed = $false
+$result.restoredCppCachePassed = $false
 $result.buildProfile = 'debug-component-functional-candidate'
 $result.runtimeBundleReady = $false
 $bundle = $null
 $oldPath = $env:PATH
 $oldToolchain = $env:DEPOT_TOOLS_WIN_TOOLCHAIN
 $oldUpdate = $env:DEPOT_TOOLS_UPDATE
+$oldCacheMode = $env:SCCACHE_LOCAL_RW_MODE
 $gitCount = 0
 if ($env:GIT_CONFIG_COUNT -and -not [int]::TryParse($env:GIT_CONFIG_COUNT, [ref]$gitCount)) { throw 'Invalid inherited Git configuration count' }
 if ($gitCount -lt 0 -or $gitCount -gt 256) { throw 'Invalid inherited Git configuration count' }
@@ -135,6 +137,9 @@ try {
             $objects = @($plan | ForEach-Object outputs | Sort-Object -Unique)
             if ($CompilerCache) {
                 $commands = @(Get-NativeCppCacheCommands -SourceRoot $src -Depot $depot -OutDirectory $outDirectory -Plan $plan)
+                if ($RequireRestoredCompilerHits) {
+                    Set-NativeCompilerCacheMode $CompilerCache READ_ONLY
+                }
                 $cacheBeforeObjects = Read-NativeCompilerCacheStats $CompilerCache
             }
             $plan | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath "$reportPath.cpp-plan.json" -Encoding utf8
@@ -145,11 +150,20 @@ try {
             $result.changedCppObjectsCompiled = $true
             if ($CompilerCache) {
                 $afterObjects = Read-NativeCompilerCacheStats $CompilerCache
-                $result.restoredCompilerHits = $afterObjects.hits - $cacheBeforeObjects.hits
-                if ($RequireRestoredCompilerHits -and $result.restoredCompilerHits -lt $objects.Count) {
-                    throw 'Restored cache did not serve real Chromium compilations; refusing another cold full build'
-                }
+                $result.objectBuildHits = $afterObjects.hits - $cacheBeforeObjects.hits
                 $result.stage = 'verify-actual-cpp-cache'
+                if ($RequireRestoredCompilerHits) {
+                    $result.restoredCompilerHits = $result.objectBuildHits
+                    $result.readOnlyCacheWrites = $afterObjects.writes - $cacheBeforeObjects.writes
+                    if ($result.restoredCompilerHits -lt $objects.Count -or $result.readOnlyCacheWrites -ne 0) {
+                        throw 'Read-only snapshot did not establish cross-host Chromium cache hits'
+                    }
+                    $result.restoredCppCachePassed = $true
+                    Set-NativeCompilerCacheMode $CompilerCache READ_WRITE
+                    # Objects evicted before the snapshot can compile on a read-only
+                    # miss. Populate their writable entries before checking each hit.
+                    foreach ($entry in $commands) { Invoke-NativeCacheCommand $entry.command $outDirectory $entry.object }
+                }
                 $result.cppCacheProof = @(Test-NativeCppCacheCommands -Cache $CompilerCache -OutDirectory $outDirectory -Commands $commands)
                 if ($result.cppCacheProof.Count -ne $objects.Count) { throw 'Missing actual object cache evidence' }
                 $cachedObjects = @(Get-NativeCppObjectEvidence -OutDirectory $outDirectory -Plan $plan)
@@ -241,6 +255,7 @@ try {
     $env:PATH = $oldPath
     $env:DEPOT_TOOLS_WIN_TOOLCHAIN = $oldToolchain
     $env:DEPOT_TOOLS_UPDATE = $oldUpdate
+    $env:SCCACHE_LOCAL_RW_MODE = $oldCacheMode
     [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($reportPath)) | Out-Null
     $result | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $reportPath -Encoding utf8
     $result | ConvertTo-Json -Depth 8 | Write-Output

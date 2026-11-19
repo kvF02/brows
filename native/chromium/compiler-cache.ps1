@@ -62,6 +62,14 @@ function Read-NativeCompilerCacheStats([string]$Cache) {
     }
 }
 
+function Set-NativeCompilerCacheMode([string]$Cache, [ValidateSet('READ_ONLY', 'READ_WRITE')][string]$Mode) {
+    & $Cache --stop-server | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw 'Could not stop the active compiler cache' }
+    $env:SCCACHE_LOCAL_RW_MODE = $Mode
+    & $Cache --start-server | Out-Null
+    if ($LASTEXITCODE -ne 0) { throw "Could not start the compiler cache in $Mode mode" }
+}
+
 function Assert-NativeCacheCommand([string]$Command, [string]$Source, [string]$Object) {
     if ($Command.Length -lt 1 -or $Command.Length -gt 32700 -or $Command -match '[\r\n]' -or
         -not $Command.Contains('sccache.exe') -or
@@ -89,25 +97,42 @@ function Get-NativeCppCacheCommands([string]$SourceRoot, [string]$Depot, [string
     }
 }
 
-function Test-NativeCppCacheCommands([string]$Cache, [string]$OutDirectory, [object[]]$Commands) {
-    Push-Location $OutDirectory
+function Invoke-NativeCacheCommand([string]$Command, [string]$OutDirectory, [string]$Object) {
+    # Ninja has already rendered the command. Split off only the executable and
+    # pass its argument text verbatim. cmd.exe truncates real Blink commands.
+    $parts = [regex]::Match($Command, '^\s*(?:"(?<exe>[^"]+)"|(?<exe>[^\s"]+))[ \t]+(?<args>[^\r\n]+)\z')
+    if (-not $parts.Success) { throw "Cannot identify compiler executable for $Object" }
+    $exe = $parts.Groups['exe'].Value
+    if ($exe -match '[/\\]' -and -not [IO.Path]::IsPathFullyQualified($exe)) {
+        $exe = [IO.Path]::GetFullPath($exe, $OutDirectory)
+    }
+    $start = [Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = $exe
+    $start.Arguments = $parts.Groups['args'].Value
+    $start.WorkingDirectory = $OutDirectory
+    $start.UseShellExecute = $false
+    $process = [Diagnostics.Process]::Start($start)
     try {
-        foreach ($entry in $Commands) {
-            $before = Read-NativeCompilerCacheStats $Cache
-            # Re-execute the exact GN/Ninja command, bypassing Siso's local
-            # up-to-date checks. No arguments are removed or approximated.
-            $process = Start-Process -FilePath $env:ComSpec -ArgumentList @('/d', '/s', '/c', ('"' + $entry.command + '"')) -NoNewWindow -PassThru
-            try {
-                if (-not $process.WaitForExit(120000)) { $process.Kill($true); $process.WaitForExit(); throw 'Actual compiler-cache proof exceeded two minutes' }
-                if ($process.ExitCode -ne 0) { throw 'Actual compiler-cache proof command failed' }
-            } finally { $process.Dispose() }
-            $after = Read-NativeCompilerCacheStats $Cache
-            if ($after.hits -le $before.hits -or $after.rejected -gt $before.rejected) {
-                throw 'Actual Chromium object command did not hit the compiler cache'
-            }
-            $bytes = [Text.Encoding]::UTF8.GetBytes($entry.command)
-            [pscustomobject]@{ source = $entry.source; object = $entry.object; cacheHits = $after.hits - $before.hits;
-                commandSha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant() }
+        if (-not $process.WaitForExit(120000)) {
+            $process.Kill($true)
+            $process.WaitForExit()
+            throw "Compiler-cache replay timed out for $Object"
         }
-    } finally { Pop-Location }
+        if ($process.ExitCode -ne 0) { throw "Compiler-cache replay failed for $Object (exit $($process.ExitCode), $($Command.Length) characters)" }
+    } finally { $process.Dispose() }
+}
+
+function Test-NativeCppCacheCommands([string]$Cache, [string]$OutDirectory, [object[]]$Commands) {
+    foreach ($entry in $Commands) {
+        $before = Read-NativeCompilerCacheStats $Cache
+        Invoke-NativeCacheCommand $entry.command $OutDirectory $entry.object
+        $after = Read-NativeCompilerCacheStats $Cache
+        if ($after.hits -le $before.hits -or $after.rejected -gt $before.rejected) {
+            throw "Chromium object command did not hit the compiler cache for $($entry.object)"
+        }
+        $bytes = [Text.Encoding]::UTF8.GetBytes($entry.command)
+        [pscustomobject]@{ source = $entry.source; object = $entry.object; cacheHits = $after.hits - $before.hits;
+            commandCharacters = $entry.command.Length;
+            commandSha256 = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData($bytes)).ToLowerInvariant() }
+    }
 }

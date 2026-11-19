@@ -29,7 +29,11 @@ runs:
         path: D:\brows-compiler-cache
         key: native-cl-v2-textual-${{ hashFiles('native/chromium/source-manifest.json', 'native/chromium/screen/source-manifest.json', 'native/chromium/**/patches/*.patch') }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.phase }}
         restore-keys: |
-          native-cl-v2-textual-${{ hashFiles('native/chromium/source-manifest.json', 'native/chromium/screen/source-manifest.json', 'native/chromium/**/patches/*.patch') }}-
+          native-cl-v2-textual-${{ hashFiles('native/chromium/source-manifest.json', 'native/chromium/screen/source-manifest.json', 'native/chromium/**/patches/*.patch') }}-${{ inputs.checkpoint == 'false' && format('{0}-', github.run_id) || '' }}
+    - name: Require a restored build snapshot on the second host
+      if: inputs.checkpoint == 'false' && !steps.cache.outputs.cache-matched-key
+      shell: pwsh
+      run: throw 'No matching compiler-cache snapshot to qualify'
     - name: Prepare SDK and build with a cooperative compile budget
       id: build
       shell: pwsh

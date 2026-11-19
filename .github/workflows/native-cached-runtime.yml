@@ -43,12 +43,12 @@ jobs:
           }
           ./native/chromium/test-compile-changes.ps1
           ./native/chromium/test-compile-budget.ps1
-          ./native/chromium/test-compiler-cache-commands.ps1
           . ./native/chromium/compiler-cache.ps1
           $cache = Install-NativeCompilerCache D:\brows-cache-tools
           $clang = 'C:\Program Files\LLVM\bin\clang-cl.exe'
           if (-not (Test-Path $clang)) { throw 'Hosted clang-cl required for a real cache-hit control' }
           Test-NativeCompilerCache $cache $clang D:\brows-cache-control
+          ./native/chromium/test-compiler-cache-commands.ps1 -Cache $cache -Compiler $clang
           & $cache --stop-server
   checkpoint:
     name: Preserve bounded compilation work (not native qualification)
@@ -97,7 +97,7 @@ jobs:
               or worker.get('sourceRevision') != v.get('sourceRevision')
               or screen.get('sourceRevision') != v.get('sourceRevision')):
               raise SystemExit('Actual pinned checkout source/probe/patch evidence is incomplete')
-          keys = ['actualCppCachePassed', 'changedCppObjectsCompiled', 'compiled', 'runtimeBundleReady', 'nativeFirstScriptsPassed',
+          keys = ['actualCppCachePassed', 'restoredCppCachePassed', 'changedCppObjectsCompiled', 'compiled', 'runtimeBundleReady', 'nativeFirstScriptsPassed',
                   'nativeLifecyclePassed', 'nativeScreenPassed', 'nativeAcceptancePassed']
           if (not all(v.get(k) is True for k in keys) or v.get('failure') is not None
               or v.get('compileCheckpointOnly') is not False or v.get('compileChangedSourcesOnly') is not False
