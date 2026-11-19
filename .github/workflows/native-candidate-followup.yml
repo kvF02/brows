@@ -1,5 +1,10 @@
 name: Qualify the completed pinned native build
 on:
+  pull_request:
+    paths:
+      - '.github/workflows/native-candidate-followup.yml'
+      - 'tools/native_qualification_result.py'
+      - 'tools/test_native_qualification_result.py'
   workflow_run:
     workflows: ['Cached native Chromium runtime qualification']
     types: [completed]
@@ -8,9 +13,16 @@ permissions:
   contents: read
   actions: read
 concurrency:
-  group: native-candidate-followup-${{ github.event.workflow_run.id }}
+  group: native-candidate-followup-${{ github.event.workflow_run.id || github.ref }}
   cancel-in-progress: false
 jobs:
+  report-contract:
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - run: python -m unittest discover -s tools -p test_native_qualification_result.py -v
   qualification:
     # Exactly one owned, immutable build. No fork refs or dynamic workflow code.
     if: >-
@@ -18,3 +30,45 @@ jobs:
       github.event.workflow_run.head_sha == '61df21b58ff465556d02d4260f1db35625a6f948' &&
       github.event.workflow_run.head_repository.full_name == github.repository
     uses: kvF02/brows/.github/workflows/native-candidate-runtime.yml@a2bb447d8cb3e5d3ade3f1ada6924d7dca68dd57
+  combined-result:
+    needs: qualification
+    if: ${{ !cancelled() && needs.qualification.result != 'skipped' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SOURCE_RESULT: ${{ github.event.workflow_run.conclusion }}
+      CONTROLLER_RESULT: ${{ needs.qualification.result }}
+      SOURCE_ID: ${{ github.event.workflow_run.id }}
+      SOURCE_HEAD: ${{ github.event.workflow_run.head_sha }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        id: build
+        continue-on-error: ${{ env.SOURCE_RESULT != 'success' }}
+        with:
+          name: native-build-evidence
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: evidence/source
+      - uses: actions/download-artifact@v4
+        if: env.SOURCE_RESULT != 'success' && steps.build.outcome == 'failure'
+        continue-on-error: true
+        with:
+          name: native-compile-checkpoint-evidence
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+          path: evidence/checkpoint
+      - uses: actions/download-artifact@v4
+        if: env.SOURCE_RESULT == 'success' && env.CONTROLLER_RESULT == 'success'
+        with:
+          name: native-candidate-controller-qualification
+          path: evidence/controller
+      - name: Bind upstream and controller results to the same candidate
+        if: ${{ !cancelled() }}
+        run: python tools/native_qualification_result.py
+      - uses: actions/upload-artifact@v4
+        if: ${{ !cancelled() }}
+        with:
+          name: combined-native-qualification
+          path: evidence/combined-result.json
+          if-no-files-found: error
