@@ -757,7 +757,7 @@ mod tests {
     fn start_capacity_profiles(
         state: &AppState,
         page: impl Fn(usize) -> String,
-        mut after_launch: impl FnMut(&[SessionDto]),
+        mut after_launch: impl FnMut(&[brows_contracts::SessionDto]),
     ) -> (
         Vec<brows_contracts::SessionDto>,
         Vec<brows_contracts::ProfileIdDto>,

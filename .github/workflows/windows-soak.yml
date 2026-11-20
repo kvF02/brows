@@ -36,20 +36,27 @@ jobs:
       (github.event.action != 'edited' ||
       (github.event.changes.title != null &&
       (startsWith(github.event.pull_request.title, '[soak-2h] ') ||
+      startsWith(github.event.pull_request.title, '[soak-extended] ') ||
       startsWith(github.event.pull_request.title, '[seeded-soak-30m] ')))))
     strategy:
       fail-fast: false
       matrix:
-        persona: ${{ fromJSON(inputs.persona == 'SystemNative' && '["SystemNative"]' || inputs.persona == 'SeedableNoise' && '["SeedableNoise"]' || '["SystemNative","SeedableNoise"]') }}
+        include: ${{ fromJSON(
+          startsWith(github.event.pull_request.title, '[soak-extended] ') &&
+          '[{"persona":"SystemNative","minutes":"30"},{"persona":"SystemNative","minutes":"120"}]' ||
+          inputs.persona == 'SystemNative' && '[{"persona":"SystemNative"}]' ||
+          inputs.persona == 'SeedableNoise' && '[{"persona":"SeedableNoise"}]' ||
+          '[{"persona":"SystemNative"},{"persona":"SeedableNoise"}]') }}
+    name: soak (${{ matrix.persona }}, ${{ matrix.minutes || inputs.minutes || 'default' }})
     concurrency:
-      group: windows-soak-${{ github.ref }}-${{ matrix.persona }}
+      group: windows-soak-${{ github.ref }}-${{ matrix.persona }}-${{ matrix.minutes || 'default' }}
       cancel-in-progress: true
     runs-on: windows-latest
     timeout-minutes: 270
     env:
       BROWS_SOAK_PERSONA: ${{ matrix.persona }}
       BROWS_SOAK_MINUTES: >-
-        ${{ inputs.minutes ||
+        ${{ inputs.minutes || matrix.minutes ||
         (matrix.persona == 'SystemNative' && startsWith(github.event.pull_request.title, '[soak-2h] ') && '120') ||
         (matrix.persona == 'SeedableNoise' && startsWith(github.event.pull_request.title, '[seeded-soak-30m] ') && '30') || '1' }}
     steps:
