@@ -402,6 +402,13 @@ impl ManagedChromiumRuntime {
             OsString::from("--no-first-run"),
             OsString::from("--no-default-browser-check"),
         ];
+        #[cfg(all(windows, debug_assertions))]
+        if let Some(log_file) = soak_browser_log(plan, user_data_dir) {
+            rendered.extend([OsString::from("--enable-logging"), OsString::from("--v=1")]);
+            let mut argument = OsString::from("--log-file=");
+            argument.push(log_file);
+            rendered.push(argument);
+        }
         let mut saw_user_data_dir = false;
 
         for argument in &plan.arguments {
@@ -1036,6 +1043,35 @@ fn now_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+#[cfg(all(windows, debug_assertions))]
+fn soak_browser_log(plan: &ResolvedLaunchPlan, user_data_dir: &Path) -> Option<PathBuf> {
+    let root = PathBuf::from(std::env::var_os("BROWS_SOAK_ROOT")?)
+        .canonicalize()
+        .ok()?;
+    let directory = root.join("browser-logs");
+    if !root.join("soak-fixture").is_file()
+        || PathBuf::from(std::env::var_os("BROWS_SOAK_BROWSER_LOG_DIR")?)
+            .canonicalize()
+            .ok()?
+            != directory
+        || !user_data_dir
+            .canonicalize()
+            .ok()?
+            .starts_with(root.join("data/profiles"))
+    {
+        return None;
+    }
+    let id = plan.profile_id.as_str();
+    if id.is_empty() || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-') {
+        return None;
+    }
+    Some(
+        browser_compatible_directory(&directory)
+            .ok()?
+            .join(format!("profile-{id}.log")),
+    )
 }
 
 fn invalid_data(message: impl Into<String>) -> PortError {
