@@ -25,6 +25,7 @@ use std::{
     time::{Duration, Instant},
 };
 const TIMEOUT: Duration = Duration::from_secs(8);
+const STARTUP_TARGET_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_FRAME: usize = 2 * 1024 * 1024;
 const EVENT_QUEUE_CAPACITY: usize = 1024;
 const POLICY_WORKERS: usize = 8;
@@ -966,7 +967,10 @@ impl Controller {
                 params["newWindow"] = json!(true);
             }
             let target = controller.startup_stage("Target.createTarget", || {
-                controller.wire.call("Target.createTarget", params, None)
+                // Cold first-window creation can outlast a normal CDP command.
+                let deadline = Instant::now() + STARTUP_TARGET_TIMEOUT;
+                let reply = controller.wire.begin("Target.createTarget", params, None)?;
+                controller.wire.finish_until(reply, deadline)
             })?;
             let id = target["targetId"]
                 .as_str()
