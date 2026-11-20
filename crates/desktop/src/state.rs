@@ -757,6 +757,7 @@ mod tests {
     fn start_capacity_profiles(
         state: &AppState,
         page: impl Fn(usize) -> String,
+        mut after_launch: impl FnMut(&[SessionDto]),
     ) -> (
         Vec<brows_contracts::SessionDto>,
         Vec<brows_contracts::ProfileIdDto>,
@@ -789,6 +790,7 @@ mod tests {
                 .unwrap();
             if index < 10 {
                 sessions.push(started(outcome));
+                after_launch(&sessions);
             } else {
                 match outcome {
                     SessionLaunchOutcome::Queued { position, .. } => assert_eq!(position, 1),
@@ -811,8 +813,11 @@ mod tests {
         let owned = NativeAcceptanceRoot::new("capacity");
         let fixture = ControlFixture::start(false);
         let state = AppState::production(owned.0.clone()).unwrap();
-        let (sessions, profiles) =
-            start_capacity_profiles(&state, |index| format!("{}/capacity-{index}", fixture.url));
+        let (sessions, profiles) = start_capacity_profiles(
+            &state,
+            |index| format!("{}/capacity-{index}", fixture.url),
+            |_| {},
+        );
         for _ in 0..20 {
             std::thread::sleep(std::time::Duration::from_secs(1));
             state.sessions.reconcile_exits().unwrap();

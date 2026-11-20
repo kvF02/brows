@@ -16,6 +16,8 @@ New-Item -ItemType Directory -Path $root | Out-Null
 New-Item -ItemType File -Path (Join-Path $root 'soak-fixture') | Out-Null
 $reportPath = [IO.Path]::GetFullPath($Report)
 [IO.Directory]::CreateDirectory([IO.Path]::GetDirectoryName($reportPath)) | Out-Null
+$browserLogs = Join-Path $root 'browser-logs'
+$failureEvidence = Join-Path ([IO.Path]::GetDirectoryName($reportPath)) "soak-failure-evidence/$([IO.Path]::GetFileName($root))"
 $samples = [Collections.Generic.List[object]]::new()
 $checks = [Collections.Generic.List[string]]::new()
 $tracked = @()
@@ -52,15 +54,74 @@ function Start-SoakHost([string]$Phase) {
         RedirectStandardError = Join-Path $root "$Phase.stderr.txt"
         PassThru = $true
     }
+    if ($Phase -eq 'exercise' -and $Persona -eq 'SystemNative') {
+        [IO.Directory]::CreateDirectory($browserLogs) | Out-Null
+        $start.Environment.BROWS_SOAK_BROWSER_LOG_DIR = $browserLogs
+    }
     Start-Process @start
 }
 
 function Wait-SoakMarker([Diagnostics.Process]$Process, [string]$Name, [int]$LimitSeconds) {
     $timer = [Diagnostics.Stopwatch]::StartNew()
     while (-not (Test-Path -LiteralPath (Join-Path $root $Name))) {
+        if ($Name -eq 'steady-ready.json' -and (Test-Path -LiteralPath (Join-Path $root 'startup-failed'))) {
+            throw 'A browser failed the first document, heartbeat, or liveness check'
+        }
         if ($Process.HasExited) { throw "Test host exited before $Name (code $($Process.ExitCode))" }
         if ($timer.Elapsed.TotalSeconds -ge $LimitSeconds) { throw "Timed out waiting for $Name" }
         Start-Sleep -Milliseconds 500
+    }
+}
+
+function Save-SoakStartupFailure($HostProcess, $Startup) {
+    [IO.Directory]::CreateDirectory($failureEvidence) | Out-Null
+    if ($Startup) {
+        Copy-Item -LiteralPath (Join-Path $root 'startup-heartbeats.json') -Destination $failureEvidence
+    }
+    $pending = @{}
+    foreach ($entry in @($Startup.profiles)) {
+        if ($entry.profileId -match '^[A-Za-z0-9-]+$' -and
+            ($entry.heartbeats -eq 0 -or $entry.documentRequests -eq 0 -or $entry.processRunning -ne $true)) {
+            $pending["profile-$($entry.profileId).log"] = $entry.index
+        }
+    }
+    if ($HostProcess -and -not $HostProcess.HasExited) {
+        $hostStarted = $HostProcess.StartTime
+        $snapshot = @(Read-ProcessSnapshot)
+        $prefix = '"--log-file=' + $browserLogs.TrimEnd('\') + '\'
+        $diagnostics = @(foreach ($process in $snapshot) {
+            if ($process.ParentProcessId -ne $HostProcess.Id -or
+                $process.CreationDate -lt $hostStarted -or
+                -not $process.CommandLine -or -not $process.ExecutablePath -or
+                [IO.Path]::GetFileName($process.ExecutablePath) -ine 'msedge.exe') { continue }
+            $command = $process.CommandLine.Replace('\\?\', '')
+            $offset = $command.IndexOf($prefix, [StringComparison]::OrdinalIgnoreCase)
+            if ($offset -lt 0) { continue }
+            $file = $command.Substring($offset + $prefix.Length).Split('"', 2)[0]
+            if ($file -notmatch '^profile-[A-Za-z0-9-]+\.log$' -or ($Startup -and -not $pending.ContainsKey($file))) { continue }
+            $tree = @(Find-ProcessTree $snapshot @($process))
+            $cpu = ($tree | Measure-Object -Property UserModeTime -Sum).Sum + ($tree | Measure-Object -Property KernelModeTime -Sum).Sum
+            [ordered]@{
+                profileIndex = $pending[$file]
+                browserLog = $file
+                processId = $process.ProcessId
+                descendantCount = $tree.Count - 1
+                treeCpuSeconds = [Math]::Round($cpu / 10000000, 2)
+            }
+        })
+        ConvertTo-Json -InputObject $diagnostics -Depth 4 | Set-Content -LiteralPath (Join-Path $failureEvidence 'browser-processes.json') -Encoding utf8
+    }
+    if (-not (Test-Path -LiteralPath $browserLogs)) { return }
+    foreach ($log in (Get-ChildItem -LiteralPath $browserLogs -File -Filter 'profile-*.log')) {
+        if (($Startup -and -not $pending.ContainsKey($log.Name)) -or ($log.Attributes -band [IO.FileAttributes]::ReparsePoint)) { continue }
+        $stream = [IO.File]::Open($log.FullName, 'Open', 'Read', 'ReadWrite')
+        try {
+            $count = [int][Math]::Min(64KB, $stream.Length)
+            $stream.Position = $stream.Length - $count
+            $tail = [byte[]]::new($count)
+            $stream.ReadExactly($tail, 0, $count)
+            [IO.File]::WriteAllBytes((Join-Path $failureEvidence $log.Name), $tail)
+        } finally { $stream.Dispose() }
     }
 }
 
@@ -84,6 +145,9 @@ try {
     $soakProcess = Start-SoakHost 'exercise'
     Wait-SoakMarker $soakProcess 'steady-ready.json' 180
     $ready = Get-Content -LiteralPath (Join-Path $root 'steady-ready.json') -Raw | ConvertFrom-Json
+    if ($Persona -eq 'SystemNative') {
+        $result.startupHeartbeats = Get-Content -LiteralPath (Join-Path $root 'startup-heartbeats.json') -Raw | ConvertFrom-Json
+    }
     $result.runtimeVersion = $ready.runtimeVersion
     if ($Persona -eq 'SeedableNoise') { $result.runtimeId = $ready.runtimeId }
     $checks.Add('ten-pages-sending-heartbeats')
@@ -185,6 +249,15 @@ try {
     $startup = Join-Path $root 'startup-heartbeats.json'
     if (Test-Path -LiteralPath $startup) {
         $result.startupHeartbeats = Get-Content -LiteralPath $startup -Raw | ConvertFrom-Json
+    }
+    if ($stage -eq 'startup' -and $Persona -eq 'SystemNative') {
+        try {
+            Save-SoakStartupFailure $soakProcess $result.startupHeartbeats
+        } catch {
+            $result.failure.captureError = $_.Exception.Message
+        } finally {
+            New-Item -ItemType File -Path (Join-Path $root 'startup-captured') -Force | Out-Null
+        }
     }
     foreach ($name in @('exercise.stdout.txt', 'exercise.stderr.txt', 'reopen.stdout.txt', 'reopen.stderr.txt')) {
         $log = Join-Path $root $name

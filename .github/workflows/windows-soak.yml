@@ -109,4 +109,5 @@ jobs:
           path: |
             target/windows-soak-report.json
             target/windows-seeded-soak-report.json
+            target/soak-failure-evidence/**
           if-no-files-found: warn
