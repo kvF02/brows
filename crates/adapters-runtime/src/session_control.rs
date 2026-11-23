@@ -2150,6 +2150,31 @@ mod tests {
             .into_iter()
             .find(|target| target.kind == "page")
             .unwrap();
+        let worker_step = |phase: &str, expression: &str| {
+            let reply = controller
+                .wire
+                .call(
+                    "Runtime.evaluate",
+                    json!({"expression": expression, "awaitPromise": true, "returnByValue": true}),
+                    Some(&page.session),
+                )
+                .unwrap_or_else(|error| panic!("{phase}: {error:?}"));
+            assert!(
+                reply.get("exceptionDetails").is_none() && reply["result"]["value"] == true,
+                "{phase}: {reply}"
+            );
+        };
+        // A first-script POST can arrive while the install event is still pending.
+        // Stop only an activated registration that the page can subsequently wake.
+        worker_step(
+            "wait for active worker before stop",
+            r#"navigator.serviceWorker.ready.then(async ({active}) => {
+                if (active?.state === 'activating') {
+                    await new Promise(resolve => active.addEventListener('statechange', resolve, {once: true}));
+                }
+                return active?.state === 'activated';
+            })"#,
+        );
         controller
             .wire
             .call("ServiceWorker.enable", json!({}), Some(&page.session))
@@ -2185,7 +2210,14 @@ mod tests {
             .targets
             .iter()
             .any(|target| target.kind == "service_worker"));
-        evaluate(&controller.wire,&page.session,"navigator.serviceWorker.ready.then(registration=>registration.active.postMessage('restart-proof'));true").unwrap();
+        worker_step(
+            "post restart message to active worker",
+            r#"navigator.serviceWorker.ready.then(({active}) => {
+                if (active?.state !== 'activated') return false;
+                active.postMessage('restart-proof');
+                return true;
+            })"#,
+        );
         let restarted = fixture.wait_kind_count("/life/", "service_worker", 2);
         assert!(
             restarted.len() >= 2,
