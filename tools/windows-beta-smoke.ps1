@@ -76,7 +76,6 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
         webview2Version = $null
         startupTrace = @()
         startupFailureSnapshot = $null
-        browserLogTail = @()
         processResourcesReleased = $false
         writeAccessBeforeDispose = $null
         writeAccessAfterDispose = $null
@@ -85,10 +84,9 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
     $launches.Add($launch)
     $process = $null
     $tracePath = Join-Path $env:RUNNER_TEMP "brows-package-launch-$Round.stderr.txt"
-    $browserLog = Join-Path $env:RUNNER_TEMP "brows-package-launch-$Round.webview2.log"
     $startup = [Diagnostics.Stopwatch]::StartNew()
     try {
-        $process = Start-BrowsProbe -Executable $Executable -TracePath $tracePath -BrowserLogPath $browserLog
+        $process = Start-BrowsProbe -Executable $Executable -TracePath $tracePath
         Wait-BrowsWindow -Process $process
         $launch.windowReadyMs = $startup.ElapsedMilliseconds
         $webview = Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe' AND ParentProcessId=$($process.Id)" | Select-Object -First 1
@@ -111,18 +109,33 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
     } catch {
         if ($process -and $null -eq $launch.windowReadyMs) {
             try {
-                $process.Refresh()
-                $launch.startupFailureSnapshot = [ordered]@{
+                $snapshot = [ordered]@{
                     elapsedMs = $startup.ElapsedMilliseconds
                     pid = $process.Id
-                    exited = $process.HasExited
-                    visibleWindow = $process.MainWindowHandle -ne [IntPtr]::Zero
-                    webviews = @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe' AND ParentProcessId=$($process.Id)" -OperationTimeoutSec 5 |
-                        ForEach-Object {
-                            $version = if ($_.ExecutablePath) { [Diagnostics.FileVersionInfo]::GetVersionInfo($_.ExecutablePath).FileVersion }
-                            @{ pid = $_.ProcessId; version = $version }
-                        })
+                    exited = $null
+                    visibleWindow = $null
+                    webviews = @()
+                    registeredRuntimeVersions = @()
                 }
+                $launch.startupFailureSnapshot = $snapshot
+                $process.Refresh()
+                $snapshot.exited = $process.HasExited
+                if (-not $snapshot.exited) {
+                    $snapshot.visibleWindow = $process.MainWindowHandle -ne [IntPtr]::Zero
+                }
+                $clients = @(
+                    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\*'
+                    'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\*'
+                    'HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\*'
+                )
+                $snapshot.registeredRuntimeVersions = @(Get-ItemProperty -Path $clients -ErrorAction SilentlyContinue |
+                    Where-Object { $_.name -eq 'Microsoft Edge WebView2 Runtime' } |
+                    Select-Object -ExpandProperty pv -Unique)
+                $snapshot.webviews = @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe' AND ParentProcessId=$($process.Id)" -OperationTimeoutSec 5 |
+                    ForEach-Object {
+                        $version = if ($_.ExecutablePath) { [Diagnostics.FileVersionInfo]::GetVersionInfo($_.ExecutablePath).FileVersion }
+                        @{ pid = $_.ProcessId; version = $version }
+                    })
             } catch {
                 Write-Warning "Could not collect WebView2 process evidence: $_"
             }
@@ -131,10 +144,7 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
     } finally {
         $launch.lifecycle = @(Read-BrowsLifecycleTrace -TracePath $tracePath)
         if (Test-Path -LiteralPath $tracePath) {
-            $launch.startupTrace = @(Get-Content -LiteralPath $tracePath -Tail 80 | Where-Object { $_ -cmatch '^brows-startup ' })
-        }
-        if ((Test-Path -LiteralPath $browserLog) -and $null -eq $launch.windowReadyMs) {
-            $launch.browserLogTail = @(Get-Content -LiteralPath $browserLog -Tail 20 -ErrorAction SilentlyContinue)
+            $launch.startupTrace = @(Get-Content -LiteralPath $tracePath -Tail 80 -ErrorAction SilentlyContinue | Where-Object { $_ -cmatch '^brows-startup ' })
         }
         if ($process) {
             try {

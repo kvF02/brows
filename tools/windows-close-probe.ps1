@@ -12,18 +12,13 @@ public static class BrowsCloseProbe {
 }
 '@
 
-function Start-BrowsProbe([string]$Executable, [string]$TracePath, [string]$BrowserLogPath) {
+function Start-BrowsProbe([string]$Executable, [string]$TracePath) {
     $previousTrace = $env:BROWS_LIFECYCLE_TRACE
-    $previousArgs = $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS
     try {
         $env:BROWS_LIFECYCLE_TRACE = '1'
-        if ($BrowserLogPath) {
-            $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = "$previousArgs --enable-logging --log-file=`"$BrowserLogPath`""
-        }
         Start-Process -FilePath $Executable -RedirectStandardError $TracePath -PassThru
     } finally {
         $env:BROWS_LIFECYCLE_TRACE = $previousTrace
-        $env:WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS = $previousArgs
     }
 }
 

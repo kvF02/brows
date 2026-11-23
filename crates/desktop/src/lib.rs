@@ -51,14 +51,6 @@ pub fn run() {
             let window = window.additional_browser_args("--remote-debugging-port=9223");
             trace_lifecycle(trace, "webview-building");
             let started = std::time::Instant::now();
-            #[cfg(windows)]
-            if trace {
-                let _ = writeln!(
-                    std::io::stderr(),
-                    "brows-startup loader-version {:?}",
-                    tauri::webview_version()
-                );
-            }
             let record = |stage: &str, error: Option<&tauri::Error>| {
                 if trace {
                     let _ = writeln!(
