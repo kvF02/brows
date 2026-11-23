@@ -74,6 +74,9 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
         windowVisibleAtTimeout = $null
         lifecycle = @()
         webview2Version = $null
+        startupTrace = @()
+        startupFailureSnapshot = $null
+        browserLogTail = @()
         processResourcesReleased = $false
         writeAccessBeforeDispose = $null
         writeAccessAfterDispose = $null
@@ -82,9 +85,10 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
     $launches.Add($launch)
     $process = $null
     $tracePath = Join-Path $env:RUNNER_TEMP "brows-package-launch-$Round.stderr.txt"
+    $browserLog = Join-Path $env:RUNNER_TEMP "brows-package-launch-$Round.webview2.log"
     $startup = [Diagnostics.Stopwatch]::StartNew()
     try {
-        $process = Start-BrowsProbe -Executable $Executable -TracePath $tracePath
+        $process = Start-BrowsProbe -Executable $Executable -TracePath $tracePath -BrowserLogPath $browserLog
         Wait-BrowsWindow -Process $process
         $launch.windowReadyMs = $startup.ElapsedMilliseconds
         $webview = Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe' AND ParentProcessId=$($process.Id)" | Select-Object -First 1
@@ -104,8 +108,34 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
         $launch.exitCode = $process.ExitCode
         if ($launch.exitCode -ne 0) { throw 'Packaged application reported a failed exit' }
         Write-Output "Launch ${Round}: window ready in $($launch.windowReadyMs) ms, normal exit in $($launch.exitMs) ms"
+    } catch {
+        if ($process -and $null -eq $launch.windowReadyMs) {
+            try {
+                $process.Refresh()
+                $launch.startupFailureSnapshot = [ordered]@{
+                    elapsedMs = $startup.ElapsedMilliseconds
+                    pid = $process.Id
+                    exited = $process.HasExited
+                    visibleWindow = $process.MainWindowHandle -ne [IntPtr]::Zero
+                    webviews = @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe' AND ParentProcessId=$($process.Id)" -OperationTimeoutSec 5 |
+                        ForEach-Object {
+                            $version = if ($_.ExecutablePath) { [Diagnostics.FileVersionInfo]::GetVersionInfo($_.ExecutablePath).FileVersion }
+                            @{ pid = $_.ProcessId; version = $version }
+                        })
+                }
+            } catch {
+                Write-Warning "Could not collect WebView2 process evidence: $_"
+            }
+        }
+        throw
     } finally {
         $launch.lifecycle = @(Read-BrowsLifecycleTrace -TracePath $tracePath)
+        if (Test-Path -LiteralPath $tracePath) {
+            $launch.startupTrace = @(Get-Content -LiteralPath $tracePath -Tail 80 | Where-Object { $_ -cmatch '^brows-startup ' })
+        }
+        if ((Test-Path -LiteralPath $browserLog) -and $null -eq $launch.windowReadyMs) {
+            $launch.browserLogTail = @(Get-Content -LiteralPath $browserLog -Tail 20 -ErrorAction SilentlyContinue)
+        }
         if ($process) {
             try {
                 if ($process.HasExited) {

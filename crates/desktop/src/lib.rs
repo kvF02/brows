@@ -50,10 +50,34 @@ pub fn run() {
             #[cfg(all(windows, feature = "webview-diagnostics"))]
             let window = window.additional_browser_args("--remote-debugging-port=9223");
             trace_lifecycle(trace, "webview-building");
-            let window = window.build()?;
+            let started = std::time::Instant::now();
+            #[cfg(windows)]
+            if trace {
+                let _ = writeln!(
+                    std::io::stderr(),
+                    "brows-startup loader-version {:?}",
+                    tauri::webview_version()
+                );
+            }
+            let record = |stage: &str, error: Option<&tauri::Error>| {
+                if trace {
+                    let _ = writeln!(
+                        std::io::stderr(),
+                        "brows-startup {stage} {}ms error={error:?}",
+                        started.elapsed().as_millis()
+                    );
+                }
+            };
+            let window = window.build();
+            record("build", window.as_ref().err());
+            let window = window?;
             trace_lifecycle(trace, "webview-built");
-            window.show()?;
-            window.set_focus()?;
+            let shown = window.show();
+            record("show", shown.as_ref().err());
+            shown?;
+            let focused = window.set_focus();
+            record("focus", focused.as_ref().err());
+            focused?;
 
             Ok(())
         })
