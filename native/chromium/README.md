@@ -51,6 +51,41 @@ Every gate keeps `complete: false`. Runtime trust/update/signing integration,
 actual Windows app admission and full stop/wake/update acceptance remain separate
 work. Do not close #35 from a source/generator check or stock control alone.
 
+## Compile the changed C++ before the full browser
+
+The driver uses GN's actual `outputs` mapping for the four patched `.cc` inputs
+and the generator-produced `core_probes_impl.cc`, then asks Ninja/Siso to compile
+those objects before linking `headless_shell`. This checks the generated observer
+calls as C++, rather than relying only on a text patch or Python generator.
+Object paths are not guessed; missing/unsafe mappings and missing/empty object
+outputs fail. The report records source-to-object mappings, sizes and SHA256.
+The [GN outputs reference](https://gn.googlesource.com/gn/+/22c9eba8c5262cb4d2d08fe9fe258b1bde78cfc9/docs/reference.md)
+documents this source-file-to-object invocation.
+
+PR builds default to this compile-only path (75-minute upper bound). They keep
+`compiled: false`, `nativeAcceptancePassed: false`, `runtimeAdmitted: false` and
+`complete: false`, even when `changedCppObjectsCompiled` becomes true. No browser
+has been linked or executed by that mode. The generated probe implementation
+must be present in the compiled-object evidence.
+The separate `Native runtime positives required` check remains blocked/failing
+until the linked runtime, staged integrity and all three native positives are
+actually observed. An object-only green job cannot turn the overall native
+qualification green or replace its merge gate.
+
+An explicit workflow dispatch, a master push, or a PR with the
+`native-runtime-build` label requests the full build and all existing native
+positives (six-hour upper bound). A full build compiles these objects first and
+reuses the same checkout/output directory for the remaining browser build.
+Existing source pins, SDK/bootstrap checks, assertions, runtime dependency
+integrity and native acceptance gates remain required. This change does not
+alter or cancel the already-running pinned build 43348531237.
+
+Manual compile-only command:
+
+```powershell
+./native/chromium/build-windows.ps1 -BuildRoot C:\brows-cpp-source -Report target/native-cpp.json -CompileChangedSourcesOnly
+```
+
 The previous optimized static build in [run 43237106238](https://github.com/kvF02/brows/actions/runs/43237106238)
 completed 22,293 / 46,422 build edges before its four-hour job limit. It produced
 no usable browser or positive native result. Functional qualification now uses
@@ -134,3 +169,36 @@ terminates only its owned process tree and removes its temporary profile.
 
 Chromium-derived patch context, generator inputs and generated bindings use the
 upstream BSD-style license, reproduced in `UPSTREAM_LICENSE`.
+
+The cached-runtime workflow addresses the observed six-hour hosted build timeout.
+Its first attempt revealed that a tiny standalone cache control is insufficient:
+sccache rejected real Chromium commands with `-fmodules-cache-path`, leaving only
+a 587-byte cache. The cached profile now uses `use_clang_modules=false` to compile
+headers textually while retaining libc++, debug assertions and browser features.
+GN rejects unused arguments. Before compiling, actual Ninja object commands must
+bind to the expected sources/outputs/wrapper and contain no unsupported modules.
+After the five patched/generated objects compile, re-execute those exact commands
+and require actual cache hits with byte-identical objects. The resumed job also
+requires a restored snapshot. During its first object build the cache is read-only.
+At least five hits and zero writes are required before returning to writable mode.
+This excludes the smoke control and same-host reuse of newly compiled dependencies.
+A failed cache proof stops before another four-hour full-build attempt.
+The first textual-header checkpoint compiled all five objects and recorded 690
+cache writes, then cmd.exe rejected the replay command as too long. Replay now
+launches the compiler command directly in the Ninja output directory. The Windows
+driver test restores a clang-cl object from a command exceeding 10,000 characters.
+The cached workflow verifies sources against the mandatory pinned gclient
+checkout, before hooks/GN/compilation, rather than fetching the same inputs again
+from the raw GitHub mirror (which returned HTTP 429). Its final gate requires
+both actual-checkout source reports, all 14 pinned blobs, patch application and
+successful probe generation in addition to compiler and native runtime evidence.
+A digest-pinned sccache wrapper is first tested with two real clang-cl compilations
+and a required cache hit. Both build jobs keep the same source/toolchain pins,
+functional GN profile and build-root paths. The first stops its owned compiler
+tree after a four-hour compile budget, flushes an 8 GiB local cache and saves a
+snapshot. The second restores compiler results by content and continues to link
+and run all three native positives. Cache snapshots and checkpoints cannot satisfy
+the final native-positive-evidence job. Cache misses, eviction, unsupported flags
+or another exhausted budget remain possible; the workflow must report those
+failures rather than claiming native success. It changes no cache storage limits,
+runtime publisher admission or sandbox settings.
