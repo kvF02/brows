@@ -26,10 +26,10 @@ jobs:
   qualification:
     # Exactly one owned, immutable build. No fork refs or dynamic workflow code.
     if: >-
-      format('{0}', github.event.workflow_run.id) == '44462941292' &&
-      github.event.workflow_run.head_sha == '61df21b58ff465556d02d4260f1db35625a6f948' &&
+      format('{0}', github.event.workflow_run.id) == '45641298599' &&
+      github.event.workflow_run.head_sha == 'c12d8fbacf564264cccfbaca8b2bbf0522dfc7f1' &&
       github.event.workflow_run.head_repository.full_name == github.repository
-    uses: kvF02/brows/.github/workflows/native-candidate-runtime.yml@a2bb447d8cb3e5d3ade3f1ada6924d7dca68dd57
+    uses: kvF02/brows/.github/workflows/native-candidate-runtime.yml@05a44fff5b809f51778588b32a06a65990cb2e15
   combined-result:
     needs: qualification
     if: ${{ !cancelled() && needs.qualification.result != 'skipped' }}
