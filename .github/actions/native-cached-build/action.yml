@@ -7,6 +7,10 @@ inputs:
   phase:
     description: Unique cache snapshot and evidence suffix
     required: true
+  seed-suffix:
+    description: Exact cache snapshot suffix required before starting this phase
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -29,11 +33,21 @@ runs:
         path: D:\brows-compiler-cache
         key: native-cl-v2-textual-${{ hashFiles('native/chromium/source-manifest.json', 'native/chromium/screen/source-manifest.json', 'native/chromium/**/patches/*.patch') }}-${{ github.run_id }}-${{ github.run_attempt }}-${{ inputs.phase }}
         restore-keys: |
-          native-cl-v2-textual-${{ hashFiles('native/chromium/source-manifest.json', 'native/chromium/screen/source-manifest.json', 'native/chromium/**/patches/*.patch') }}-${{ inputs.checkpoint == 'false' && format('{0}-', github.run_id) || '' }}
-    - name: Require a restored build snapshot on the second host
-      if: inputs.checkpoint == 'false' && !steps.cache.outputs.cache-matched-key
+          native-cl-v2-textual-${{ hashFiles('native/chromium/source-manifest.json', 'native/chromium/screen/source-manifest.json', 'native/chromium/**/patches/*.patch') }}-${{ inputs.seed-suffix }}
+    - name: Record and validate the restored compiler snapshot
+      id: source
       shell: pwsh
-      run: throw 'No matching compiler-cache snapshot to qualify'
+      env:
+        CACHE_SOURCE: ${{ steps.cache.outputs.cache-matched-key }}
+        CACHE_TARGET: ${{ steps.cache.outputs.cache-primary-key }}
+        SEED_SUFFIX: ${{ inputs.seed-suffix }}
+        EXPECTED_KEY: native-cl-v2-textual-${{ hashFiles('native/chromium/source-manifest.json', 'native/chromium/screen/source-manifest.json', 'native/chromium/**/patches/*.patch') }}-${{ inputs.seed-suffix }}
+      run: |
+        New-Item -ItemType Directory target -Force | Out-Null
+        $matched = -not $env:SEED_SUFFIX -or $env:CACHE_SOURCE -ceq $env:EXPECTED_KEY
+        [ordered]@{ restoredKey = $env:CACHE_SOURCE; targetKey = $env:CACHE_TARGET; requiredSuffix = $env:SEED_SUFFIX; matched = $matched } |
+          ConvertTo-Json | Set-Content target/native-build.json.cache-source.json -Encoding utf8
+        if (-not $matched) { throw "Required compiler snapshot $env:EXPECTED_KEY; restored '$env:CACHE_SOURCE'" }
     - name: Prepare SDK and build with a cooperative compile budget
       id: build
       shell: pwsh
@@ -41,11 +55,12 @@ runs:
         SCCACHE_DIR: D:\brows-compiler-cache
         SCCACHE_CACHE_SIZE: 8G
         SCCACHE_IDLE_TIMEOUT: '0'
+        SEED_SUFFIX: ${{ inputs.seed-suffix }}
         CHECKPOINT_ONLY: ${{ inputs.checkpoint }}
       run: |
         ./native/chromium/prepare-hosted-windows.ps1 -Report target/native-build.json.sdk.json
         if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-        ./native/chromium/build-windows.ps1 -BuildRoot D:\brows-native-source -Report target/native-build.json -CompilerCache D:\brows-cache-tools\sccache.exe -CompileBudgetMinutes 240 -CheckpointOnly:($env:CHECKPOINT_ONLY -eq 'true') -RequireRestoredCompilerHits:($env:CHECKPOINT_ONLY -ne 'true')
+        ./native/chromium/build-windows.ps1 -BuildRoot D:\brows-native-source -Report target/native-build.json -CompilerCache D:\brows-cache-tools\sccache.exe -CompileBudgetMinutes 280 -CheckpointOnly:($env:CHECKPOINT_ONLY -eq 'true') -RequireRestoredCompilerHits:($env:CHECKPOINT_ONLY -ne 'true' -or [bool]$env:SEED_SUFFIX)
     - name: Flush cache and preserve compiler statistics
       if: always()
       shell: pwsh
@@ -58,7 +73,7 @@ runs:
           & D:\brows-cache-tools\sccache.exe --stop-server
         }
     - uses: actions/cache/save@v4
-      if: always() && steps.cache.outputs.cache-matched-key != steps.cache.outputs.cache-primary-key
+      if: always() && steps.source.outcome == 'success' && steps.build.outcome != 'skipped' && steps.cache.outputs.cache-matched-key != steps.cache.outputs.cache-primary-key
       with:
         path: D:\brows-compiler-cache
         key: ${{ steps.cache.outputs.cache-primary-key }}

@@ -62,6 +62,8 @@ jobs:
         with:
           checkpoint: 'true'
           phase: checkpoint
+          # Resume the existing source experiment in its own PR cache scope.
+          seed-suffix: ${{ github.event.pull_request.number == 41 && '44462941292-1-runtime' || '' }}
   runtime:
     name: Resume compiler work and require all native runtime positives
     needs: checkpoint
@@ -73,6 +75,7 @@ jobs:
         with:
           checkpoint: 'false'
           phase: runtime
+          seed-suffix: ${{ format('{0}-{1}-checkpoint', github.run_id, github.run_attempt) }}
   native-positive-evidence:
     needs: runtime
     if: always()
