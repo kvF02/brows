@@ -199,6 +199,54 @@ pub(super) fn run(build: &BrowserBuild, profile_root: &Path) -> PortResult<Obser
 #[cfg(windows)]
 #[derive(Debug)]
 struct PrivateProbe(super::session_control::Controller);
+
+// Deliberately unavailable in release builds and never registers a runtime.
+// Existing signed-Edge acceptance does not consult these candidate variables.
+#[cfg(all(test, windows))]
+pub(crate) fn isolated_native_candidate_for_test() -> PortResult<BrowserBuild> {
+    use brows_domain::{BrowserCapabilities, BrowserChannel, RuntimeTrust};
+    let executable = std::env::var_os("BROWS_NATIVE_CANDIDATE_EXECUTABLE")
+        .ok_or_else(|| invalid_data("explicit native candidate executable required"))?;
+    let executable_path = PathBuf::from(executable)
+        .canonicalize()
+        .map_err(|_| invalid_data("native candidate executable not found"))?;
+    let sha256 = std::env::var("BROWS_NATIVE_CANDIDATE_SHA256")
+        .map_err(|_| invalid_data("explicit native candidate digest required"))?;
+    if sha256.len() != 64
+        || !sha256
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    {
+        return Err(invalid_data("invalid native candidate digest"));
+    }
+    crate::verify_digest(&executable_path, &sha256)?;
+    let version = std::env::var("BROWS_NATIVE_CANDIDATE_VERSION")
+        .map_err(|_| invalid_data("explicit native candidate version required"))?;
+    let manifest: Value = serde_json::from_str(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../native/chromium/source-manifest.json"
+    )))
+    .map_err(|_| invalid_data("invalid pinned source manifest"))?;
+    if manifest["upstream"]["version"].as_str() != Some(version.as_str()) {
+        return Err(invalid_data("candidate version differs from pinned source"));
+    }
+    Ok(BrowserBuild {
+        id: BrowserBuildId::new("isolated-unsigned-native-candidate")
+            .map_err(|e| invalid_data(e.to_string()))?,
+        provider: "isolated native functional qualification".to_owned(),
+        version,
+        channel: BrowserChannel::Stable,
+        executable_path,
+        sha256,
+        publisher: "Unsigned test candidate; no production trust".to_owned(),
+        trust: RuntimeTrust::Untrusted,
+        capabilities: BrowserCapabilities {
+            supports_devtools_pipe: true,
+            ..BrowserCapabilities::default()
+        },
+        installed_at_ms: now_ms(),
+    })
+}
 #[cfg(windows)]
 impl Drop for PrivateProbe {
     fn drop(&mut self) {
@@ -730,6 +778,30 @@ fn validate_tree(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires exact-digest staged native candidate; does not admit unsigned production runtimes"]
+    fn private_native_candidate_capability_acceptance() {
+        let build = isolated_native_candidate_for_test().unwrap();
+        assert_eq!(build.trust, brows_domain::RuntimeTrust::Untrusted);
+        let root = temp_root("native-candidate-positive");
+        let observed = run_private(&build, &root);
+        let passed = observed
+            .as_ref()
+            .is_ok_and(|value| value.support == FingerprintSupport::Supported);
+        let report = serde_json::json!({"scope":"test-only direct capability probe of exact-digest unsigned native candidate",
+            "assertionsPassed":passed,"nativeCandidateProbePassed":passed,
+            "executableSha256":build.sha256,"runtimeVersion":build.version,
+            "runtimeTrust":"Untrusted","runtimeAdmitted":false,"complete":false,
+            "detail":observed.as_ref().map(|v|v.detail.as_str()).unwrap_or("probe error"),
+            "failure":observed.as_ref().err().map(|e|e.to_string())});
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target/native-candidate-capability.json");
+        fs::write(path, serde_json::to_vec_pretty(&report).unwrap()).unwrap();
+        fs::remove_dir(&root).unwrap();
+        assert!(passed, "{report}");
+    }
 
     #[cfg(windows)]
     #[test]
