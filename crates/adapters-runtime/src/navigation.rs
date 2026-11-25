@@ -36,6 +36,7 @@ pub(super) struct NavigationStart {
     session: String,
     frame: String,
     url: Url,
+    require_network: bool,
     started: bool,
 }
 impl std::fmt::Debug for NavigationStart {
@@ -46,7 +47,22 @@ impl std::fmt::Debug for NavigationStart {
     }
 }
 impl NavigationStart {
-    pub fn new(session: &str, frame: &str, url: &str) -> Option<Self> {
+    #[cfg(windows)]
+    pub fn requires_network_proof(url: &str) -> bool {
+        if !cfg!(debug_assertions) || std::env::var_os("BROWS_ACCEPTANCE_BROWSER").is_none() {
+            return false;
+        }
+        Url::parse(url).is_ok_and(|url| {
+            matches!(url.scheme(), "http" | "https")
+                && match url.host() {
+                    Some(url::Host::Ipv4(ip)) => ip.is_loopback(),
+                    Some(url::Host::Ipv6(ip)) => ip.is_loopback(),
+                    Some(url::Host::Domain(host)) => host == "localhost",
+                    None => false,
+                }
+        })
+    }
+    pub fn new(session: &str, frame: &str, url: &str, require_network: bool) -> Option<Self> {
         let url = Url::parse(url).ok()?;
         if session.is_empty() || frame.is_empty() || !matches!(url.scheme(), "http" | "https") {
             return None;
@@ -55,11 +71,13 @@ impl NavigationStart {
             session: session.to_owned(),
             frame: frame.to_owned(),
             url,
+            require_network,
             started: false,
         })
     }
     pub fn observe(&mut self, session: &str, frame: &str, url: &str) {
-        if session == self.session
+        if !self.require_network
+            && session == self.session
             && frame == self.frame
             && Url::parse(url).ok().as_ref() == Some(&self.url)
         {
@@ -68,6 +86,29 @@ impl NavigationStart {
     }
     pub fn started(&self) -> bool {
         self.started
+    }
+
+    #[cfg(any(windows, test))]
+    pub fn observe_document_request(&mut self, event: &serde_json::Value) {
+        let params = &event["params"];
+        if !self.require_network || params["type"] != "Document" {
+            return;
+        }
+        // The fragment is client-side and may be absent from the network event.
+        let without_fragment = |url: &Url| {
+            let mut url = url.clone();
+            url.set_fragment(None);
+            url
+        };
+        if event["sessionId"].as_str() == Some(&self.session)
+            && params["frameId"].as_str() == Some(&self.frame)
+            && params["request"]["url"]
+                .as_str()
+                .and_then(|url| Url::parse(url).ok())
+                .is_some_and(|url| without_fragment(&url) == without_fragment(&self.url))
+        {
+            self.started = true;
+        }
     }
 }
 
@@ -117,7 +158,7 @@ mod tests {
     #[test]
     fn only_the_requested_url_in_the_requested_main_frame_can_start_navigation() {
         let mut state =
-            NavigationStart::new("session", "main", "https://example.test/private").unwrap();
+            NavigationStart::new("session", "main", "https://example.test/private", false).unwrap();
         for (session, frame, url) in [
             ("other", "main", "https://example.test/private"),
             ("session", "child", "https://example.test/private"),
@@ -133,12 +174,41 @@ mod tests {
     }
     #[test]
     fn browser_url_normalization_does_not_lose_exact_origin_or_path_correlation() {
-        let mut state = NavigationStart::new("s", "f", "https://EXAMPLE.test:443").unwrap();
+        let mut state = NavigationStart::new("s", "f", "https://EXAMPLE.test:443", false).unwrap();
         state.observe("s", "f", "https://example.test/");
         assert!(state.started());
-        assert!(NavigationStart::new("s", "f", "not-a-url").is_none());
-        assert!(NavigationStart::new("s", "f", "file:///private").is_none());
-        assert!(NavigationStart::new("s", "", "https://example.test/").is_none());
+        assert!(NavigationStart::new("s", "f", "not-a-url", false).is_none());
+        assert!(NavigationStart::new("s", "f", "file:///private", false).is_none());
+        assert!(NavigationStart::new("s", "", "https://example.test/", false).is_none());
         assert!(!format!("{state:?}").contains("example.test"));
+    }
+
+    #[test]
+    fn only_the_main_document_network_event_proves_strict_startup() {
+        let mut request =
+            NavigationStart::new("s", "f", "http://localhost:3333/page#anchor", true).unwrap();
+        request.observe("s", "f", "http://localhost:3333/page#anchor");
+        assert!(!request.started());
+        let event = |session, frame, kind, url| {
+            serde_json::json!({
+                "sessionId": session, "params": {"frameId": frame, "type": kind, "request": {"url": url}}
+            })
+        };
+        for invalid in [
+            event("other", "f", "Document", "http://localhost:3333/page"),
+            event("s", "child", "Document", "http://localhost:3333/page"),
+            event("s", "f", "Script", "http://localhost:3333/page"),
+            event("s", "f", "Document", "http://localhost:3333/other"),
+        ] {
+            request.observe_document_request(&invalid);
+            assert!(!request.started());
+        }
+        request.observe_document_request(&event(
+            "s",
+            "f",
+            "Document",
+            "http://localhost:3333/page",
+        ));
+        assert!(request.started());
     }
 }

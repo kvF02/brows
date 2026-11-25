@@ -74,6 +74,8 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
         windowVisibleAtTimeout = $null
         lifecycle = @()
         webview2Version = $null
+        startupTrace = @()
+        startupFailureSnapshot = $null
         processResourcesReleased = $false
         writeAccessBeforeDispose = $null
         writeAccessAfterDispose = $null
@@ -104,8 +106,46 @@ function Test-InstalledLaunch([string]$Executable, [int]$Round) {
         $launch.exitCode = $process.ExitCode
         if ($launch.exitCode -ne 0) { throw 'Packaged application reported a failed exit' }
         Write-Output "Launch ${Round}: window ready in $($launch.windowReadyMs) ms, normal exit in $($launch.exitMs) ms"
+    } catch {
+        if ($process -and $null -eq $launch.windowReadyMs) {
+            try {
+                $snapshot = [ordered]@{
+                    elapsedMs = $startup.ElapsedMilliseconds
+                    pid = $process.Id
+                    exited = $null
+                    visibleWindow = $null
+                    webviews = @()
+                    registeredRuntimeVersions = @()
+                }
+                $launch.startupFailureSnapshot = $snapshot
+                $process.Refresh()
+                $snapshot.exited = $process.HasExited
+                if (-not $snapshot.exited) {
+                    $snapshot.visibleWindow = $process.MainWindowHandle -ne [IntPtr]::Zero
+                }
+                $clients = @(
+                    'HKLM:\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate\Clients\*'
+                    'HKLM:\SOFTWARE\Microsoft\EdgeUpdate\Clients\*'
+                    'HKCU:\SOFTWARE\Microsoft\EdgeUpdate\Clients\*'
+                )
+                $snapshot.registeredRuntimeVersions = @(Get-ItemProperty -Path $clients -ErrorAction SilentlyContinue |
+                    Where-Object { $_.name -eq 'Microsoft Edge WebView2 Runtime' } |
+                    Select-Object -ExpandProperty pv -Unique)
+                $snapshot.webviews = @(Get-CimInstance Win32_Process -Filter "Name='msedgewebview2.exe' AND ParentProcessId=$($process.Id)" -OperationTimeoutSec 5 |
+                    ForEach-Object {
+                        $version = if ($_.ExecutablePath) { [Diagnostics.FileVersionInfo]::GetVersionInfo($_.ExecutablePath).FileVersion }
+                        @{ pid = $_.ProcessId; version = $version }
+                    })
+            } catch {
+                Write-Warning "Could not collect WebView2 process evidence: $_"
+            }
+        }
+        throw
     } finally {
         $launch.lifecycle = @(Read-BrowsLifecycleTrace -TracePath $tracePath)
+        if (Test-Path -LiteralPath $tracePath) {
+            $launch.startupTrace = @(Get-Content -LiteralPath $tracePath -Tail 80 -ErrorAction SilentlyContinue | Where-Object { $_ -cmatch '^brows-startup ' })
+        }
         if ($process) {
             try {
                 if ($process.HasExited) {

@@ -25,7 +25,9 @@ use std::{
     time::{Duration, Instant},
 };
 const TIMEOUT: Duration = Duration::from_secs(8);
+const STARTUP_TARGET_TIMEOUT: Duration = Duration::from_secs(15);
 const MAX_FRAME: usize = 2 * 1024 * 1024;
+const EVENT_QUEUE_CAPACITY: usize = 1024;
 const POLICY_WORKERS: usize = 8;
 const TARGET_EXECUTION_ENDED: &str = "browser target execution ended";
 #[derive(Debug)]
@@ -102,11 +104,11 @@ impl Wire {
             self.process.try_wait().ok()
         );
     }
-    fn transport_closed(&self) {
+    fn transport_closed(&self, reason: &str) {
         #[cfg(any(test, debug_assertions))]
         self.trace("transport", "closed", None);
         if !self.orderly_shutdown.load(Ordering::Acquire) {
-            self.fail();
+            self.fail_with(reason);
             return;
         }
         // Browser.close can disconnect CDP before the final storage process
@@ -122,6 +124,15 @@ impl Wire {
         if let Ok(mut p) = self.pending.lock() {
             p.clear();
         }
+        self.pause_ready.notify_all();
+    }
+    fn fail_with(&self, reason: &str) {
+        if let Ok(mut failure) = self.policy_failure.lock() {
+            if failure.is_none() {
+                *failure = Some(reason.to_owned());
+            }
+        }
+        self.fail();
     }
     fn ensure_open(&self) -> PortResult<()> {
         if self.closing.load(Ordering::Acquire) {
@@ -165,7 +176,7 @@ impl Wire {
             pending.insert(id, send);
         }
         if self.writer.try_send(bytes).is_err() {
-            self.fail();
+            self.fail_with("session control writer unavailable");
             return Err(internal("session control writer unavailable"));
         }
         #[cfg(any(test, debug_assertions))]
@@ -196,13 +207,11 @@ impl Wire {
             .lock()
             .ok()
             .and_then(|reason| reason.clone());
+        let message = reply_failure_message(method, error, failure.as_deref());
         if reply.session.is_none() {
-            self.fail();
+            self.fail_with(&message);
         }
-        PortError::new(
-            PortErrorKind::Unavailable,
-            reply_failure_message(method, error, failure.as_deref()),
-        )
+        PortError::new(PortErrorKind::Unavailable, message)
     }
     fn complete_reply(&self, reply: &PendingReply, value: Value) -> PortResult<Value> {
         let method = &reply.method;
@@ -301,7 +310,7 @@ impl Wire {
                 "Runtime.evaluate",
                 json!({
                     "expression":format!("new Promise(resolve => {{ const ready = () => resolve(location.href === 'about:blank' && document.readyState === 'complete' && {native_check}); if (document.readyState === 'complete') ready(); else addEventListener('load', ready, {{once:true}}); }})"),
-                    "awaitPromise":true,"returnByValue":true,"silent":true,"timeout":1500
+                    "awaitPromise":true,"returnByValue":true,"silent":true,"timeout":4500
                 }),
                 Some(session),
             )?,
@@ -317,6 +326,14 @@ impl Wire {
         Ok(frame.to_owned())
     }
     fn start_navigation(&self, session: &str, frame: &str, url: &str) -> PortResult<()> {
+        let require_network = NavigationStart::requires_network_proof(url);
+        let deadline = Instant::now() + TIMEOUT;
+        if require_network {
+            self.finish_until(
+                self.begin("Network.enable", json!({}), Some(session))?,
+                deadline,
+            )?;
+        }
         {
             let mut navigation = self
                 .navigation
@@ -326,7 +343,7 @@ impl Wire {
                 return Err(internal("startup navigation already pending"));
             }
             *navigation = Some(
-                NavigationStart::new(session, frame, url)
+                NavigationStart::new(session, frame, url, require_network)
                     .ok_or_else(|| invalid_data("invalid startup navigation"))?,
             );
         }
@@ -336,15 +353,36 @@ impl Wire {
                 json!({"url":url,"frameId":frame}),
                 Some(session),
             )?;
-            let deadline = Instant::now() + TIMEOUT;
+            let mut acknowledged = false;
             loop {
+                self.ensure_open()?;
+                if self
+                    .navigation
+                    .lock()
+                    .map_err(|_| internal("navigation lock poisoned"))?
+                    .as_ref()
+                    .is_some_and(NavigationStart::started)
+                {
+                    // A held document response must not block startup.
+                    return Ok(());
+                }
                 let Some(remaining) = deadline.checked_duration_since(Instant::now()) else {
+                    if require_network {
+                        let reason = if acknowledged {
+                            "navigation acknowledged without a main document network request"
+                        } else {
+                            "no navigation reply or main document network request"
+                        };
+                        return Err(PortError::new(PortErrorKind::Unavailable, reason));
+                    }
                     return Err(self.reply_error(&reply, mpsc::RecvTimeoutError::Timeout));
                 };
-                match reply
-                    .receive
-                    .recv_timeout(remaining.min(Duration::from_millis(25)))
-                {
+                let slice = remaining.min(Duration::from_millis(25));
+                if acknowledged {
+                    thread::sleep(slice);
+                    continue;
+                }
+                match reply.receive.recv_timeout(slice) {
                     Ok(value) => {
                         let result = self.complete_reply(&reply, value)?;
                         if !navigation_reply_acknowledged(&result, frame) {
@@ -354,28 +392,15 @@ impl Wire {
                         if let Some(code) = super::navigation::document_result_code(&result) {
                             eprintln!("startup navigation document result: {code}");
                         }
-                        return Ok(());
+                        if !require_network {
+                            return Ok(());
+                        }
+                        acknowledged = true;
                     }
                     Err(mpsc::RecvTimeoutError::Disconnected) => {
                         return Err(self.reply_error(&reply, mpsc::RecvTimeoutError::Disconnected))
                     }
                     Err(mpsc::RecvTimeoutError::Timeout) => {}
-                }
-                self.ensure_open()?;
-                if Instant::now() >= deadline {
-                    return Err(self.reply_error(&reply, mpsc::RecvTimeoutError::Timeout));
-                }
-                if self
-                    .navigation
-                    .lock()
-                    .map_err(|_| internal("navigation lock poisoned"))?
-                    .as_ref()
-                    .is_some_and(NavigationStart::started)
-                {
-                    // The matching main-frame request has started. Network load
-                    // and its eventual navigation result belong to the page,
-                    // not the control-policy acknowledgement budget.
-                    return Ok(());
                 }
             }
         })();
@@ -479,7 +504,7 @@ impl Controller {
         let (process, mut output, mut input) = win_pipe::spawn(executable, args)
             .map_err(|_| internal("cannot start private session control"))?;
         let (writer, write_receive) = mpsc::sync_channel::<Vec<u8>>(64);
-        let (events, event_receive) = mpsc::sync_channel::<Value>(128);
+        let (events, event_receive) = mpsc::sync_channel::<Value>(EVENT_QUEUE_CAPACITY);
         let wire = Arc::new(Wire {
             #[cfg(any(test, debug_assertions))]
             trace: Mutex::new(std::collections::VecDeque::new()),
@@ -506,7 +531,7 @@ impl Controller {
                 match write_receive.recv_timeout(Duration::from_millis(200)) {
                     Ok(frame) => {
                         if output.write_all(&frame).is_err() {
-                            w.transport_closed();
+                            w.transport_closed("session control pipe write failed");
                             break;
                         }
                     }
@@ -516,19 +541,22 @@ impl Controller {
             }
         });
         let w = wire.clone();
+        let read_targets = targets.clone();
         let read_thread = thread::spawn(move || {
             let mut frame = Vec::new();
             let mut chunk = [0u8; 4096];
-            'read: loop {
+            let reason = 'read: loop {
                 let size = match input.read(&mut chunk) {
-                    Ok(0) | Err(_) => break,
+                    Ok(0) => break "session control pipe reached EOF",
+                    Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                    Err(_) => break "session control pipe read failed",
                     Ok(size) => size,
                 };
                 for byte in &chunk[..size] {
                     if *byte == 0 {
                         let value: Value = match serde_json::from_slice(&frame) {
                             Ok(v) => v,
-                            Err(_) => break 'read,
+                            Err(_) => break 'read "invalid JSON on the session control pipe",
                         };
                         frame.clear();
                         #[cfg(any(test, debug_assertions))]
@@ -557,6 +585,12 @@ impl Controller {
                                     let _ = sender.send(value);
                                 }
                             }
+                        } else if value["method"] == "Network.requestWillBeSent" {
+                            if let Ok(mut navigation) = w.navigation.lock() {
+                                if let Some(navigation) = navigation.as_mut() {
+                                    navigation.observe_document_request(&value);
+                                }
+                            }
                         } else if value["method"] == "Page.frameStartedNavigating" {
                             #[cfg(any(test, debug_assertions))]
                             w.trace(
@@ -580,8 +614,8 @@ impl Controller {
                             w.trace("event", "Debugger.paused", value["sessionId"].as_str());
                             if let Some(session) = value["sessionId"].as_str() {
                                 if let Ok(mut paused) = w.paused.lock() {
-                                    if paused.len() >= MAX_TARGETS {
-                                        break 'read;
+                                    if paused.len() >= MAX_TARGETS && !paused.contains(session) {
+                                        break 'read "session control paused target limit exceeded";
                                     }
                                     paused.insert(session.to_owned());
                                     w.pause_ready.notify_all();
@@ -605,19 +639,26 @@ impl Controller {
                                     .as_str()
                                     .or(value["sessionId"].as_str()),
                             );
-                            if events.try_send(value).is_err() {
-                                break 'read;
+                            match events.try_send(value) {
+                                Ok(()) => {}
+                                Err(mpsc::TrySendError::Full(_)) => {
+                                    break 'read "session control event queue capacity exceeded";
+                                }
+                                Err(mpsc::TrySendError::Disconnected(_)) => {
+                                    break 'read "session control event reader disconnected";
+                                }
                             }
                         }
                     } else {
                         frame.push(*byte);
                         if frame.len() > MAX_FRAME {
-                            break 'read;
+                            break 'read "session control frame exceeded 2 MiB";
                         }
                     }
                 }
-            }
-            w.transport_closed();
+            };
+            w.transport_closed(reason);
+            read_targets.1.notify_all();
         });
         // A service-worker startup can depend on another paused target. Keep
         // event dispatch independent of bounded, concurrent policy jobs.
@@ -659,11 +700,14 @@ impl Controller {
                     let session = &job.target.session;
                     #[cfg(any(test, debug_assertions))]
                     w.trace("policy-begin", &job.target.kind, Some(session));
+                    let mut stage = "target resume";
                     let result: PortResult<()> = (|| {
                         if !job.extension {
                             if job.target.kind == "service_worker" {
+                                stage = "Service Worker pause";
                                 w.pause_service_worker(session)?;
                             }
+                            stage = "target configuration";
                             configure(&w, session, &job.target.kind, &policy)?;
                             if !t
                                 .0
@@ -676,6 +720,7 @@ impl Controller {
                             if job.target.kind == "service_worker" {
                                 // Disabling the private debugger releases its pause.
                                 // A separate resume lets the worker exit before disable can reply.
+                                stage = "Service Worker resume";
                                 w.call("Debugger.disable", json!({}), Some(session))?;
                                 w.paused
                                     .lock()
@@ -684,13 +729,18 @@ impl Controller {
                             }
                         }
                         if job.extension || job.target.kind != "service_worker" {
+                            stage = "target resume";
                             w.call("Runtime.runIfWaitingForDebugger", json!({}), Some(session))?;
                         }
                         Ok(())
                     })();
                     if let Err(error) = result {
                         #[cfg(any(test, debug_assertions))]
-                        w.trace("policy-error", &job.target.kind, Some(session));
+                        w.trace(
+                            "policy-error",
+                            &format!("{} {stage}", job.target.kind),
+                            Some(&job.id),
+                        );
                         let Ok(mut state) = t.0.lock() else {
                             w.fail();
                             break;
@@ -714,17 +764,14 @@ impl Controller {
                         }
                         if error.kind == PortErrorKind::NotFound {
                             state.detach(session);
+                            t.1.notify_all();
                             continue;
                         }
-                        if let Ok(mut reason) = w.policy_failure.lock() {
-                            if reason.is_none() && error.message != "session control is closed" {
-                                *reason = Some(format!(
-                                    "{} policy failed: {}",
-                                    job.target.kind, error.message
-                                ));
-                            }
-                        }
-                        w.fail();
+                        drop(state);
+                        w.fail_with(&format!(
+                            "{} {stage} failed: {}",
+                            job.target.kind, error.message
+                        ));
                         t.1.notify_all();
                         break;
                     }
@@ -885,9 +932,9 @@ impl Controller {
             targets,
             threads,
         };
-        let version = controller
-            .wire
-            .call("Browser.getVersion", json!({}), None)?;
+        let version = controller.startup_stage("Browser.getVersion", || {
+            controller.wire.call("Browser.getVersion", json!({}), None)
+        })?;
         let actual = version["product"]
             .as_str()
             .and_then(|v| v.split('/').nth(1))
@@ -901,9 +948,11 @@ impl Controller {
             .version
             .lock()
             .map_err(|_| internal("version lock poisoned"))? = actual.to_owned();
-        controller
-            .wire
-            .call("Target.setAutoAttach", auto_attach(true), None)?;
+        controller.startup_stage("Target.setAutoAttach", || {
+            controller
+                .wire
+                .call("Target.setAutoAttach", auto_attach(true), None)
+        })?;
         let startup_urls = if urls.is_empty() {
             vec!["about:blank".to_owned()]
         } else {
@@ -917,21 +966,53 @@ impl Controller {
             if !headless && index == 0 {
                 params["newWindow"] = json!(true);
             }
-            let target = controller.wire.call("Target.createTarget", params, None)?;
+            let target = controller.startup_stage("Target.createTarget", || {
+                // Cold first-window creation can outlast a normal CDP command.
+                let deadline = Instant::now() + STARTUP_TARGET_TIMEOUT;
+                let reply = controller.wire.begin("Target.createTarget", params, None)?;
+                controller.wire.finish_until(reply, deadline)
+            })?;
             let id = target["targetId"]
                 .as_str()
                 .ok_or_else(|| internal("browser omitted target identity"))?;
-            let target = controller.await_target(id)?;
-            let frame = controller
-                .wire
-                .prepare_startup_document(&target.session, &policy)?;
-            if url != "about:blank" {
+            let target =
+                controller.startup_stage("await_target", || controller.await_target(id))?;
+            let frame = controller.startup_stage("prepare_startup_document", || {
                 controller
                     .wire
-                    .start_navigation(&target.session, &frame, &url)?;
+                    .prepare_startup_document(&target.session, &policy)
+            })?;
+            if url != "about:blank" {
+                controller.startup_stage("start_navigation", || {
+                    controller
+                        .wire
+                        .start_navigation(&target.session, &frame, &url)
+                })?;
             }
         }
         Ok(controller)
+    }
+    fn startup_stage<T>(&self, stage: &str, run: impl FnOnce() -> PortResult<T>) -> PortResult<T> {
+        let start = Instant::now();
+        let result = run();
+        let elapsed = start.elapsed().as_millis();
+        #[cfg(any(test, debug_assertions))]
+        {
+            self.wire
+                .trace("startup", &format!("{stage} {elapsed}ms"), None);
+            if result.is_err() {
+                self.wire.trace_failure();
+            }
+        }
+        result.map_err(|error| {
+            PortError::new(
+                error.kind,
+                format!(
+                    "browser startup {stage} after {elapsed}ms: {}",
+                    error.message
+                ),
+            )
+        })
     }
     fn await_target(&self, id: &str) -> PortResult<Target> {
         let deadline = Instant::now() + TIMEOUT;
@@ -941,19 +1022,14 @@ impl Controller {
             .lock()
             .map_err(|_| internal("target lock poisoned"))?;
         loop {
+            self.wire.ensure_open()?;
             if let Some(target) = targets.get(id) {
                 return Ok(target.clone());
             }
-            if self.wire.closing.load(Ordering::Acquire) || Instant::now() >= deadline {
-                return Err(internal(
-                    self.wire
-                        .policy_failure
-                        .lock()
-                        .ok()
-                        .and_then(|v| v.clone())
-                        .unwrap_or_else(|| {
-                            "browser target policy failed before navigation".to_owned()
-                        }),
+            if Instant::now() >= deadline {
+                return Err(PortError::new(
+                    PortErrorKind::Unavailable,
+                    "target did not finish policy installation before navigation",
                 ));
             }
             targets = self
@@ -2074,6 +2150,31 @@ mod tests {
             .into_iter()
             .find(|target| target.kind == "page")
             .unwrap();
+        let worker_step = |phase: &str, expression: &str| {
+            let reply = controller
+                .wire
+                .call(
+                    "Runtime.evaluate",
+                    json!({"expression": expression, "awaitPromise": true, "returnByValue": true}),
+                    Some(&page.session),
+                )
+                .unwrap_or_else(|error| panic!("{phase}: {error:?}"));
+            assert!(
+                reply.get("exceptionDetails").is_none() && reply["result"]["value"] == true,
+                "{phase}: {reply}"
+            );
+        };
+        // A first-script POST can arrive while the install event is still pending.
+        // Stop only an activated registration that the page can subsequently wake.
+        worker_step(
+            "wait for active worker before stop",
+            r#"navigator.serviceWorker.ready.then(async ({active}) => {
+                if (active?.state === 'activating') {
+                    await new Promise(resolve => active.addEventListener('statechange', resolve, {once: true}));
+                }
+                return active?.state === 'activated';
+            })"#,
+        );
         controller
             .wire
             .call("ServiceWorker.enable", json!({}), Some(&page.session))
@@ -2109,7 +2210,14 @@ mod tests {
             .targets
             .iter()
             .any(|target| target.kind == "service_worker"));
-        evaluate(&controller.wire,&page.session,"navigator.serviceWorker.ready.then(registration=>registration.active.postMessage('restart-proof'));true").unwrap();
+        worker_step(
+            "post restart message to active worker",
+            r#"navigator.serviceWorker.ready.then(({active}) => {
+                if (active?.state !== 'activated') return false;
+                active.postMessage('restart-proof');
+                return true;
+            })"#,
+        );
         let restarted = fixture.wait_kind_count("/life/", "service_worker", 2);
         assert!(
             restarted.len() >= 2,
