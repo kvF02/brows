@@ -37,6 +37,8 @@ struct Wire {
     #[cfg(any(test, debug_assertions))]
     trace_started: Instant,
     #[cfg(any(test, debug_assertions))]
+    trace_epoch_ms: u64,
+    #[cfg(any(test, debug_assertions))]
     panic_traced: AtomicBool,
     process: Arc<win_pipe::Process>,
     next: AtomicU64,
@@ -94,7 +96,8 @@ impl Wire {
     fn trace_failure(&self) {
         if let Ok(trace) = self.trace.lock() {
             eprintln!(
-                "bounded control trace (methods and redacted document state):\n{}",
+                "bounded control trace (origin {} Unix ms, relative times below):\n{}",
+                self.trace_epoch_ms,
                 trace.iter().cloned().collect::<Vec<_>>().join("\n")
             );
         }
@@ -511,6 +514,8 @@ impl Controller {
             #[cfg(any(test, debug_assertions))]
             trace_started: Instant::now(),
             #[cfg(any(test, debug_assertions))]
+            trace_epoch_ms: now_ms(),
+            #[cfg(any(test, debug_assertions))]
             panic_traced: AtomicBool::new(false),
             process: Arc::new(process),
             next: AtomicU64::new(1),
@@ -545,6 +550,8 @@ impl Controller {
         let read_thread = thread::spawn(move || {
             let mut frame = Vec::new();
             let mut chunk = [0u8; 4096];
+            #[cfg(any(test, debug_assertions))]
+            let mut document_request: Option<(String, String)> = None;
             let reason = 'read: loop {
                 let size = match input.read(&mut chunk) {
                     Ok(0) => break "session control pipe reached EOF",
@@ -559,6 +566,35 @@ impl Controller {
                             Err(_) => break 'read "invalid JSON on the session control pipe",
                         };
                         frame.clear();
+                        #[cfg(any(test, debug_assertions))]
+                        if let Some((session, request)) = &document_request {
+                            let params = &value["params"];
+                            if value["sessionId"].as_str() == Some(session.as_str())
+                                && params["requestId"].as_str() == Some(request.as_str())
+                            {
+                                match value["method"].as_str() {
+                                    Some("Network.responseReceived") => {
+                                        let status = params["response"]["status"].as_u64();
+                                        w.trace(
+                                            "document-response",
+                                            &format!("{status:?}"),
+                                            Some(session),
+                                        );
+                                    }
+                                    Some("Network.loadingFailed") => {
+                                        let code = super::navigation::document_result_code(params)
+                                            .unwrap_or("unspecified");
+                                        w.trace("document-failed", code, Some(session));
+                                        document_request = None;
+                                    }
+                                    Some("Network.loadingFinished") => {
+                                        w.trace("network", "document-finished", Some(session));
+                                        document_request = None;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                        }
                         #[cfg(any(test, debug_assertions))]
                         if value["method"] == "Page.frameNavigated" {
                             w.trace(
@@ -588,7 +624,17 @@ impl Controller {
                         } else if value["method"] == "Network.requestWillBeSent" {
                             if let Ok(mut navigation) = w.navigation.lock() {
                                 if let Some(navigation) = navigation.as_mut() {
-                                    navigation.observe_document_request(&value);
+                                    if navigation.observe_document_request(&value) {
+                                        #[cfg(any(test, debug_assertions))]
+                                        {
+                                            let session = value["sessionId"].as_str();
+                                            let id = value["params"]["requestId"].as_str();
+                                            document_request = session
+                                                .zip(id)
+                                                .map(|(s, id)| (s.to_owned(), id.to_owned()));
+                                            w.trace("network", "document-request", session);
+                                        }
+                                    }
                                 }
                             }
                         } else if value["method"] == "Page.frameStartedNavigating" {
@@ -1908,6 +1954,19 @@ mod tests {
             .lock()
             .unwrap()
             .is_none());
+        // The request starts before the peer closes. Its late failure must
+        // still be correlated after start_navigation has returned.
+        let deadline = Instant::now() + TIMEOUT;
+        loop {
+            let trace = browser.controller.wire.trace.lock().unwrap();
+            if let Some(failure) = trace.iter().find(|line| line.contains(" document-failed ")) {
+                eprintln!("closed loopback document: {failure}");
+                break;
+            }
+            drop(trace);
+            assert!(Instant::now() < deadline, "missing document failure event");
+            thread::sleep(Duration::from_millis(25));
+        }
         // The fixture returned no HTTP response, and supplied no page proof.
         assert!(!fixture
             .proofs

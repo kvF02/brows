@@ -39,6 +39,28 @@ impl DocumentGate {
     }
 }
 
+#[derive(Debug, Default)]
+struct FixtureTrace {
+    events: std::sync::Mutex<std::collections::VecDeque<(u128, u64, &'static str)>>,
+}
+impl FixtureTrace {
+    fn record(&self, id: u64, stage: &'static str) {
+        let mut events = self.events.lock().unwrap();
+        if events.len() == 128 {
+            events.pop_front();
+        }
+        let time = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
+        events.push_back((time.as_millis(), id, stage));
+    }
+
+    fn dump(&self) {
+        let events = self.events.lock().unwrap();
+        eprintln!("loopback fixture trace (Unix ms, connection, stage): {events:?}");
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ControlFixture {
     pub(crate) url: String,
@@ -47,6 +69,7 @@ pub(crate) struct ControlFixture {
     thread: Option<std::thread::JoinHandle<()>>,
     service_version: Arc<std::sync::atomic::AtomicUsize>,
     modules: bool,
+    trace: Arc<FixtureTrace>,
     document_gate: Arc<DocumentGate>,
 }
 impl ControlFixture {
@@ -76,7 +99,11 @@ impl ControlFixture {
                 .filter(|(path, _, first)| path.starts_with(prefix) && first["kind"] == kind)
                 .cloned()
                 .collect();
-            if proofs.len() >= count || std::time::Instant::now() >= deadline {
+            if proofs.len() >= count {
+                return proofs;
+            }
+            if std::time::Instant::now() >= deadline {
+                self.trace.dump();
                 return proofs;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -123,6 +150,7 @@ impl ControlFixture {
                 return proofs;
             }
             if std::time::Instant::now() >= deadline {
+                self.trace.dump();
                 return proofs;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -136,6 +164,7 @@ impl ControlFixture {
         service_version: &std::sync::atomic::AtomicUsize,
         modules: bool,
         document_gate: &DocumentGate,
+        (trace, id): (&FixtureTrace, u64),
     ) {
         use std::io::{Read, Write};
         // Accepted sockets inherit FIONBIO on Windows. Switch only this
@@ -149,16 +178,40 @@ impl ControlFixture {
             .unwrap();
         let mut bytes = Vec::new();
         let mut buffer = [0u8; 2048];
+        trace.record(id, "reading");
+        let mut headers_seen = false;
         let request = loop {
             match stream.read(&mut buffer) {
-                Ok(0) | Err(_) => break None,
+                Ok(0) => {
+                    trace.record(id, "eof");
+                    break None;
+                }
+                Err(error) => {
+                    use std::io::ErrorKind;
+                    let stage = match error.kind() {
+                        ErrorKind::Interrupted => continue,
+                        ErrorKind::TimedOut | ErrorKind::WouldBlock => "read-timeout",
+                        _ => "read-error",
+                    };
+                    trace.record(id, stage);
+                    break None;
+                }
                 Ok(n) => bytes.extend_from_slice(&buffer[..n]),
             }
             if bytes.len() > 16384 {
+                trace.record(id, "request-too-large");
                 break None;
             }
             if let Some(end) = bytes.windows(4).position(|p| p == b"\r\n\r\n") {
                 let head = String::from_utf8_lossy(&bytes[..end]).to_string();
+                if !headers_seen {
+                    let document = head
+                        .split_whitespace()
+                        .nth(1)
+                        .is_some_and(|path| path.ends_with("/page"));
+                    trace.record(id, if document { "document-headers" } else { "headers" });
+                    headers_seen = true;
+                }
                 let length = head
                     .lines()
                     .find_map(|line| {
@@ -167,6 +220,10 @@ impl ControlFixture {
                             .and_then(|v| v.trim().parse::<usize>().ok())
                     })
                     .unwrap_or(0);
+                if length > 16384 - (end + 4) {
+                    trace.record(id, "request-too-large");
+                    break None;
+                }
                 if bytes.len() >= end + 4 + length {
                     break Some((head, bytes[end + 4..end + 4 + length].to_vec()));
                 }
@@ -177,6 +234,7 @@ impl ControlFixture {
         };
         let path = headers.split_whitespace().nth(1).unwrap_or("/").to_owned();
         if path == "/closed/page" {
+            trace.record(id, "intentional-close");
             output.lock().unwrap().push((
                 path,
                 String::new(),
@@ -350,7 +408,11 @@ impl ControlFixture {
             )
         };
         let response = format!("HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\nAccept-CH: Sec-CH-UA-Platform, Sec-CH-UA-Full-Version-List\r\n\r\n{content}", content.len());
-        let _ = stream.write_all(response.as_bytes());
+        match stream.write_all(response.as_bytes()) {
+            Ok(()) if path.ends_with("/page") => trace.record(id, "document-response-written"),
+            Err(_) => trace.record(id, "response-write-error"),
+            _ => {}
+        }
     }
 
     pub(crate) fn start(modules: bool) -> Self {
@@ -369,10 +431,12 @@ impl ControlFixture {
         let version = service_version.clone();
         let document_gate = Arc::new(DocumentGate::default());
         let gate = document_gate.clone();
+        let trace = Arc::new(FixtureTrace::default());
+        let server_trace = trace.clone();
         let thread = std::thread::spawn(move || {
             // Browsers preconnect before sending headers. One idle socket
             // must not block or prematurely close unrelated script loads.
-            let (send, receive) = std::sync::mpsc::sync_channel::<std::net::TcpStream>(64);
+            let (send, receive) = std::sync::mpsc::sync_channel::<(u64, std::net::TcpStream)>(64);
             let receive = Arc::new(std::sync::Mutex::new(receive));
             std::thread::scope(|scope| {
                 for _ in 0..16 {
@@ -382,6 +446,7 @@ impl ControlFixture {
                     let cross_origin = &cross_origin;
                     let version = version.clone();
                     let gate = gate.clone();
+                    let trace = &server_trace;
                     scope.spawn(move || {
                         while !halt.load(std::sync::atomic::Ordering::Acquire) {
                             let next = receive
@@ -389,13 +454,14 @@ impl ControlFixture {
                                 .unwrap()
                                 .recv_timeout(std::time::Duration::from_millis(100));
                             match next {
-                                Ok(stream) => Self::serve(
+                                Ok((id, stream)) => Self::serve(
                                     stream,
                                     &output,
                                     cross_origin,
                                     &version,
                                     modules,
                                     &gate,
+                                    (trace, id),
                                 ),
                                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                                 Err(_) => break,
@@ -403,6 +469,7 @@ impl ControlFixture {
                         }
                     });
                 }
+                let mut id = 0;
                 while !halt.load(std::sync::atomic::Ordering::Acquire) {
                     let accepted = listener.accept().or_else(|error| {
                         if error.kind() == std::io::ErrorKind::WouldBlock {
@@ -412,10 +479,24 @@ impl ControlFixture {
                         }
                     });
                     match accepted {
-                        Ok((stream, _)) => {
-                            let _ = send.try_send(stream);
+                        Ok((stream, peer)) => {
+                            id += 1;
+                            let stage = if peer.is_ipv4() {
+                                "accept-v4"
+                            } else {
+                                "accept-v6"
+                            };
+                            server_trace.record(id, stage);
+                            if send.try_send((id, stream)).is_err() {
+                                server_trace.record(id, "queue-rejected");
+                            }
                         }
-                        Err(_) => std::thread::sleep(std::time::Duration::from_millis(10)),
+                        Err(error) => {
+                            if error.kind() != std::io::ErrorKind::WouldBlock {
+                                server_trace.record(0, "accept-error");
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
                     }
                 }
                 drop(send);
@@ -428,6 +509,7 @@ impl ControlFixture {
             thread: Some(thread),
             service_version,
             modules,
+            trace,
             document_gate,
         }
     }
@@ -470,6 +552,14 @@ mod tests {
         assert!(fixture.proofs.lock().unwrap().is_empty());
         fixture.release_document();
         assert!(client.join().unwrap().starts_with("HTTP/1.1 200 OK\r\n"));
+        let events = fixture.trace.events.lock().unwrap();
+        let request = events.iter().find(|e| e.2 == "document-headers").unwrap();
+        assert!(events
+            .iter()
+            .any(|e| e.1 == request.1 && e.2 == "accept-v4"));
+        assert!(events
+            .iter()
+            .any(|e| e.1 == request.1 && e.2 == "document-response-written"));
     }
 
     #[test]
@@ -488,6 +578,7 @@ mod tests {
                 &AtomicUsize::new(0),
                 false,
                 &DocumentGate::default(),
+                (&FixtureTrace::default(), 1),
             );
         });
         let mut client = TcpStream::connect(address).unwrap();
