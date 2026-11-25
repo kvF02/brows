@@ -209,7 +209,14 @@ impl ControlFixture {
                         .split_whitespace()
                         .nth(1)
                         .is_some_and(|path| path.ends_with("/page"));
-                    trace.record(id, if document { "document-headers" } else { "headers" });
+                    trace.record(
+                        id,
+                        if document {
+                            "document-headers"
+                        } else {
+                            "headers"
+                        },
+                    );
                     headers_seen = true;
                 }
                 let length = head
