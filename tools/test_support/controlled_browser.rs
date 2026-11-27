@@ -116,8 +116,11 @@ pub(crate) struct ControlFixture {
     document_gate: Arc<DocumentGate>,
 }
 impl ControlFixture {
-    pub(crate) fn wait_held_document(&self) -> bool {
-        self.document_gate.wait_requested()
+    pub(crate) fn wait_held_document(&self) -> Result<(), Vec<(u128, u64, &'static str)>> {
+        if self.document_gate.wait_requested() {
+            return Ok(());
+        }
+        Err(self.trace.events.lock().unwrap().iter().copied().collect())
     }
     pub(crate) fn release_document(&self) {
         self.document_gate.release();
@@ -608,7 +611,7 @@ mod tests {
             client.read_to_string(&mut response).unwrap();
             response
         });
-        assert!(fixture.wait_held_document());
+        fixture.wait_held_document().unwrap();
         assert!(fixture.proofs.lock().unwrap().is_empty());
         fixture.release_document();
         assert!(client.join().unwrap().starts_with("HTTP/1.1 200 OK\r\n"));

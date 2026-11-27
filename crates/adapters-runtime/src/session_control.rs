@@ -2108,10 +2108,21 @@ mod tests {
     fn private_pending_navigation_acceptance() {
         let fixture = browser_fixture::ControlFixture::start(false);
         let browser = acceptance_browser(&fixture, "held");
-        assert!(
-            fixture.wait_held_document(),
-            "startup must request the document"
-        );
+        if let Err(events) = fixture.wait_held_document() {
+            let wire = &browser.controller.wire;
+            let controller_events = wire.trace.lock().unwrap().clone();
+            browser.write_report_status(
+                "pending-navigation",
+                json!({
+                    "stage": "wait-held-document",
+                    "fixtureEventsUnixMsConnectionStage": events,
+                    "controllerOriginUnixMs": wire.trace_epoch_ms,
+                    "controllerEvents": controller_events,
+                }),
+                false,
+            );
+            panic!("startup must request the document; fixture events: {events:?}");
+        }
         assert!(
             fixture.proofs.lock().unwrap().is_empty(),
             "the document response is still held"
@@ -2289,7 +2300,7 @@ mod tests {
             "updated Worker must run its first script"
         );
         assert_eq!(updated.last().unwrap().2["fixtureVersion"], 1);
-        for (_, _, value) in updated {
+        for (_, _, value) in &updated {
             assert_eq!(value["hardwareConcurrency"], 3);
             assert_eq!(value["timezone"], "Asia/Tokyo");
             assert_eq!(value["canvas"], first["canvas"]);
@@ -2302,6 +2313,17 @@ mod tests {
             .targets
             .iter()
             .any(|target| target.kind == "service_worker"));
+        browser.write_report(
+            "worker-lifecycle",
+            json!({
+                "initialVersion": first["fixtureVersion"],
+                "stopObserved": true,
+                "proofCountAfterRestart": restarted.len(),
+                "restartedVersion": restarted.last().unwrap().2["fixtureVersion"],
+                "proofCountAfterUpdate": updated.len(),
+                "updatedVersion": updated.last().unwrap().2["fixtureVersion"],
+            }),
+        );
     }
 
     #[test]
