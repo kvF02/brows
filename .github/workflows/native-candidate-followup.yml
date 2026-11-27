@@ -62,19 +62,22 @@ jobs:
                 continue;
               }
               const log = typeof raw === 'string' ? raw : Buffer.from(raw).toString('utf8');
-              let progress;
+              let largestTotal = 0;
+              let finalSample;
+              // Siso updates its graph size while it runs. The final counter and
+              // the largest denominator can come from different progress lines.
               for (const line of log.split(/\r?\n/)) {
                 const match = line.match(/\[\s*(\d+)\s*\/\s*(\d+)\s*\]/);
                 if (!match) continue;
                 const done = Number(match[1]), total = Number(match[2]);
-                if (done <= total && (!progress || total >= progress.total)) {
-                  progress = { done, total, at: line.match(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z/)?.[0] ?? null };
-                }
+                if (done > total) continue;
+                largestTotal = Math.max(largestTotal, total);
+                finalSample = { done, total, at: line.match(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z/)?.[0] ?? null };
               }
               const source = 'https://github.com/' + repo.owner + '/' + repo.repo +
                 '/actions/runs/' + run_id + '/job/' + job.id;
               core.info(JSON.stringify({name, source, conclusion: job.conclusion,
-                lastSampleFromLargestGraph: progress ?? null}));
+                largestTotal, finalSample: finalSample ?? null}));
             }
   qualification:
     # Exactly one owned, immutable build. No fork refs or dynamic workflow code.
