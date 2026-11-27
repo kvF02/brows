@@ -23,6 +23,59 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: python -m unittest discover -s tools -p test_native_qualification_result.py -v
+      - name: Inspect logged compiler progress for the pinned source run
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const run_id = 45641298599;
+            const head = 'c12d8fbacf564264cccfbaca8b2bbf0522dfc7f1';
+            const repo = context.repo;
+            const {data: run} = await github.rest.actions.getWorkflowRun({ ...repo, run_id });
+            if (run.head_sha !== head || run.workflow_id !== 421301331 ||
+                run.head_repository?.full_name !== 'kvF02/brows' || run.run_attempt !== 1) {
+              throw new Error('Unexpected native source run, head or attempt');
+            }
+            if (run.status !== 'completed') {
+              core.info('The source build is still running.');
+              return;
+            }
+            const {data} = await github.rest.actions.listJobsForWorkflowRunAttempt({
+              ...repo, run_id, attempt_number: 1, per_page: 100
+            });
+            for (const name of ['Preserve bounded compilation work (not native qualification)',
+                                'Resume compiler work and require all native runtime positives']) {
+              const matches = data.jobs.filter(job => job.name === name);
+              if (matches.length !== 1) throw new Error('Expected exactly one job named ' + name);
+              const job = matches[0];
+              if (job.conclusion === 'skipped') {
+                core.info(name + ' was skipped.');
+                continue;
+              }
+              let raw;
+              try {
+                ({data: raw} = await github.rest.actions.downloadJobLogsForWorkflowRun({
+                  ...repo, job_id: job.id
+                }));
+              } catch (error) {
+                if (error.status !== 404 && error.status !== 410) throw error;
+                core.info(name + ': job log unavailable.');
+                continue;
+              }
+              const log = typeof raw === 'string' ? raw : Buffer.from(raw).toString('utf8');
+              let progress;
+              for (const line of log.split(/\r?\n/)) {
+                const match = line.match(/\[\s*(\d+)\s*\/\s*(\d+)\s*\]/);
+                if (!match) continue;
+                const done = Number(match[1]), total = Number(match[2]);
+                if (done <= total && (!progress || total >= progress.total)) {
+                  progress = { done, total, at: line.match(/^\d{4}-\d{2}-\d{2}T[\d:.]+Z/)?.[0] ?? null };
+                }
+              }
+              const source = 'https://github.com/' + repo.owner + '/' + repo.repo +
+                '/actions/runs/' + run_id + '/job/' + job.id;
+              core.info(JSON.stringify({name, source, conclusion: job.conclusion,
+                lastSampleFromLargestGraph: progress ?? null}));
+            }
   qualification:
     # Exactly one owned, immutable build. No fork refs or dynamic workflow code.
     if: >-
