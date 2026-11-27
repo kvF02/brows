@@ -89,10 +89,10 @@ impl NavigationStart {
     }
 
     #[cfg(any(windows, test))]
-    pub fn observe_document_request(&mut self, event: &serde_json::Value) {
+    pub fn observe_document_request(&mut self, event: &serde_json::Value) -> bool {
         let params = &event["params"];
         if !self.require_network || params["type"] != "Document" {
-            return;
+            return false;
         }
         // The fragment is client-side and may be absent from the network event.
         let without_fragment = |url: &Url| {
@@ -108,7 +108,9 @@ impl NavigationStart {
                 .is_some_and(|url| without_fragment(&url) == without_fragment(&self.url))
         {
             self.started = true;
+            return true;
         }
+        false
     }
 }
 
