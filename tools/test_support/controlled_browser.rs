@@ -696,7 +696,10 @@ mod tests {
         fixture.release_document();
         assert!(client.join().unwrap().starts_with("HTTP/1.1 200 OK\r\n"));
         let events = fixture.origins[0].trace.events.lock().unwrap();
-        let request = events.iter().find(|e| e.stage == "document-headers").unwrap();
+        let request = events
+            .iter()
+            .find(|e| e.stage == "document-headers")
+            .unwrap();
         assert!(events
             .iter()
             .any(|e| e.connection_id == request.connection_id && e.stage == "accept-v4"));
