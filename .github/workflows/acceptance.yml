@@ -100,10 +100,20 @@ jobs:
         timeout-minutes: 5
         shell: pwsh
         run: |
+          $report = 'target/fingerprint-worker-lifecycle-acceptance.json'
           foreach ($round in 1..3) {
+            if (Test-Path -LiteralPath $report) { Remove-Item -LiteralPath $report }
             Write-Output "Worker lifecycle acceptance round $round"
-            cargo +1.97.1 test -p brows-adapters-runtime private_worker_lifecycle_acceptance -- --ignored --nocapture
-            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            cargo +1.97.1 test -p brows-adapters-runtime session_control::tests::private_worker_lifecycle_acceptance --locked -- --exact --ignored --nocapture
+            $code = $LASTEXITCODE
+            if (Test-Path -LiteralPath $report) {
+              Copy-Item -LiteralPath $report -Destination "target/fingerprint-worker-lifecycle-round-$round.json" -ErrorAction Stop
+            }
+            if ($code -ne 0) { exit $code }
+            $evidence = Get-Content -LiteralPath $report -Raw -ErrorAction Stop | ConvertFrom-Json
+            if ($evidence.assertionsPassed -isnot [bool] -or !$evidence.assertionsPassed) {
+              throw "Missing passing Worker lifecycle evidence for round $round"
+            }
           }
       - name: Module Worker first-script acceptance
         if: ${{ !cancelled() && steps.rust_checks.outcome == 'success' && steps.login_storage.outcome == 'success' }}
@@ -168,6 +178,7 @@ jobs:
             target/fingerprint-session-acceptance-round-*.json
             target/fingerprint-module-worker-acceptance.json
             target/fingerprint-renderer-crash-acceptance.json
+            target/fingerprint-worker-lifecycle-round-*.json
             target/fingerprint-renderer-crash-round-*.json
             target/managed-runtime-acceptance.json
             target/managed-runtime-acceptance-round-*.json

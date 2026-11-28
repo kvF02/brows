@@ -2181,6 +2181,24 @@ mod tests {
             "controller exited: {:?}",
             controller.wire.policy_failure.lock().unwrap()
         );
+        let missing = fixture.missing_proof_kinds(&initial);
+        if !missing.is_empty() {
+            let wire = &controller.wire;
+            let controller_events = wire.trace.lock().unwrap().clone();
+            browser.write_report_status(
+                "worker-lifecycle",
+                json!({
+                    "stage": "initial-first-scripts",
+                    "proofCount": initial.len(),
+                    "missingKinds": missing,
+                    "fixture": fixture.socket_evidence(0),
+                    "controllerOriginUnixMs": wire.trace_epoch_ms,
+                    "controllerEvents": controller_events,
+                }),
+                false,
+            );
+            panic!("initial Worker lifecycle proofs missing: {missing:?}");
+        }
         assert_eq!(
             initial
                 .iter()

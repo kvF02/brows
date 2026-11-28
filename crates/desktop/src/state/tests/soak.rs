@@ -163,19 +163,19 @@ fn exercise(root: &Path, duration: Duration) {
     let startup_deadline = startup_started + Duration::from_secs(150);
     let data = root.join("data");
     fs::create_dir(&data).expect("soak profile directory must be fresh");
-    let fixture = ControlFixture::start(false);
+    let fixture = ControlFixture::start_soak_origins(11);
     let state = AppState::production(data.clone()).unwrap();
     let mut timings = Vec::new();
     let (sessions, profiles) = start_capacity_profiles(
         &state,
-        |index| format!("{}/soak/{index}", fixture.url),
+        |index| format!("{}/soak/{index}", fixture.origin_url(index)),
         |sessions| {
             timings.push(StartupTiming {
                 launch_returned_ms: startup_started.elapsed().as_millis(),
                 ..StartupTiming::default()
             });
             let next_batch = if matches!(sessions.len(), 2 | 4 | 6 | 8) {
-                (Instant::now() + Duration::from_secs(2)).min(startup_deadline)
+                (Instant::now() + Duration::from_secs(15)).min(startup_deadline)
             } else {
                 Instant::now()
             };
@@ -185,7 +185,11 @@ fn exercise(root: &Path, duration: Duration) {
                     &mut timings,
                     startup_started.elapsed().as_millis(),
                 );
-                if Instant::now() >= next_batch {
+                let batch_ready = timings.iter().rev().take(2).all(|timing| {
+                    timing.first_document_observed_ms.is_some()
+                        && timing.first_heartbeat_observed_ms.is_some()
+                });
+                if batch_ready || Instant::now() >= next_batch {
                     break;
                 }
                 thread::sleep(Duration::from_millis(100));
@@ -239,7 +243,8 @@ fn exercise(root: &Path, duration: Duration) {
             };
             serde_json::json!({"index":index,"profileId":profiles[index],
             "documentRequests":count("document"),"heartbeats":count("heartbeat"),
-            "processRunning":state.browsers.is_running(id).ok(),"timing":timings[index]})
+            "processRunning":state.browsers.is_running(id).ok(),"timing":timings[index],
+            "socketEvidence":fixture.socket_evidence(index)})
         })
         .collect();
     let report =
@@ -261,7 +266,7 @@ fn exercise(root: &Path, duration: Duration) {
         "runtimeVersion": edge.version,
         "edgeExecutable": edge.executable_path,
         "profileRoot": data.join("profiles").canonicalize().unwrap(),
-        "victimPage": format!("{}/soak/0", fixture.url),
+        "victimPage": format!("{}/soak/0", fixture.origin_url(0)),
         "profileId": profiles[1],
     });
     write_marker(root, "steady-ready.json", ready.to_string().as_bytes());
