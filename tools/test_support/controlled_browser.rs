@@ -45,12 +45,27 @@ impl DocumentGate {
     }
 }
 
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SocketEvent {
+    unix_ms: u128,
+    connection_id: u64,
+    stage: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    peer_port: Option<u16>,
+}
+
 #[derive(Debug, Default)]
 struct FixtureTrace {
-    events: std::sync::Mutex<VecDeque<(u128, u64, &'static str)>>,
+    events: std::sync::Mutex<VecDeque<SocketEvent>>,
+    soak_index: Option<usize>,
 }
 impl FixtureTrace {
     fn record(&self, id: u64, stage: &'static str) {
+        self.record_socket(id, stage, None);
+    }
+
+    fn record_socket(&self, id: u64, stage: &'static str, peer_port: Option<u16>) {
         let mut events = self.events.lock().unwrap();
         if events.len() == 128 {
             events.pop_front();
@@ -58,12 +73,17 @@ impl FixtureTrace {
         let time = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default();
-        events.push_back((time.as_millis(), id, stage));
+        events.push_back(SocketEvent {
+            unix_ms: time.as_millis(),
+            connection_id: id,
+            stage,
+            peer_port,
+        });
     }
 
     fn dump(&self) {
         let events = self.events.lock().unwrap();
-        eprintln!("loopback fixture trace (Unix ms, connection, stage): {events:?}");
+        eprintln!("loopback fixture socket events: {events:?}");
     }
 }
 
@@ -71,24 +91,23 @@ struct Preconnection {
     id: u64,
     stream: TcpStream,
     accepted: Instant,
+    trace: Arc<FixtureTrace>,
 }
 
-fn dispatch_readable(
-    pending: &mut VecDeque<Preconnection>,
-    send: &SyncSender<(u64, TcpStream)>,
-    trace: &FixtureTrace,
-) {
+fn dispatch_readable(pending: &mut VecDeque<Preconnection>, send: &SyncSender<Preconnection>) {
     use std::io::ErrorKind;
 
     for _ in 0..pending.len() {
         let connection = pending.pop_front().unwrap();
         let id = connection.id;
+        let trace = &connection.trace;
         // Peek leaves the first byte in the socket for the HTTP reader.
         match connection.stream.peek(&mut [0]) {
             Ok(0) => trace.record(id, "preconnect-eof"),
             Ok(_) => {
+                let trace = Arc::clone(trace);
                 trace.record(id, "first-byte-ready");
-                if send.try_send((id, connection.stream)).is_err() {
+                if send.try_send(connection).is_err() {
                     trace.record(id, "queue-rejected");
                 }
             }
@@ -105,6 +124,12 @@ fn dispatch_readable(
 }
 
 #[derive(Debug)]
+struct FixtureOrigin {
+    url: String,
+    trace: Arc<FixtureTrace>,
+}
+
+#[derive(Debug)]
 pub(crate) struct ControlFixture {
     pub(crate) url: String,
     pub(crate) proofs: Arc<std::sync::Mutex<Vec<CapturedProof>>>,
@@ -112,7 +137,7 @@ pub(crate) struct ControlFixture {
     thread: Option<std::thread::JoinHandle<()>>,
     service_version: Arc<std::sync::atomic::AtomicUsize>,
     modules: bool,
-    trace: Arc<FixtureTrace>,
+    origins: Vec<FixtureOrigin>,
     document_gate: Arc<DocumentGate>,
 }
 impl ControlFixture {
@@ -120,7 +145,14 @@ impl ControlFixture {
         if self.document_gate.wait_requested() {
             return Ok(());
         }
-        Err(self.trace.events.lock().unwrap().iter().copied().collect())
+        Err(self.origins[0]
+            .trace
+            .events
+            .lock()
+            .unwrap()
+            .iter()
+            .map(|e| (e.unix_ms, e.connection_id, e.stage))
+            .collect())
     }
     pub(crate) fn release_document(&self) {
         self.document_gate.release();
@@ -149,7 +181,7 @@ impl ControlFixture {
                 return proofs;
             }
             if std::time::Instant::now() >= deadline {
-                self.trace.dump();
+                self.origins[0].trace.dump();
                 return proofs;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -196,7 +228,7 @@ impl ControlFixture {
                 return proofs;
             }
             if std::time::Instant::now() >= deadline {
-                self.trace.dump();
+                self.origins[0].trace.dump();
                 return proofs;
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
@@ -304,6 +336,18 @@ impl ControlFixture {
                 .map_or((route, false), |index| (index, true));
             if let Ok(index) = index.parse::<usize>() {
                 if index < 11 && (!heartbeat || headers.starts_with("POST ")) {
+                    if trace.soak_index.is_some_and(|assigned| assigned != index) {
+                        trace.record(id, "unexpected-soak-route");
+                        let response = b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+                        let _ = stream.write_all(response);
+                        return;
+                    }
+                    let stage = if heartbeat {
+                        "soak-heartbeat"
+                    } else {
+                        "soak-document"
+                    };
+                    trace.record(id, stage);
                     let key = if heartbeat {
                         if body == b"canvas-changed" {
                             format!("/soak/{index}/canvas-changed")
@@ -338,7 +382,11 @@ impl ControlFixture {
                         "HTTP/1.1 200 OK\r\nContent-Type: {kind}\r\nContent-Length: {}\r\nConnection: close\r\nCache-Control: no-store\r\n\r\n{content}",
                         content.len()
                     );
-                    let _ = stream.write_all(response.as_bytes());
+                    match stream.write_all(response.as_bytes()) {
+                        Ok(()) if !heartbeat => trace.record(id, "soak-document-written"),
+                        Err(_) => trace.record(id, "response-write-error"),
+                        _ => {}
+                    }
                     return;
                 }
             }
@@ -468,14 +516,52 @@ impl ControlFixture {
         }
     }
 
+    pub(crate) fn origin_url(&self, index: usize) -> &str {
+        &self.origins[index].url
+    }
+
+    pub(crate) fn socket_evidence(&self, index: usize) -> serde_json::Value {
+        let origin = &self.origins[index];
+        let events = origin.trace.events.lock().unwrap();
+        serde_json::json!({"origin": origin.url, "events": &*events})
+    }
+
     pub(crate) fn start(modules: bool) -> Self {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let url = format!("http://{}", listener.local_addr().unwrap());
-        let listener_v6 =
-            std::net::TcpListener::bind(("::1", listener.local_addr().unwrap().port())).unwrap();
-        let cross_origin = format!("http://localhost:{}", listener.local_addr().unwrap().port());
-        listener.set_nonblocking(true).unwrap();
-        listener_v6.set_nonblocking(true).unwrap();
+        Self::bind(modules, None)
+    }
+
+    pub(crate) fn start_soak_origins(count: usize) -> Self {
+        Self::bind(false, Some(count))
+    }
+
+    fn bind(modules: bool, soak_origins: Option<usize>) -> Self {
+        use std::net::TcpListener;
+
+        let count = soak_origins.unwrap_or(1);
+        assert!(count > 0);
+        let mut listeners = Vec::new();
+        let mut origins = Vec::new();
+        for index in 0..count {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let trace = Arc::new(FixtureTrace {
+                soak_index: soak_origins.map(|_| index),
+                ..FixtureTrace::default()
+            });
+            listener.set_nonblocking(true).unwrap();
+            listeners.push((listener, trace.clone()));
+            if index == 0 {
+                let v6 = TcpListener::bind(("::1", address.port())).unwrap();
+                v6.set_nonblocking(true).unwrap();
+                listeners.push((v6, trace.clone()));
+            }
+            origins.push(FixtureOrigin {
+                url: format!("http://{address}"),
+                trace,
+            });
+        }
+        let url = origins[0].url.clone();
+        let cross_origin = url.replace("127.0.0.1", "localhost");
         let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let proofs = Arc::new(std::sync::Mutex::new(Vec::new()));
         let halt = stop.clone();
@@ -484,12 +570,10 @@ impl ControlFixture {
         let version = service_version.clone();
         let document_gate = Arc::new(DocumentGate::default());
         let gate = document_gate.clone();
-        let trace = Arc::new(FixtureTrace::default());
-        let server_trace = trace.clone();
         let thread = std::thread::spawn(move || {
             // Browsers preconnect before sending headers. One idle socket
             // must not block or prematurely close unrelated script loads.
-            let (send, receive) = std::sync::mpsc::sync_channel::<(u64, std::net::TcpStream)>(64);
+            let (send, receive) = std::sync::mpsc::sync_channel::<Preconnection>(64);
             let receive = Arc::new(std::sync::Mutex::new(receive));
             std::thread::scope(|scope| {
                 for _ in 0..16 {
@@ -499,7 +583,6 @@ impl ControlFixture {
                     let cross_origin = &cross_origin;
                     let version = version.clone();
                     let gate = gate.clone();
-                    let trace = &server_trace;
                     scope.spawn(move || {
                         while !halt.load(std::sync::atomic::Ordering::Acquire) {
                             let next = receive
@@ -507,14 +590,14 @@ impl ControlFixture {
                                 .unwrap()
                                 .recv_timeout(std::time::Duration::from_millis(100));
                             match next {
-                                Ok((id, stream)) => Self::serve(
-                                    stream,
+                                Ok(connection) => Self::serve(
+                                    connection.stream,
                                     &output,
                                     cross_origin,
                                     &version,
                                     modules,
                                     &gate,
-                                    (trace, id),
+                                    (&connection.trace, connection.id),
                                 ),
                                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
                                 Err(_) => break,
@@ -525,42 +608,39 @@ impl ControlFixture {
                 let mut id = 0;
                 let mut pending = VecDeque::new();
                 while !halt.load(std::sync::atomic::Ordering::Acquire) {
-                    let accepted = listener.accept().or_else(|error| {
-                        if error.kind() == std::io::ErrorKind::WouldBlock {
-                            listener_v6.accept()
-                        } else {
-                            Err(error)
-                        }
-                    });
-                    match accepted {
-                        Ok((stream, peer)) => {
-                            id += 1;
-                            let stage = if peer.is_ipv4() {
-                                "accept-v4"
-                            } else {
-                                "accept-v6"
-                            };
-                            server_trace.record(id, stage);
-                            if pending.len() >= MAX_PRECONNECTIONS {
-                                server_trace.record(id, "preconnect-limit");
-                            } else if stream.set_nonblocking(true).is_err() {
-                                server_trace.record(id, "preconnect-error");
-                            } else {
-                                pending.push_back(Preconnection {
-                                    id,
-                                    stream,
-                                    accepted: Instant::now(),
-                                });
+                    let mut accepted = false;
+                    for (listener, trace) in &listeners {
+                        match listener.accept() {
+                            Ok((stream, peer)) => {
+                                accepted = true;
+                                id += 1;
+                                let stage = if peer.is_ipv4() {
+                                    "accept-v4"
+                                } else {
+                                    "accept-v6"
+                                };
+                                trace.record_socket(id, stage, Some(peer.port()));
+                                if pending.len() >= MAX_PRECONNECTIONS {
+                                    trace.record(id, "preconnect-limit");
+                                } else if stream.set_nonblocking(true).is_err() {
+                                    trace.record(id, "preconnect-error");
+                                } else {
+                                    pending.push_back(Preconnection {
+                                        id,
+                                        stream,
+                                        accepted: Instant::now(),
+                                        trace: trace.clone(),
+                                    });
+                                }
                             }
-                        }
-                        Err(error) => {
-                            if error.kind() != std::io::ErrorKind::WouldBlock {
-                                server_trace.record(0, "accept-error");
-                            }
-                            std::thread::sleep(std::time::Duration::from_millis(10));
+                            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                            Err(_) => trace.record(0, "accept-error"),
                         }
                     }
-                    dispatch_readable(&mut pending, &send, &server_trace);
+                    dispatch_readable(&mut pending, &send);
+                    if !accepted {
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
                 }
                 drop(send);
             });
@@ -572,7 +652,7 @@ impl ControlFixture {
             thread: Some(thread),
             service_version,
             modules,
-            trace,
+            origins,
             document_gate,
         }
     }
@@ -615,14 +695,17 @@ mod tests {
         assert!(fixture.proofs.lock().unwrap().is_empty());
         fixture.release_document();
         assert!(client.join().unwrap().starts_with("HTTP/1.1 200 OK\r\n"));
-        let events = fixture.trace.events.lock().unwrap();
-        let request = events.iter().find(|e| e.2 == "document-headers").unwrap();
+        let events = fixture.origins[0].trace.events.lock().unwrap();
+        let request = events
+            .iter()
+            .find(|e| e.stage == "document-headers")
+            .unwrap();
         assert!(events
             .iter()
-            .any(|e| e.1 == request.1 && e.2 == "accept-v4"));
-        assert!(events
-            .iter()
-            .any(|e| e.1 == request.1 && e.2 == "document-response-written"));
+            .any(|e| e.connection_id == request.connection_id && e.stage == "accept-v4"));
+        assert!(events.iter().any(|e| {
+            e.connection_id == request.connection_id && e.stage == "document-response-written"
+        }));
     }
 
     #[test]
@@ -634,9 +717,9 @@ mod tests {
             .collect();
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
-            let events = fixture.trace.events.lock().unwrap();
-            if events.iter().filter(|e| e.2 == "accept-v4").count() == idle.len() {
-                assert!(!events.iter().any(|e| e.2 == "reading"));
+            let events = fixture.origins[0].trace.events.lock().unwrap();
+            if events.iter().filter(|e| e.stage == "accept-v4").count() == idle.len() {
+                assert!(!events.iter().any(|e| e.stage == "reading"));
                 break;
             }
             drop(events);
@@ -662,6 +745,60 @@ mod tests {
         // The HTTP reader has a 3s timeout once a request begins.
         std::thread::sleep(Duration::from_millis(3300));
         request(idle.pop().unwrap());
+    }
+
+    #[test]
+    fn soak_origins_bind_idle_and_http_sockets_to_the_assigned_profile() {
+        let fixture = ControlFixture::start_soak_origins(2);
+        let connect = |index| {
+            TcpStream::connect(fixture.origin_url(index).strip_prefix("http://").unwrap()).unwrap()
+        };
+        let idle = connect(0);
+        let idle_port = idle.local_addr().unwrap().port();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while fixture.origins[0].trace.events.lock().unwrap().is_empty() {
+            assert!(
+                Instant::now() < deadline,
+                "fixture did not accept the idle socket"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let request = |mut stream: TcpStream, path: &str| {
+            let port = stream.local_addr().unwrap().port();
+            stream
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            write!(stream, "GET {path} HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+            let mut response = String::new();
+            stream.read_to_string(&mut response).unwrap();
+            (port, response)
+        };
+        let (port, response) = request(connect(1), "/soak/1");
+        assert!(response.starts_with("HTTP/1.1 200"));
+        let evidence = fixture.socket_evidence(1);
+        let events = evidence["events"].as_array().unwrap();
+        let accepted = events
+            .iter()
+            .find(|e| e["peerPort"].as_u64() == Some(u64::from(port)))
+            .unwrap();
+        let id = &accepted["connectionId"];
+        assert!(events
+            .iter()
+            .any(|e| &e["connectionId"] == id && e["stage"] == "soak-document"));
+        let (_, response) = request(connect(1), "/soak/0");
+        assert!(response.starts_with("HTTP/1.1 404"));
+        assert!(!fixture
+            .proofs
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(path, _, _)| path == "/soak/0/document"));
+        let evidence = fixture.socket_evidence(0);
+        let events = evidence["events"].as_array().unwrap();
+        assert!(events
+            .iter()
+            .any(|e| e["peerPort"].as_u64() == Some(u64::from(idle_port))));
+        assert!(!events.iter().any(|e| e["stage"] == "first-byte-ready"));
     }
 
     #[test]
