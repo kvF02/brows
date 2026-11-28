@@ -1,5 +1,11 @@
 // Shared, loopback-only browser acceptance fixture. Compiled only by test modules.
-use std::sync::Arc;
+use std::collections::VecDeque;
+use std::net::TcpStream;
+use std::sync::{mpsc::SyncSender, Arc};
+use std::time::{Duration, Instant};
+
+const PROOF_WAIT: Duration = Duration::from_secs(15);
+const MAX_PRECONNECTIONS: usize = 64;
 
 pub(crate) type CapturedProof = (String, String, serde_json::Value);
 
@@ -41,7 +47,7 @@ impl DocumentGate {
 
 #[derive(Debug, Default)]
 struct FixtureTrace {
-    events: std::sync::Mutex<std::collections::VecDeque<(u128, u64, &'static str)>>,
+    events: std::sync::Mutex<VecDeque<(u128, u64, &'static str)>>,
 }
 impl FixtureTrace {
     fn record(&self, id: u64, stage: &'static str) {
@@ -61,6 +67,43 @@ impl FixtureTrace {
     }
 }
 
+struct Preconnection {
+    id: u64,
+    stream: TcpStream,
+    accepted: Instant,
+}
+
+fn dispatch_readable(
+    pending: &mut VecDeque<Preconnection>,
+    send: &SyncSender<(u64, TcpStream)>,
+    trace: &FixtureTrace,
+) {
+    use std::io::ErrorKind;
+
+    for _ in 0..pending.len() {
+        let connection = pending.pop_front().unwrap();
+        let id = connection.id;
+        // Peek leaves the first byte in the socket for the HTTP reader.
+        match connection.stream.peek(&mut [0]) {
+            Ok(0) => trace.record(id, "preconnect-eof"),
+            Ok(_) => {
+                trace.record(id, "first-byte-ready");
+                if send.try_send((id, connection.stream)).is_err() {
+                    trace.record(id, "queue-rejected");
+                }
+            }
+            Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {
+                if connection.accepted.elapsed() < PROOF_WAIT {
+                    pending.push_back(connection);
+                } else {
+                    trace.record(id, "preconnect-timeout");
+                }
+            }
+            Err(_) => trace.record(id, "preconnect-error"),
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(crate) struct ControlFixture {
     pub(crate) url: String,
@@ -73,8 +116,11 @@ pub(crate) struct ControlFixture {
     document_gate: Arc<DocumentGate>,
 }
 impl ControlFixture {
-    pub(crate) fn wait_held_document(&self) -> bool {
-        self.document_gate.wait_requested()
+    pub(crate) fn wait_held_document(&self) -> Result<(), Vec<(u128, u64, &'static str)>> {
+        if self.document_gate.wait_requested() {
+            return Ok(());
+        }
+        Err(self.trace.events.lock().unwrap().iter().copied().collect())
     }
     pub(crate) fn release_document(&self) {
         self.document_gate.release();
@@ -89,7 +135,7 @@ impl ControlFixture {
         kind: &str,
         count: usize,
     ) -> Vec<CapturedProof> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let deadline = Instant::now() + PROOF_WAIT;
         loop {
             let proofs: Vec<_> = self
                 .proofs
@@ -136,7 +182,7 @@ impl ControlFixture {
     }
 
     pub(crate) fn wait_proofs(&self, prefix: &str) -> Vec<CapturedProof> {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+        let deadline = Instant::now() + PROOF_WAIT;
         loop {
             let proofs: Vec<_> = self
                 .proofs
@@ -477,6 +523,7 @@ impl ControlFixture {
                     });
                 }
                 let mut id = 0;
+                let mut pending = VecDeque::new();
                 while !halt.load(std::sync::atomic::Ordering::Acquire) {
                     let accepted = listener.accept().or_else(|error| {
                         if error.kind() == std::io::ErrorKind::WouldBlock {
@@ -494,8 +541,16 @@ impl ControlFixture {
                                 "accept-v6"
                             };
                             server_trace.record(id, stage);
-                            if send.try_send((id, stream)).is_err() {
-                                server_trace.record(id, "queue-rejected");
+                            if pending.len() >= MAX_PRECONNECTIONS {
+                                server_trace.record(id, "preconnect-limit");
+                            } else if stream.set_nonblocking(true).is_err() {
+                                server_trace.record(id, "preconnect-error");
+                            } else {
+                                pending.push_back(Preconnection {
+                                    id,
+                                    stream,
+                                    accepted: Instant::now(),
+                                });
                             }
                         }
                         Err(error) => {
@@ -505,6 +560,7 @@ impl ControlFixture {
                             std::thread::sleep(std::time::Duration::from_millis(10));
                         }
                     }
+                    dispatch_readable(&mut pending, &send, &server_trace);
                 }
                 drop(send);
             });
@@ -555,7 +611,7 @@ mod tests {
             client.read_to_string(&mut response).unwrap();
             response
         });
-        assert!(fixture.wait_held_document());
+        fixture.wait_held_document().unwrap();
         assert!(fixture.proofs.lock().unwrap().is_empty());
         fixture.release_document();
         assert!(client.join().unwrap().starts_with("HTTP/1.1 200 OK\r\n"));
@@ -567,6 +623,45 @@ mod tests {
         assert!(events
             .iter()
             .any(|e| e.1 == request.1 && e.2 == "document-response-written"));
+    }
+
+    #[test]
+    fn preconnections_wait_for_request_bytes_without_occupying_http_workers() {
+        let fixture = ControlFixture::start(false);
+        let address = fixture.url.strip_prefix("http://").unwrap();
+        let mut idle: Vec<_> = (0..16)
+            .map(|_| TcpStream::connect(address).unwrap())
+            .collect();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let events = fixture.trace.events.lock().unwrap();
+            if events.iter().filter(|e| e.2 == "accept-v4").count() == idle.len() {
+                assert!(!events.iter().any(|e| e.2 == "reading"));
+                break;
+            }
+            drop(events);
+            assert!(
+                Instant::now() < deadline,
+                "fixture did not accept idle sockets"
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let request = |mut socket: TcpStream| {
+            socket
+                .set_read_timeout(Some(Duration::from_secs(3)))
+                .unwrap();
+            socket
+                .write_all(b"GET /version HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
+            let mut response = String::new();
+            socket.read_to_string(&mut response).unwrap();
+            assert!(response.ends_with("\r\n\r\n0"));
+        };
+        request(TcpStream::connect(address).unwrap());
+        // The HTTP reader has a 3s timeout once a request begins.
+        std::thread::sleep(Duration::from_millis(3300));
+        request(idle.pop().unwrap());
     }
 
     #[test]

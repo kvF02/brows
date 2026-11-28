@@ -62,12 +62,31 @@ jobs:
         shell: pwsh
         run: |
           foreach ($round in 1..6) {
-            foreach ($test in @('private_pending_navigation_acceptance', 'private_worker_lifecycle_acceptance', 'private_renderer_crash_acceptance', 'private_module_worker_acceptance')) {
+            $directory = "target/navigation-lifecycle-rounds/round-$round"
+            New-Item -ItemType Directory -Force $directory | Out-Null
+            $results = [ordered]@{}
+            foreach ($name in @('pending-navigation', 'worker-lifecycle', 'renderer-crash', 'module-worker')) {
+              $test = "session_control::tests::private_$($name.Replace('-', '_'))_acceptance"
+              $file = "fingerprint-$name-acceptance.json"
+              $report = Join-Path target $file
+              if (Test-Path -LiteralPath $report) { Remove-Item -LiteralPath $report }
               Write-Output "Lifecycle regression round $round / $test"
-              cargo +1.97.1 test -p brows-adapters-runtime $test --locked -- --ignored --nocapture
-              if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+              cargo +1.97.1 test -p brows-adapters-runtime $test --locked -- --exact --ignored --nocapture
+              $code = $LASTEXITCODE
+              $written = Test-Path -LiteralPath $report
+              $results[$name] = @{ cargoExitCode = $code; reportWritten = $written }
+              $results | ConvertTo-Json -Depth 4 | Set-Content "$directory/results.json"
+              if ($written) { Move-Item -LiteralPath $report -Destination "$directory/$file" -Force }
+              if ($code -ne 0) { exit $code }
+              if (!$written) { throw "Missing round $round report for $test" }
+              $evidence = Get-Content -LiteralPath "$directory/$file" -Raw | ConvertFrom-Json
+              if ($evidence.assertionsPassed -isnot [bool] -or !$evidence.assertionsPassed) {
+                throw "Incomplete round $round report for $test"
+              }
             }
           }
+          # Publish the legacy aggregate filenames only after every round passes.
+          Copy-Item "$directory/fingerprint-*-acceptance.json" -Destination target
       - name: Keep document network errors separate from session-control failure
         timeout-minutes: 1
         run: cargo +1.97.1 test -p brows-adapters-runtime private_navigation_error_result_acceptance --locked -- --ignored --nocapture
@@ -76,6 +95,7 @@ jobs:
         with:
           name: navigation-lifecycle-evidence
           path: |
+            target/navigation-lifecycle-rounds/
             target/fingerprint-pending-navigation-acceptance.json
             target/fingerprint-native-navigator-acceptance.json
             target/fingerprint-startup-navigation-stress-acceptance.json
